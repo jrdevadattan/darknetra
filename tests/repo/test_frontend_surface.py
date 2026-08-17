@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -69,3 +70,8 @@ def test_social_demo_auth_is_removed() -> None:
             text = page.read_text(encoding="utf-8")
             assert "GoogleButton" not in text
             assert "Continue with Google" not in text
+
+
+def test_calendar_showcase_dependency_is_not_retained() -> None:
+    package = json.loads((WEB / "package.json").read_text(encoding="utf-8"))
+    assert "@fullcalendar/react" not in package.get("dependencies", {})
