@@ -2,9 +2,6 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
-
 from darknetra_api.authz.permissions import Permission
 from darknetra_api.authz.policy import ROLE_PERMISSIONS
 from darknetra_api.dependencies.auth import DbSession, require_global_permission
@@ -13,6 +10,8 @@ from darknetra_api.models.case_membership import CaseMembership, CaseMembershipR
 from darknetra_api.models.enums import GlobalRole
 from darknetra_api.models.user import User
 from darknetra_api.schemas.audit import AuditListResponse
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select
 
 router = APIRouter(prefix="/audit", tags=["audit"])
 AuditReader = Annotated[User, Depends(require_global_permission(Permission.AUDIT_READ))]
