@@ -32,7 +32,7 @@ jobs:
           uv run pytest tests/repo -v
       - name: Commit generated lock
         run: |
-          if git diff --quiet -- uv.lock; then
+          if [ -z "$(git status --porcelain -- uv.lock)" ]; then
             exit 0
           fi
           git config user.name 'github-actions[bot]'
