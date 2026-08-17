@@ -4,7 +4,8 @@ from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from sqlalchemy import event
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, Mapper, mapped_column
 
 from darknetra_api.db.base import Base
