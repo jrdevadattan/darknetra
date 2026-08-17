@@ -1,6 +1,6 @@
 name: Plan 02 Task 6 case lifecycle
 
-# Retry marker: case lifecycle implementation is wired for behavioral verification.
+# Retry marker: case lifecycle code is Ruff-clean and ready for behavioral verification.
 on:
   push:
     branches: [testing-codex]
