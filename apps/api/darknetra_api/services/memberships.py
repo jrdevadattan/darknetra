@@ -123,9 +123,11 @@ async def update_case_member(
         raise MembershipConflict("case owner must retain CASE_OWNER membership")
 
     existing_roles = set(await get_membership_roles(session, membership.id))
-    if GlobalRole.CASE_OWNER in existing_roles and GlobalRole.CASE_OWNER not in roles:
-        if await count_case_owners(session, case_id=case_id) <= 1:
-            raise MembershipConflict("cannot remove the last CASE_OWNER")
+    removing_case_owner = (
+        GlobalRole.CASE_OWNER in existing_roles and GlobalRole.CASE_OWNER not in roles
+    )
+    if removing_case_owner and await count_case_owners(session, case_id=case_id) <= 1:
+        raise MembershipConflict("cannot remove the last CASE_OWNER")
 
     await session.execute(
         sa.delete(CaseMembershipRole).where(
