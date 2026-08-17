@@ -1,0 +1,69 @@
+name: Diagnose calendar CSS materialization
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/diagnose-calendar-css.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Prepare pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.15.0 --activate
+          pnpm install --frozen-lockfile
+      - name: Inspect before remove
+        shell: bash
+        run: |
+          echo '=== git status before ==='
+          git status --short
+          echo '=== tracked css before ==='
+          git ls-files 'apps/web/src/**/*.css'
+          echo '=== all css before ==='
+          find apps/web/src -type f -name '*.css' -print | sort
+          echo '=== calendar references before ==='
+          grep -R -n -E 'calendar\.css|@fullcalendar/react' apps/web/src || true
+      - name: Remove calendar package
+        run: pnpm --filter @darknetra/web remove @fullcalendar/react
+      - name: Inspect after remove
+        shell: bash
+        run: |
+          echo '=== git status after ==='
+          git status --short
+          echo '=== tracked css after ==='
+          git ls-files 'apps/web/src/**/*.css'
+          echo '=== all css after ==='
+          find apps/web/src -type f -name '*.css' -print | sort
+          echo '=== input.css after ==='
+          if [ -f apps/web/src/app/input.css ]; then sed -n '1,80p' apps/web/src/app/input.css; else echo 'NO input.css'; fi
+          echo '=== calendar.css after ==='
+          if [ -f apps/web/src/styles/calendar.css ]; then sed -n '1,80p' apps/web/src/styles/calendar.css; else echo 'NO calendar.css'; fi
+          echo '=== calendar references after ==='
+          grep -R -n -E 'calendar\.css|@fullcalendar/react' apps/web/src || true
+      - name: Build after remove
+        shell: bash
+        run: |
+          set +e
+          pnpm --filter @darknetra/web build > /tmp/build.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/build.log
+          echo "BUILD_STATUS=$status"
+          echo '=== git status after build ==='
+          git status --short
+          echo '=== all css after build ==='
+          find apps/web/src -type f -name '*.css' -print | sort
+          exit "$status"
