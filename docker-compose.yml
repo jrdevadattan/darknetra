@@ -1,0 +1,41 @@
+name: darknetra
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api.Dockerfile
+    environment:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_BUILD_VERSION: docker-dev
+    networks:
+      - app
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import json,urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/live',timeout=3)); assert data['status']=='ok'"
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 5s
+
+  web:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/web.Dockerfile
+      args:
+        NEXT_PUBLIC_DARKNETRA_API_BASE_URL: http://localhost:8000
+    environment:
+      DARKNETRA_API_BASE_URL: http://api:8000
+      NEXT_PUBLIC_DARKNETRA_API_BASE_URL: http://localhost:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - app
+
+networks:
+  app:
+    driver: bridge

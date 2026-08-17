@@ -1,0 +1,15 @@
+.git
+.github
+**/node_modules
+**/.next
+.venv
+.pytest_cache
+.ruff_cache
+coverage
+playwright-report
+test-results
+/data
+/evidence-store
+.env
+.env.*
+!.env.example
