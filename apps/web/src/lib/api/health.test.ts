@@ -31,11 +31,25 @@ describe("fetchHealth", () => {
 
   it("throws a typed http error for non-2xx responses", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 503 }));
-    await expect(fetchHealth()).rejects.toMatchObject<HealthApiError>({ kind: "http", status: 503 });
+
+    try {
+      await fetchHealth();
+      throw new Error("Expected fetchHealth to reject");
+    } catch (error) {
+      expect(error).toBeInstanceOf(HealthApiError);
+      expect(error).toMatchObject({ kind: "http", status: 503 });
+    }
   });
 
   it("throws a typed network error when fetch rejects", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("connection refused")));
-    await expect(fetchHealth()).rejects.toMatchObject<HealthApiError>({ kind: "network" });
+
+    try {
+      await fetchHealth();
+      throw new Error("Expected fetchHealth to reject");
+    } catch (error) {
+      expect(error).toBeInstanceOf(HealthApiError);
+      expect(error).toMatchObject({ kind: "network" });
+    }
   });
 });
