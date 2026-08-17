@@ -3,7 +3,6 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-
 from darknetra_api.security.csrf import generate_csrf_token, hash_csrf_token, verify_csrf_token
 from darknetra_api.security.tokens import (
     AccessTokenError,
