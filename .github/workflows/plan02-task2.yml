@@ -1,0 +1,80 @@
+name: Plan 02 Task 2 schema
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan02-task2.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_POSTGRES_PASSWORD: darknetra-dev-only
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-dev-only@127.0.0.1:5432/darknetra
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - name: Sync locked Python workspace
+        run: uv sync --all-packages --dev --frozen
+      - name: Start PostgreSQL
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres
+      - name: Wait for PostgreSQL
+        run: |
+          for i in $(seq 1 30); do
+            if docker compose -f docker-compose.yml -f docker-compose.dev.yml exec -T postgres pg_isready -U darknetra -d darknetra; then exit 0; fi
+            sleep 2
+          done
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml logs postgres
+          exit 1
+      - name: Lint model layer
+        run: uv run ruff check .
+      - name: Generate migration from metadata
+        run: |
+          rm -f apps/api/alembic/versions/.gitkeep
+          uv run alembic -c apps/api/alembic.ini revision --autogenerate -m 'create identity and case tables'
+          uv run ruff check apps/api/alembic/versions --fix
+          uv run ruff check .
+      - name: Apply migration and verify intended tables
+        run: |
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          python - <<'PY'
+          import os
+          import psycopg
+          expected = {'users','auth_sessions','cases','case_memberships','case_membership_roles','audit_events','alembic_version'}
+          with psycopg.connect(os.environ['DARKNETRA_DATABASE_URL'].replace('+psycopg','')) as conn:
+              with conn.cursor() as cur:
+                  cur.execute("select tablename from pg_tables where schemaname='public'")
+                  actual = {row[0] for row in cur.fetchall()}
+          if actual != expected:
+              raise SystemExit(f'unexpected public tables: {sorted(actual)}')
+          PY
+          uv run pytest apps/api/tests/integration/test_schema_constraints.py -v
+      - name: Verify reversible migration
+        run: |
+          uv run alembic -c apps/api/alembic.ini downgrade base
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run pytest apps/api/tests/integration/test_schema_constraints.py -q
+      - name: Commit generated migration
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/api/alembic/versions
+          if ! git diff --cached --quiet; then
+            git commit -m 'feat: add identity case and audit migration [skip ci]'
+            git push origin HEAD:testing-codex
+          fi
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml down -v --remove-orphans
