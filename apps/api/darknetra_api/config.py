@@ -9,8 +9,20 @@ class Settings(BaseSettings):
     database_url: str = (
         "postgresql+psycopg://darknetra:darknetra-dev-only@127.0.0.1:5432/darknetra"
     )
+    web_origin: str = "http://localhost:3000"
+    jwt_signing_key_b64: str = ""
 
     model_config = SettingsConfigDict(env_prefix="DARKNETRA_", extra="ignore")
+
+    @property
+    def auth_cookie_secure(self) -> bool:
+        local_http_origins = {"http://localhost:3000", "http://127.0.0.1:3000"}
+        return not (self.environment == "development" and self.web_origin in local_http_origins)
+
+    def require_jwt_signing_key_b64(self) -> str:
+        if not self.jwt_signing_key_b64:
+            raise RuntimeError("DARKNETRA_JWT_SIGNING_KEY_B64 must be configured")
+        return self.jwt_signing_key_b64
 
 
 @lru_cache
