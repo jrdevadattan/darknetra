@@ -1,12 +1,11 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
-from sqlalchemy import select
-
 from darknetra_api.authz.permissions import Permission
 from darknetra_api.dependencies.auth import DbSession, require_global_permission
 from darknetra_api.models.user import User
 from darknetra_api.schemas.users import UserListResponse
+from fastapi import APIRouter, Depends
+from sqlalchemy import select
 
 router = APIRouter(prefix="/users", tags=["users"])
 UserReader = Annotated[User, Depends(require_global_permission(Permission.USER_READ))]
