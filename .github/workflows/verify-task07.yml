@@ -56,4 +56,4 @@ jobs:
           git commit -m 'chore: lock Task 07 API dependencies [skip ci]'
           git push origin HEAD:testing-codex
 
-# Verification revision: import-order hygiene fixed on the committed API package.
+# Verification revision: API and frontend hygiene fixes applied on committed state.
