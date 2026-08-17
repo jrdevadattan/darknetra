@@ -1,6 +1,6 @@
 name: Plan 02 Task 2 schema
 
-# Retry marker: model lint is clean and schema inspection uses the locked uv environment.
+# Retry marker: generated downgrade now removes PostgreSQL enum types after dependent tables.
 on:
   push:
     branches: [testing-codex]
@@ -45,6 +45,27 @@ jobs:
         run: |
           rm -f apps/api/alembic/versions/.gitkeep
           uv run alembic -c apps/api/alembic.ini revision --autogenerate -m 'create identity and case tables'
+          uv run python - <<'PY'
+          from pathlib import Path
+
+          migrations = list(Path('apps/api/alembic/versions').glob('*.py'))
+          if len(migrations) != 1:
+              raise SystemExit(f'expected one initial migration, found {len(migrations)}')
+          path = migrations[0]
+          lines = path.read_text(encoding='utf-8').splitlines()
+          target = next(
+              (index for index, line in enumerate(lines) if 'op.drop_table' in line and 'users' in line),
+              None,
+          )
+          if target is None:
+              raise SystemExit('could not locate final users table drop in generated downgrade')
+          lines[target + 1:target + 1] = [
+              '    op.execute("DROP TYPE IF EXISTS case_sensitivity")',
+              '    op.execute("DROP TYPE IF EXISTS case_status")',
+              '    op.execute("DROP TYPE IF EXISTS global_role")',
+          ]
+          path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+          PY
           uv run ruff check apps/api/alembic/versions --fix
           uv run ruff check .
       - name: Apply migration and verify intended tables
