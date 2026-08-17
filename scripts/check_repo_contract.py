@@ -16,17 +16,17 @@ def check_vendor_attribution(repo_root: Path) -> list[str]:
     else:
         text = license_path.read_text(encoding="utf-8")
         if "Copyright (c) 2024 Mohammed Arham Khan" not in text:
-            errors.append("upstream copyright notice missing")
+            errors.append("missing upstream copyright")
         if "MIT License" not in text:
-            errors.append("upstream MIT license text missing")
+            errors.append("missing MIT license text")
 
     if not vendor_doc.is_file():
-        errors.append("missing dashboard vendor provenance document")
+        errors.append("missing vendor provenance")
     else:
         text = vendor_doc.read_text(encoding="utf-8")
         if UPSTREAM_REPO not in text:
-            errors.append("vendor document missing upstream repository")
+            errors.append("missing upstream repo")
         if UPSTREAM_COMMIT not in text:
-            errors.append("vendor document missing pinned upstream commit")
+            errors.append("missing pinned commit")
 
     return errors
