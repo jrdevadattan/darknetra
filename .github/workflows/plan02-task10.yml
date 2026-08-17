@@ -37,7 +37,7 @@ jobs:
         if: steps.prepare.outcome == 'success'
         continue-on-error: true
         run: |
-          pnpm --filter @darknetra/web test -- src/features/cases/queries.test.ts src/features/cases/live-case-views.test.tsx
+          pnpm --filter @darknetra/web test -- src/features/cases/queries.test.ts src/features/cases/live-case-views.test.tsx src/features/overview/overview-live-view.test.tsx
 
       - id: fixture_sweep
         name: Prove production routes do not import case fixtures
