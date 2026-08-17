@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main, testing-codex]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - name: Sync Python workspace
+        run: uv sync --all-packages --dev --frozen
+      - name: Ruff
+        run: uv run ruff check .
+      - name: Pytest
+        run: uv run pytest -q
+
+  web:
+    runs-on: ubuntu-latest
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Prepare pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.15.0 --activate
+          pnpm install --frozen-lockfile
+      - name: Lint
+        run: pnpm --filter @darknetra/web lint
+      - name: Typecheck
+        run: pnpm --filter @darknetra/web typecheck
+      - name: Unit tests
+        run: pnpm --filter @darknetra/web test
+      - name: Production build
+        run: pnpm --filter @darknetra/web build
+
+  docker:
+    runs-on: ubuntu-latest
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+      - name: Build Compose images
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml build
