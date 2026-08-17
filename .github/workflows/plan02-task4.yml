@@ -1,5 +1,6 @@
 name: Plan 02 Task 4 rotating auth
 
+# Retry marker: auth lint fixes applied and generated signing key is masked before export.
 on:
   push:
     branches: [testing-codex]
@@ -43,11 +44,14 @@ jobs:
           version: '0.12.4'
       - name: Generate runtime-only auth signing key
         run: |
-          python - <<'PY' >> "$GITHUB_ENV"
+          KEY="$(python - <<'PY'
           import base64
           import secrets
-          print("DARKNETRA_JWT_SIGNING_KEY_B64=" + base64.b64encode(secrets.token_bytes(32)).decode("ascii"))
+          print(base64.b64encode(secrets.token_bytes(32)).decode("ascii"))
           PY
+          )"
+          echo "::add-mask::$KEY"
+          echo "DARKNETRA_JWT_SIGNING_KEY_B64=$KEY" >> "$GITHUB_ENV"
       - name: Lock and sync Python workspace
         run: |
           uv lock
