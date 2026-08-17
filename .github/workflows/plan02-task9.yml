@@ -1,5 +1,6 @@
 name: Plan 02 Task 9 frontend API client
 
+# GREEN gate: regenerate the pnpm lockfile, then prove client/provider correctness.
 on:
   push:
     branches: [testing-codex]
@@ -22,10 +23,24 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Prepare pnpm
+      - name: Prepare pnpm and update lockfile
         run: |
           corepack enable
           corepack prepare pnpm@10.15.0 --activate
-          pnpm install --frozen-lockfile
-      - name: Task 9 RED client tests
+          pnpm install --no-frozen-lockfile
+      - name: Task 9 client tests
         run: pnpm --filter @darknetra/web test -- src/lib/api
+      - name: Web quality gate
+        run: |
+          pnpm --filter @darknetra/web lint
+          pnpm --filter @darknetra/web typecheck
+          pnpm --filter @darknetra/web build
+      - name: Commit generated lockfile
+        run: |
+          if ! git diff --quiet -- pnpm-lock.yaml; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add pnpm-lock.yaml
+            git commit -m 'chore: lock Plan 02 frontend query dependency [skip ci]'
+            git push origin HEAD:testing-codex
+          fi
