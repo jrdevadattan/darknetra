@@ -1,12 +1,11 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
-
 from darknetra_api.authz.permissions import Permission
 from darknetra_api.authz.policy import ROLE_PERMISSIONS
 from darknetra_api.dependencies.auth import require_global_permission
 from darknetra_api.models.user import User
 from darknetra_api.schemas.admin import RolePolicyListResponse, RolePolicyRead
+from fastapi import APIRouter, Depends
 
 router = APIRouter(prefix="/admin", tags=["administration"])
 RoleReader = Annotated[User, Depends(require_global_permission(Permission.ROLE_READ))]
