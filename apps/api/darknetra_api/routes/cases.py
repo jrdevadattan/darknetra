@@ -1,8 +1,6 @@
 from typing import Annotated
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-
 from darknetra_api.authz.permissions import Permission
 from darknetra_api.authz.policy import AuthorizationDenied, CaseNotFound, PasswordChangeRequired
 from darknetra_api.dependencies.auth import (
@@ -28,6 +26,7 @@ from darknetra_api.services.cases import (
     reopen_case,
     update_case,
 )
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 router = APIRouter(prefix="/cases", tags=["cases"])
 
