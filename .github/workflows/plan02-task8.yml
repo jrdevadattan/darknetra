@@ -1,0 +1,58 @@
+name: Plan 02 Task 8 administration reads
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan02-task8.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-ci@127.0.0.1:5432/darknetra
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_ENVIRONMENT: development
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - name: Generate runtime-only auth signing key
+        run: |
+          KEY="$(python - <<'PY'
+          import base64
+          import secrets
+          print(base64.b64encode(secrets.token_bytes(32)).decode("ascii"))
+          PY
+          )"
+          echo "::add-mask::$KEY"
+          echo "DARKNETRA_JWT_SIGNING_KEY_B64=$KEY" >> "$GITHUB_ENV"
+      - name: Sync Python workspace
+        run: uv sync --all-packages --dev --frozen
+      - name: Migrate database
+        run: uv run alembic -c apps/api/alembic.ini upgrade head
+      - name: Ruff and Task 8 tests
+        run: |
+          uv run ruff check .
+          uv run pytest apps/api/tests/integration/test_admin_reads.py -v
