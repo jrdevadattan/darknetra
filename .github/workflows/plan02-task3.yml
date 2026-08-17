@@ -1,0 +1,66 @@
+name: Plan 02 Task 3 secure bootstrap
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan02-task3.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-dev-only@127.0.0.1:5432/darknetra
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-dev-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - name: Lock and sync Python workspace
+        run: |
+          uv lock
+          uv sync --all-packages --dev --frozen
+      - name: Migrate database
+        run: uv run alembic -c apps/api/alembic.ini upgrade head
+      - name: Ruff and Task 3 tests
+        run: |
+          uv run ruff check .
+          uv run pytest apps/api/tests/unit/test_passwords.py apps/api/tests/integration/test_bootstrap_admin.py -v
+      - name: Verify bootstrap code does not print credentials
+        run: |
+          if grep -RinE 'password.*print|print.*password' apps/api/darknetra_api; then
+            echo 'credential printing pattern detected' >&2
+            exit 1
+          fi
+      - name: Commit generated lockfile
+        run: |
+          if ! git diff --quiet -- uv.lock; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add uv.lock
+            git commit -m 'chore: lock Argon2id bootstrap dependency [skip ci]'
+            git push origin HEAD:testing-codex
+          fi
