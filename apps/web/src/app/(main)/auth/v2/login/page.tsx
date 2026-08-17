@@ -1,40 +1,18 @@
-import Link from "next/link";
-
-import { Globe } from "lucide-react";
-
-import { APP_CONFIG } from "@/config/app-config";
-
-import { LoginForm } from "../../_components/login-form";
+import { LoginForm } from '@/features/auth/login-form';
 
 export default function LoginV2() {
   return (
-    <>
-      <div className="mx-auto flex w-full flex-col justify-center space-y-8 sm:w-[350px]">
-        <div className="space-y-2 text-center">
-          <h1 className="font-medium text-3xl">Login to your account</h1>
-          <p className="text-muted-foreground text-sm">Please enter your details to login.</p>
-        </div>
-        <div className="space-y-4">
-          <LoginForm />
-        </div>
+    <div className="mx-auto flex w-full max-w-md flex-col justify-center space-y-8 px-6">
+      <div className="space-y-2">
+        <p className="font-medium text-muted-foreground text-xs uppercase tracking-wider">
+          Authorized personnel only
+        </p>
+        <h1 className="font-semibold text-3xl tracking-tight">Sign in to DARKNETRA</h1>
+        <p className="text-muted-foreground text-sm">
+          Use the investigator account issued by your administrator. Self-registration is not enabled.
+        </p>
       </div>
-
-      <div className="absolute top-5 flex w-full justify-end px-10">
-        <div className="text-muted-foreground text-sm">
-          Don&apos;t have an account?{" "}
-          <Link prefetch={false} className="text-foreground" href="register">
-            Register
-          </Link>
-        </div>
-      </div>
-
-      <div className="absolute bottom-5 flex w-full justify-between px-10">
-        <div className="text-sm">{APP_CONFIG.copyright}</div>
-        <div className="flex items-center gap-1 text-sm">
-          <Globe className="size-4 text-muted-foreground" />
-          ENG
-        </div>
-      </div>
-    </>
+      <LoginForm />
+    </div>
   );
 }
