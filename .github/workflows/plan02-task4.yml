@@ -1,6 +1,6 @@
 name: Plan 02 Task 4 rotating auth
 
-# Retry marker: auth lint fixes applied and generated signing key is masked before export.
+# Retry marker: include exact-origin CORS coverage in the final Task 4 gate.
 on:
   push:
     branches: [testing-codex]
@@ -61,7 +61,7 @@ jobs:
       - name: Ruff and Task 4 tests
         run: |
           uv run ruff check .
-          uv run pytest apps/api/tests/unit/test_tokens.py apps/api/tests/integration/test_auth_flow.py -v
+          uv run pytest apps/api/tests/unit/test_tokens.py apps/api/tests/integration/test_auth_flow.py apps/api/tests/integration/test_auth_cors.py -v
       - name: Security grep
         run: |
           if grep -RInE '(localStorage|sessionStorage).*darknetra_(access|refresh)' apps/web/src 2>/dev/null; then
