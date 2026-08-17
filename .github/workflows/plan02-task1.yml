@@ -1,5 +1,6 @@
 name: Plan 02 Task 1 database foundation
 
+# Retry marker: PostgreSQL 18 stores versioned data under /var/lib/postgresql.
 on:
   push:
     branches: [testing-codex]
