@@ -1,0 +1,28 @@
+name: Plan 02 Task 11 authenticated session UX
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan02-task11.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Prepare pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.15.0 --activate
+          pnpm install --frozen-lockfile
+      - name: Task 11 RED auth tests
+        run: pnpm --filter @darknetra/web test -- src/features/auth
