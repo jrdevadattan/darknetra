@@ -1,6 +1,6 @@
 name: Plan 02 Task 10 live cases
 
-# GREEN mapper gate: live case transport is mapped into the retained UI contract.
+# Full GREEN gate: prove live case mapping, view states, no production fixture imports, and build health.
 on:
   push:
     branches: [testing-codex]
@@ -25,5 +25,19 @@ jobs:
           corepack enable
           corepack prepare pnpm@10.15.0 --activate
           pnpm install --frozen-lockfile
-      - name: Task 10 mapper tests
-        run: pnpm --filter @darknetra/web test -- src/features/cases/queries.test.ts
+      - name: Task 10 focused tests
+        run: |
+          pnpm --filter @darknetra/web test -- src/features/cases/queries.test.ts src/features/cases/live-case-views.test.tsx
+      - name: Prove production routes do not import case fixtures
+        run: |
+          if grep -R "features/cases/fixtures" apps/web/src/app apps/web/src/features \
+            --include='*.ts' --include='*.tsx' | grep -vE '\.(test|spec)\.(ts|tsx):'; then
+            echo 'Production fixture import detected.' >&2
+            exit 1
+          fi
+      - name: Web quality gate
+        run: |
+          pnpm --filter @darknetra/web lint
+          pnpm --filter @darknetra/web typecheck
+          pnpm --filter @darknetra/web test
+          pnpm --filter @darknetra/web build
