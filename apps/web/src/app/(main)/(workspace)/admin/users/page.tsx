@@ -1,0 +1,1 @@
+import { PlannedSurface } from '@/components/darknetra/planned-surface'; export default function Page(){return <PlannedSurface eyebrow="Administration" title="Users" description="User lifecycle, bootstrap controls, and role assignments will be backed by authenticated APIs." ownerPlan="Plan 02 · Authentication and RBAC" />;}

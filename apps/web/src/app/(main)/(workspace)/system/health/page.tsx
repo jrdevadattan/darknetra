@@ -1,0 +1,1 @@
+import { PlannedSurface } from '@/components/darknetra/planned-surface'; export default function Page(){return <PlannedSurface eyebrow="Operations" title="System Health" description="Service health must be measured, never inferred from page render. The real API probe is the next task." ownerPlan="Plan 01 · Task 7" />;}
