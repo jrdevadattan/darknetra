@@ -1,5 +1,6 @@
 name: Task 09 final Plan 01 runner
 
+# Retry marker: Vitest is scoped to src unit tests before this run.
 on:
   push:
     branches: [testing-codex]
