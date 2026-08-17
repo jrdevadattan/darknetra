@@ -1,8 +1,7 @@
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
-
 from darknetra_api.models.enums import GlobalRole
+from pydantic import BaseModel, ConfigDict
 
 
 class LoginRequest(BaseModel):
