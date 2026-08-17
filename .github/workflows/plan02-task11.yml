@@ -1,6 +1,6 @@
 name: Plan 02 Task 11 authenticated session UX
 
-# Full GREEN gate: component behavior plus synthetic browser session flows.
+# Full GREEN gate: rerun after precise mobile and forced-change Playwright assertions.
 on:
   push:
     branches: [testing-codex]
