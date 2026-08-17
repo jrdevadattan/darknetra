@@ -1,6 +1,6 @@
 name: Plan 02 Task 13 real auth E2E
 
-# Fixture RED gate: safety must stay green while deterministic database-state creation is still missing.
+# Fixture GREEN gate before real browser authentication tests.
 on:
   push:
     branches: [testing-codex]
@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 jobs:
-  verify-fixture-red:
+  verify-fixture:
     runs-on: ubuntu-latest
     env:
       DARKNETRA_E2E_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-e2e@127.0.0.1:5432/darknetra_e2e_test
@@ -51,6 +51,11 @@ jobs:
         env:
           DARKNETRA_DATABASE_URL: ${{ env.DARKNETRA_E2E_DATABASE_URL }}
         run: uv run alembic -c apps/api/alembic.ini upgrade head
+      - id: ruff
+        name: Ruff fixture code
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: uv run ruff check scripts/create_e2e_fixture.py apps/api/tests/unit/test_e2e_fixture_cli.py apps/api/tests/integration/test_e2e_fixture_creation.py
       - id: safety_tests
         name: Fixture safety tests
         if: steps.prepare.outcome == 'success'
@@ -64,11 +69,12 @@ jobs:
         run: |
           set -o pipefail
           uv run pytest apps/api/tests/integration/test_e2e_fixture_creation.py -v 2>&1 | tee /tmp/task13-fixture.log
-      - name: Record Task 13 fixture RED outcome
+      - name: Record Task 13 fixture outcome
         if: always()
         env:
           PREPARE: ${{ steps.prepare.outcome }}
           MIGRATE: ${{ steps.migrate.outcome }}
+          RUFF: ${{ steps.ruff.outcome }}
           SAFETY_TESTS: ${{ steps.safety_tests.outcome }}
           FIXTURE_TEST: ${{ steps.fixture_test.outcome }}
         run: |
@@ -76,10 +82,11 @@ jobs:
           {
             echo '# Plan 02 Task 13 verification'
             echo
-            echo 'Deterministic fixture RED phase outcomes:'
+            echo 'Deterministic fixture phase outcomes:'
             echo
             echo "- prepare: ${PREPARE}"
             echo "- disposable DB migration: ${MIGRATE}"
+            echo "- Ruff fixture code: ${RUFF}"
             echo "- fixture safety tests: ${SAFETY_TESTS}"
             echo "- fixture integration test: ${FIXTURE_TEST}"
             echo
@@ -91,18 +98,20 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add docs/verification/plan02-task13-real-e2e.md
           if ! git diff --cached --quiet; then
-            git commit -m 'docs: record Plan 02 Task 13 fixture RED outcome [skip ci]'
+            git commit -m 'docs: record Plan 02 Task 13 fixture outcome [skip ci]'
             git push origin HEAD:testing-codex
           fi
-      - name: Require deterministic fixture RED
+      - name: Enforce deterministic fixture gate
         if: always()
         env:
           PREPARE: ${{ steps.prepare.outcome }}
           MIGRATE: ${{ steps.migrate.outcome }}
+          RUFF: ${{ steps.ruff.outcome }}
           SAFETY_TESTS: ${{ steps.safety_tests.outcome }}
           FIXTURE_TEST: ${{ steps.fixture_test.outcome }}
         run: |
           test "$PREPARE" = success
           test "$MIGRATE" = success
+          test "$RUFF" = success
           test "$SAFETY_TESTS" = success
-          test "$FIXTURE_TEST" = failure
+          test "$FIXTURE_TEST" = success
