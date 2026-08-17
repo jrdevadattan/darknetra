@@ -8,7 +8,7 @@ services:
       POSTGRES_USER: darknetra
       POSTGRES_PASSWORD: ${DARKNETRA_POSTGRES_PASSWORD:-darknetra-dev-only}
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql
     networks:
       - app
     healthcheck:
