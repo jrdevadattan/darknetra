@@ -1,6 +1,6 @@
 name: Task 09 final Plan 01 runner
 
-# Retry marker: Playwright health assertion is scoped to the full API card.
+# Retry marker: offline health regression asserts the semantic async-state boundary.
 on:
   push:
     branches: [testing-codex]
