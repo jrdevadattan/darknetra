@@ -12,7 +12,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e:online": "playwright test --config playwright.config.ts",
+    "test:e2e:offline": "playwright test --config playwright-offline.config.ts",
+    "test:e2e": "pnpm test:e2e:online && pnpm test:e2e:offline"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
