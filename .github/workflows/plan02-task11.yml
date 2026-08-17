@@ -1,6 +1,6 @@
 name: Plan 02 Task 11 authenticated session UX
 
-# RED gate: persist the focused auth-test outcome before production implementation.
+# GREEN component gate: persist each outcome, then fail if any required frontend check is non-green.
 on:
   push:
     branches: [testing-codex]
@@ -23,6 +23,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+
       - id: prepare
         name: Prepare pnpm
         continue-on-error: true
@@ -30,38 +31,81 @@ jobs:
           corepack enable
           corepack prepare pnpm@10.15.0 --activate
           pnpm install --frozen-lockfile
+
       - id: auth_tests
-        name: Task 11 RED auth tests
+        name: Focused auth tests
         if: steps.prepare.outcome == 'success'
         continue-on-error: true
         run: pnpm --filter @darknetra/web test -- src/features/auth
-      - name: Record Task 11 RED outcome
+
+      - id: lint
+        name: Biome lint
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: pnpm --filter @darknetra/web lint
+
+      - id: typecheck
+        name: TypeScript typecheck
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: pnpm --filter @darknetra/web typecheck
+
+      - id: full_tests
+        name: Full frontend tests
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: pnpm --filter @darknetra/web test
+
+      - id: build
+        name: Production build
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: pnpm --filter @darknetra/web build
+
+      - name: Persist Task 11 diagnostic record
         if: always()
         env:
           PREPARE: ${{ steps.prepare.outcome }}
           AUTH_TESTS: ${{ steps.auth_tests.outcome }}
+          LINT: ${{ steps.lint.outcome }}
+          TYPECHECK: ${{ steps.typecheck.outcome }}
+          FULL_TESTS: ${{ steps.full_tests.outcome }}
+          BUILD: ${{ steps.build.outcome }}
         run: |
           mkdir -p docs/verification
           cat > docs/verification/plan02-task11-auth.md <<EOF
           # Plan 02 Task 11 verification
 
-          RED phase outcomes:
+          GitHub Actions outcomes for authenticated session UX:
 
           - prepare: ${PREPARE}
           - focused auth tests: ${AUTH_TESTS}
+          - Biome lint: ${LINT}
+          - TypeScript typecheck: ${TYPECHECK}
+          - full frontend tests: ${FULL_TESTS}
+          - Next.js production build: ${BUILD}
           EOF
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add docs/verification/plan02-task11-auth.md
           if ! git diff --cached --quiet; then
-            git commit -m 'docs: record Plan 02 Task 11 RED outcome [skip ci]'
+            git commit -m 'docs: record Plan 02 Task 11 verification [skip ci]'
             git push origin HEAD:testing-codex
           fi
-      - name: Require RED before implementation
+
+      - name: Enforce Task 11 component gate
         if: always()
         env:
           PREPARE: ${{ steps.prepare.outcome }}
           AUTH_TESTS: ${{ steps.auth_tests.outcome }}
+          LINT: ${{ steps.lint.outcome }}
+          TYPECHECK: ${{ steps.typecheck.outcome }}
+          FULL_TESTS: ${{ steps.full_tests.outcome }}
+          BUILD: ${{ steps.build.outcome }}
         run: |
           test "$PREPARE" = success
-          test "$AUTH_TESTS" = failure
+          test "$AUTH_TESTS" = success
+          test "$LINT" = success
+          test "$TYPECHECK" = success
+          test "$FULL_TESTS" = success
+          test "$BUILD" = success
