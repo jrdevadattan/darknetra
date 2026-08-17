@@ -1,6 +1,6 @@
 name: Plan 02 Task 11 authenticated session UX
 
-# GREEN component gate: persist each outcome, then fail if any required frontend check is non-green.
+# Diagnostic component gate: capture the exact focused Vitest failure before changing auth logic.
 on:
   push:
     branches: [testing-codex]
@@ -36,7 +36,10 @@ jobs:
         name: Focused auth tests
         if: steps.prepare.outcome == 'success'
         continue-on-error: true
-        run: pnpm --filter @darknetra/web test -- src/features/auth
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm --filter @darknetra/web test -- src/features/auth 2>&1 | tee /tmp/task11-auth-tests.log
 
       - id: lint
         name: Biome lint
@@ -73,23 +76,29 @@ jobs:
           BUILD: ${{ steps.build.outcome }}
         run: |
           mkdir -p docs/verification
-          cat > docs/verification/plan02-task11-auth.md <<EOF
-          # Plan 02 Task 11 verification
-
-          GitHub Actions outcomes for authenticated session UX:
-
-          - prepare: ${PREPARE}
-          - focused auth tests: ${AUTH_TESTS}
-          - Biome lint: ${LINT}
-          - TypeScript typecheck: ${TYPECHECK}
-          - full frontend tests: ${FULL_TESTS}
-          - Next.js production build: ${BUILD}
-          EOF
+          {
+            echo '# Plan 02 Task 11 verification'
+            echo
+            echo 'GitHub Actions outcomes for authenticated session UX:'
+            echo
+            echo "- prepare: ${PREPARE}"
+            echo "- focused auth tests: ${AUTH_TESTS}"
+            echo "- Biome lint: ${LINT}"
+            echo "- TypeScript typecheck: ${TYPECHECK}"
+            echo "- full frontend tests: ${FULL_TESTS}"
+            echo "- Next.js production build: ${BUILD}"
+            echo
+            echo '## Focused auth test tail'
+            echo
+            echo '```text'
+            tail -n 180 /tmp/task11-auth-tests.log 2>/dev/null || true
+            echo '```'
+          } > docs/verification/plan02-task11-auth.md
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add docs/verification/plan02-task11-auth.md
           if ! git diff --cached --quiet; then
-            git commit -m 'docs: record Plan 02 Task 11 verification [skip ci]'
+            git commit -m 'docs: capture Plan 02 Task 11 auth failure [skip ci]'
             git push origin HEAD:testing-codex
           fi
 
