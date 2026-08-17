@@ -1,5 +1,4 @@
 import pytest
-
 from darknetra_api.security.passwords import (
     PasswordPolicyError,
     hash_password,
