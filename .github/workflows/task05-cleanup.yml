@@ -1,0 +1,200 @@
+name: Task 05 remove dashboard showcases
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/task05-cleanup.yml
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare toolchains
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.15.0 --activate
+          pnpm install --frozen-lockfile
+          python -m pip install 'pytest>=8.4,<9'
+
+      - name: Write failing frontend-surface guardrail
+        shell: bash
+        run: |
+          cat > tests/repo/test_frontend_surface.py <<'EOF'
+          from pathlib import Path
+
+          ROOT = Path(__file__).resolve().parents[2]
+          WEB = ROOT / "apps" / "web"
+          DASHBOARD = WEB / "src" / "app" / "(main)" / "dashboard"
+
+          ALLOWED_DASHBOARD_DIRS = {"_components", "[...not-found]", "roles", "users"}
+
+
+          def test_dashboard_has_no_unrelated_showcase_routes() -> None:
+              actual = {path.name for path in DASHBOARD.iterdir() if path.is_dir()}
+              assert actual <= ALLOWED_DASHBOARD_DIRS, sorted(actual - ALLOWED_DASHBOARD_DIRS)
+
+
+          def test_top_level_demo_mail_and_chat_are_removed() -> None:
+              main = WEB / "src" / "app" / "(main)"
+              assert not (main / "chat").exists()
+              assert not (main / "mail").exists()
+
+
+          def test_hosted_demo_telemetry_and_support_ctas_are_removed() -> None:
+              layout = (WEB / "src" / "app" / "layout.tsx").read_text(encoding="utf-8")
+              sidebar = (
+                  WEB
+                  / "src"
+                  / "app"
+                  / "(main)"
+                  / "dashboard"
+                  / "_components"
+                  / "sidebar"
+                  / "app-sidebar.tsx"
+              ).read_text(encoding="utf-8")
+              nav = (
+                  WEB
+                  / "src"
+                  / "app"
+                  / "(main)"
+                  / "dashboard"
+                  / "_components"
+                  / "sidebar"
+                  / "nav-main.tsx"
+              ).read_text(encoding="utf-8")
+              assert "@vercel/analytics" not in layout
+              assert "<Analytics" not in layout
+              assert "SupportCard" not in sidebar
+              assert "Quick Create" not in nav
+              assert ">Inbox<" not in nav
+          EOF
+
+          set +e
+          python -m pytest tests/repo/test_frontend_surface.py -v > /tmp/task05-red.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/task05-red.log
+          if [ "$status" -eq 0 ]; then
+            echo 'Task 05 surface guardrail unexpectedly passed before cleanup.' >&2
+            exit 1
+          fi
+
+      - name: Remove unrelated showcase surfaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          dashboard='apps/web/src/app/(main)/dashboard'
+          printf 'Before cleanup:\n'
+          find "$dashboard" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
+
+          for dir in "$dashboard"/*; do
+            [ -d "$dir" ] || continue
+            name="$(basename "$dir")"
+            case "$name" in
+              _components|'[...not-found]'|roles|users) ;;
+              *) rm -rf "$dir" ;;
+            esac
+          done
+
+          rm -rf 'apps/web/src/app/(main)/chat' 'apps/web/src/app/(main)/mail'
+          rm -f 'apps/web/src/app/(main)/dashboard/_components/sidebar/support-card.tsx'
+
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          sidebar = Path('apps/web/src/app/(main)/dashboard/_components/sidebar/app-sidebar.tsx')
+          text = sidebar.read_text()
+          text = text.replace('import { SupportCard } from "./support-card";\n', '')
+          text = text.replace('        <SupportCard />\n', '')
+          sidebar.write_text(text)
+
+          nav = Path('apps/web/src/app/(main)/dashboard/_components/sidebar/nav-main.tsx')
+          text = nav.read_text()
+          text = text.replace('import { ChevronRight, MailIcon, PlusCircleIcon } from "lucide-react";', 'import { ChevronRight } from "lucide-react";')
+          text = text.replace('import { Button } from "@/components/ui/button";\n', '')
+          pattern = re.compile(
+              r'\n\s*<SidebarGroup>\s*<SidebarGroupContent className="flex flex-col gap-2">.*?</SidebarGroup>\s*(?=\{items\.map)',
+              re.S,
+          )
+          text, count = pattern.subn('\n      ', text, count=1)
+          if count != 1:
+              raise SystemExit('failed to remove template quick-action block')
+          nav.write_text(text)
+
+          layout = Path('apps/web/src/app/layout.tsx')
+          text = layout.read_text()
+          text = text.replace('import { Analytics } from "@vercel/analytics/next";\n', '')
+          text = re.sub(
+              r'\n\s*\{\/\* Used for this project.*?\*\/\}\s*\n\s*<Analytics \/>',
+              '',
+              text,
+              flags=re.S,
+          )
+          layout.write_text(text)
+          PY
+
+          printf 'After cleanup:\n'
+          find "$dashboard" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
+
+      - name: Prove stale showcase routes are gone
+        shell: bash
+        run: |
+          set -euo pipefail
+          if rg -n '/dashboard/(academy|analytics|calendar|chat|coming-soon|crm|default|ecommerce|file-manager|finance|infrastructure|invoice|kanban|logistics|mail|patient-monitoring|productivity|profile|tasks)' apps/web/src; then
+            echo 'Found stale showcase route reference.' >&2
+            exit 1
+          fi
+          python -m pytest tests/repo/test_frontend_surface.py -v
+
+      - name: Prune only proven-unused showcase dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          remove_if_unused() {
+            pkg="$1"
+            if ! rg -F --glob '!package.json' --glob '!*.lock' "$pkg" apps/web/src >/dev/null 2>&1; then
+              if node -e "const p=require('./apps/web/package.json'); process.exit((p.dependencies&&p.dependencies['$pkg'])||(p.devDependencies&&p.devDependencies['$pkg'])?0:1)"; then
+                pnpm --filter @darknetra/web remove "$pkg"
+              fi
+            fi
+          }
+
+          for pkg in \
+            '@fullcalendar/react' \
+            '@dnd-kit/abstract' '@dnd-kit/helpers' '@dnd-kit/react' \
+            'd3-geo' 'topojson-client' '@types/d3-geo' '@types/topojson-client' \
+            '@vercel/analytics' 'simple-icons'; do
+            remove_if_unused "$pkg"
+          done
+
+      - name: Verify cleaned frontend
+        run: |
+          python -m pytest tests/repo -v
+          pnpm --filter @darknetra/web test
+          pnpm --filter @darknetra/web lint
+          pnpm --filter @darknetra/web typecheck
+          pnpm --filter @darknetra/web build
+
+      - name: Commit Task 05
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/web tests/repo/test_frontend_surface.py pnpm-lock.yaml
+          git commit -m 'refactor: remove unrelated admin dashboard demos [skip ci]'
+          git push origin HEAD:testing-codex
