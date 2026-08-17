@@ -1,6 +1,6 @@
 name: Plan 02 Task 2 schema
 
-# Retry marker: model-layer Ruff fixes applied before migration generation.
+# Retry marker: model lint is clean and schema inspection uses the locked uv environment.
 on:
   push:
     branches: [testing-codex]
@@ -50,7 +50,7 @@ jobs:
       - name: Apply migration and verify intended tables
         run: |
           uv run alembic -c apps/api/alembic.ini upgrade head
-          python - <<'PY'
+          uv run python - <<'PY'
           import os
           import psycopg
           expected = {'users','auth_sessions','cases','case_memberships','case_membership_roles','audit_events','alembic_version'}
