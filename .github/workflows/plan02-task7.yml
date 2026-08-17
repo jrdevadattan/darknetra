@@ -1,6 +1,6 @@
 name: Plan 02 Task 7 case memberships
 
-# Retry marker: membership repository, service, and routes are wired for invariant verification.
+# Retry marker: last-owner invariant check is Ruff-clean and ready for behavior tests.
 on:
   push:
     branches: [testing-codex]
