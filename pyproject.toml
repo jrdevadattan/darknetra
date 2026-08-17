@@ -10,6 +10,10 @@ dev = ["pytest>=8.4,<9", "ruff>=0.12,<1"]
 [tool.pytest.ini_options]
 testpaths = ["tests", "apps/api/tests"]
 pythonpath = [".", "apps/api"]
+asyncio_mode = "auto"
+markers = [
+  "integration: tests that require external services such as PostgreSQL",
+]
 
 [tool.ruff]
 target-version = "py312"
