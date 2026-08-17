@@ -1,5 +1,10 @@
 import { expect, test } from '@playwright/test';
 
+import {
+  mockAuthenticatedWorkspace,
+  SYNTHETIC_CASE,
+} from './mock-darknetra-api';
+
 const CASE_TABS = [
   'Overview',
   'Evidence',
@@ -21,6 +26,10 @@ const REMOVED_SHOWCASES = [
   'Mail Dashboard',
 ];
 
+test.beforeEach(async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+});
+
 test('desktop and mobile navigation expose only DARKNETRA workspaces', async ({ page }, testInfo) => {
   await page.goto('/dashboard');
   await expect(page.getByRole('heading', { name: 'Investigator overview' })).toBeVisible();
@@ -36,9 +45,9 @@ test('desktop and mobile navigation expose only DARKNETRA workspaces', async ({ 
   }
 });
 
-test('fixture case exposes all nine investigation tabs', async ({ page }) => {
-  await page.goto('/cases/SYN-DEMO-001');
-  await expect(page.getByRole('heading', { name: 'Alias correlation training case' })).toBeVisible();
+test('live case exposes all nine investigation tabs', async ({ page }) => {
+  await page.goto(`/cases/${SYNTHETIC_CASE.id}`);
+  await expect(page.getByRole('heading', { name: SYNTHETIC_CASE.title })).toBeVisible();
 
   const caseNav = page.getByRole('navigation', { name: 'Case sections' });
   for (const label of CASE_TABS) {
@@ -46,13 +55,13 @@ test('fixture case exposes all nine investigation tabs', async ({ page }) => {
   }
 
   await caseNav.getByRole('link', { name: 'Evidence', exact: true }).click();
-  await expect(page).toHaveURL(/\/cases\/SYN-DEMO-001\/evidence$/);
+  await expect(page).toHaveURL(new RegExp(`/cases/${SYNTHETIC_CASE.id}/evidence$`));
   await expect(
     page.getByText('Live data boundary: Plan 03 · Evidence Vault', { exact: true }),
   ).toBeVisible();
 });
 
-test('System Health reports a measured reachable API', async ({ page }) => {
+test('System Health reports a measured reachable API for an authenticated session', async ({ page }) => {
   await page.goto('/system/health');
   await expect(page.getByRole('heading', { name: 'System Health' })).toBeVisible();
 
