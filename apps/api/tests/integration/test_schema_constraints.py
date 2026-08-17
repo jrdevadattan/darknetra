@@ -2,14 +2,13 @@ from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
-from sqlalchemy.exc import IntegrityError
-
 from darknetra_api.db.session import async_session_factory
 from darknetra_api.models.audit import AuditEvent
 from darknetra_api.models.case import Case
 from darknetra_api.models.case_membership import CaseMembership
 from darknetra_api.models.enums import CaseSensitivity, CaseStatus
 from darknetra_api.models.user import User
+from sqlalchemy.exc import IntegrityError
 
 
 async def _clear_schema() -> None:
