@@ -3,7 +3,7 @@
 - Repository: `arhamkhnz/next-shadcn-admin-dashboard`
 - Commit: `0c668859c4fdeaa0279c951c178b965cce62a125`
 - License: MIT
-- Imported: 2026-08-17
-- Local license: `../../LICENSES/next-shadcn-admin-dashboard-MIT.txt`
+- Import date: 2026-08-17
+- Repository license copy: `../../LICENSES/next-shadcn-admin-dashboard-MIT.txt`
 
-DARKNETRA adapts this pinned snapshot as a visual/component baseline. Runtime operation does not depend on the upstream repository.
+This pinned snapshot is the visual/component baseline only. DARKNETRA must not depend on the upstream repository at build time or runtime.
