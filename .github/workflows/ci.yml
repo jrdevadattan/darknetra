@@ -37,6 +37,8 @@ jobs:
           version: '0.12.4'
       - name: Sync Python workspace
         run: uv sync --all-packages --dev --frozen
+      - name: Migrate database
+        run: uv run alembic -c apps/api/alembic.ini upgrade head
       - name: Ruff
         run: uv run ruff check .
       - name: Pytest
