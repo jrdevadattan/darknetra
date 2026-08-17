@@ -1,0 +1,454 @@
+name: Task 07 API health boundary
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/task07-api-health.yml
+
+permissions:
+  contents: write
+
+jobs:
+  task07:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Prepare Node workspace
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.15.0 --activate
+          pnpm install --frozen-lockfile
+
+      - name: Add API workspace dependency contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p apps/api/darknetra_api/routers apps/api/tests packages/contracts
+          cat > apps/api/pyproject.toml <<'EOF'
+          [project]
+          name = "darknetra-api"
+          version = "0.1.0"
+          requires-python = ">=3.12,<3.13"
+          dependencies = [
+            "fastapi>=0.135,<0.136",
+            "pydantic-settings>=2.10,<3",
+            "uvicorn[standard]>=0.35,<1",
+          ]
+
+          [dependency-groups]
+          dev = ["pytest>=8.4,<9", "httpx>=0.28,<1"]
+          EOF
+
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('pyproject.toml')
+          text = path.read_text(encoding='utf-8').rstrip() + '\n'
+          if '[tool.uv.workspace]' not in text:
+              text += '\n[tool.uv.workspace]\nmembers = ["apps/api"]\n'
+          path.write_text(text, encoding='utf-8')
+          PY
+
+          uv lock
+          uv sync --all-packages --dev
+
+      - name: Write failing FastAPI contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > apps/api/tests/test_health.py <<'EOF'
+          from fastapi.testclient import TestClient
+
+          from darknetra_api.main import app
+
+          client = TestClient(app)
+
+
+          def test_live_health_contract() -> None:
+              response = client.get('/api/v1/health/live')
+              assert response.status_code == 200
+              assert response.json() == {'status': 'ok', 'version': 'dev'}
+
+
+          def test_ready_health_contract() -> None:
+              response = client.get('/api/v1/health/ready')
+              assert response.status_code == 200
+              assert response.json() == {
+                  'status': 'ready',
+                  'version': 'dev',
+                  'components': [{'name': 'api', 'status': 'ready'}],
+              }
+
+
+          def test_openapi_identity_is_darknetra() -> None:
+              document = client.get('/openapi.json').json()
+              assert document['info']['title'] == 'DARKNETRA API'
+              assert document['info']['version'] == '0.1.0'
+          EOF
+
+          set +e
+          uv run pytest apps/api/tests/test_health.py -v > /tmp/task07-red.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/task07-red.log
+          if [ "$status" -eq 0 ]; then
+            echo 'Task 07 API tests unexpectedly passed before implementation.' >&2
+            exit 1
+          fi
+
+      - name: Implement FastAPI live and ready health endpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          touch apps/api/darknetra_api/__init__.py apps/api/darknetra_api/routers/__init__.py
+
+          cat > apps/api/darknetra_api/config.py <<'EOF'
+          from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+          class Settings(BaseSettings):
+              environment: str = "development"
+              build_version: str = "dev"
+
+              model_config = SettingsConfigDict(env_prefix="DARKNETRA_", extra="ignore")
+
+
+          def get_settings() -> Settings:
+              return Settings()
+          EOF
+
+          cat > apps/api/darknetra_api/routers/health.py <<'EOF'
+          from typing import Annotated, Literal
+
+          from fastapi import APIRouter, Depends
+          from pydantic import BaseModel
+
+          from darknetra_api.config import Settings, get_settings
+
+          router = APIRouter(prefix="/health", tags=["health"])
+
+
+          class LiveHealthResponse(BaseModel):
+              status: Literal["ok"] = "ok"
+              version: str
+
+
+          class ComponentHealth(BaseModel):
+              name: Literal["api"] = "api"
+              status: Literal["ready"] = "ready"
+
+
+          class ReadyHealthResponse(BaseModel):
+              status: Literal["ready"] = "ready"
+              version: str
+              components: list[ComponentHealth]
+
+
+          @router.get("/live", response_model=LiveHealthResponse)
+          def live(settings: Annotated[Settings, Depends(get_settings)]) -> LiveHealthResponse:
+              return LiveHealthResponse(version=settings.build_version)
+
+
+          @router.get("/ready", response_model=ReadyHealthResponse)
+          def ready(settings: Annotated[Settings, Depends(get_settings)]) -> ReadyHealthResponse:
+              return ReadyHealthResponse(
+                  version=settings.build_version,
+                  components=[ComponentHealth()],
+              )
+          EOF
+
+          cat > apps/api/darknetra_api/main.py <<'EOF'
+          from fastapi import FastAPI
+
+          from darknetra_api.routers.health import router as health_router
+
+          app = FastAPI(title="DARKNETRA API", version="0.1.0")
+          app.include_router(health_router, prefix="/api/v1")
+          EOF
+
+          cat > packages/contracts/health.schema.json <<'EOF'
+          {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": "https://darknetra.local/contracts/health.schema.json",
+            "title": "DARKNETRA Health API Responses",
+            "oneOf": [
+              { "$ref": "#/$defs/liveHealth" },
+              { "$ref": "#/$defs/readyHealth" }
+            ],
+            "$defs": {
+              "liveHealth": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["status", "version"],
+                "properties": {
+                  "status": { "const": "ok" },
+                  "version": { "type": "string", "minLength": 1 }
+                }
+              },
+              "componentHealth": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "status"],
+                "properties": {
+                  "name": { "const": "api" },
+                  "status": { "const": "ready" }
+                }
+              },
+              "readyHealth": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["status", "version", "components"],
+                "properties": {
+                  "status": { "const": "ready" },
+                  "version": { "type": "string", "minLength": 1 },
+                  "components": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "$ref": "#/$defs/componentHealth" }
+                  }
+                }
+              }
+            }
+          }
+          EOF
+
+      - name: Verify backend green before frontend integration
+        run: |
+          uv run pytest apps/api/tests/test_health.py -v
+          uv run ruff check apps/api
+
+      - name: Write failing frontend health-client tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p apps/web/src/lib/api
+          cat > apps/web/src/lib/api/health.test.ts <<'EOF'
+          import { afterEach, describe, expect, it, vi } from 'vitest';
+
+          import { HealthApiError, fetchHealth } from './health';
+
+          afterEach(() => {
+            vi.unstubAllGlobals();
+            vi.restoreAllMocks();
+          });
+
+          describe('fetchHealth', () => {
+            it('returns a validated ready response', async () => {
+              vi.stubGlobal(
+                'fetch',
+                vi.fn().mockResolvedValue({
+                  ok: true,
+                  status: 200,
+                  json: async () => ({
+                    status: 'ready',
+                    version: 'test-build',
+                    components: [{ name: 'api', status: 'ready' }],
+                  }),
+                }),
+              );
+
+              await expect(fetchHealth()).resolves.toEqual({
+                status: 'ready',
+                version: 'test-build',
+                components: [{ name: 'api', status: 'ready' }],
+              });
+            });
+
+            it('throws a typed http error for non-2xx responses', async () => {
+              vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 503 }));
+              await expect(fetchHealth()).rejects.toMatchObject<HealthApiError>({ kind: 'http', status: 503 });
+            });
+
+            it('throws a typed network error when fetch rejects', async () => {
+              vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('connection refused')));
+              await expect(fetchHealth()).rejects.toMatchObject<HealthApiError>({ kind: 'network' });
+            });
+          });
+          EOF
+
+          set +e
+          pnpm --filter @darknetra/web test -- src/lib/api/health.test.ts > /tmp/task07-web-red.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/task07-web-red.log
+          if [ "$status" -eq 0 ]; then
+            echo 'Task 07 frontend health tests unexpectedly passed before implementation.' >&2
+            exit 1
+          fi
+
+      - name: Implement typed health client and honest System Health page
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > apps/web/src/lib/api/health.ts <<'EOF'
+          export interface ReadyHealthComponent {
+            name: 'api';
+            status: 'ready';
+          }
+
+          export interface ReadyHealthResponse {
+            status: 'ready';
+            version: string;
+            components: ReadyHealthComponent[];
+          }
+
+          export type HealthApiErrorKind = 'http' | 'network' | 'contract';
+
+          export class HealthApiError extends Error {
+            readonly kind: HealthApiErrorKind;
+            readonly status?: number;
+
+            constructor(kind: HealthApiErrorKind, message: string, status?: number) {
+              super(message);
+              this.name = 'HealthApiError';
+              this.kind = kind;
+              this.status = status;
+            }
+          }
+
+          function apiBaseUrl(): string {
+            return (
+              process.env.DARKNETRA_API_BASE_URL ??
+              process.env.NEXT_PUBLIC_DARKNETRA_API_BASE_URL ??
+              'http://localhost:8000'
+            ).replace(/\/$/, '');
+          }
+
+          function isReadyHealth(value: unknown): value is ReadyHealthResponse {
+            if (!value || typeof value !== 'object') return false;
+            const candidate = value as Partial<ReadyHealthResponse>;
+            return (
+              candidate.status === 'ready' &&
+              typeof candidate.version === 'string' &&
+              candidate.version.length > 0 &&
+              Array.isArray(candidate.components) &&
+              candidate.components.every(
+                (component) => component?.name === 'api' && component?.status === 'ready',
+              )
+            );
+          }
+
+          export async function fetchHealth(): Promise<ReadyHealthResponse> {
+            try {
+              const response = await fetch(`${apiBaseUrl()}/api/v1/health/ready`, {
+                cache: 'no-store',
+                signal: AbortSignal.timeout(5000),
+              });
+
+              if (!response.ok) {
+                throw new HealthApiError(
+                  'http',
+                  `DARKNETRA API returned HTTP ${response.status}.`,
+                  response.status,
+                );
+              }
+
+              const payload: unknown = await response.json();
+              if (!isReadyHealth(payload)) {
+                throw new HealthApiError('contract', 'DARKNETRA API returned an invalid health payload.');
+              }
+              return payload;
+            } catch (error) {
+              if (error instanceof HealthApiError) throw error;
+              throw new HealthApiError(
+                'network',
+                error instanceof Error ? error.message : 'DARKNETRA API is unreachable.',
+              );
+            }
+          }
+          EOF
+
+          cat > 'apps/web/src/app/(main)/(workspace)/system/health/page.tsx' <<'EOF'
+          import { AsyncState } from '@/components/darknetra/async-state';
+          import { PageHeader } from '@/components/darknetra/page-header';
+          import { StatusBadge } from '@/components/darknetra/status-badge';
+          import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+          import { fetchHealth, HealthApiError } from '@/lib/api/health';
+
+          export const dynamic = 'force-dynamic';
+
+          export default async function SystemHealthPage() {
+            try {
+              const health = await fetchHealth();
+              const api = health.components.find((component) => component.name === 'api');
+
+              return (
+                <div className="space-y-6">
+                  <PageHeader
+                    eyebrow="Operations"
+                    title="System Health"
+                    description="Measured service readiness. A successful page render alone is never treated as API health."
+                  />
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="flex items-center justify-between gap-3">
+                        <span>DARKNETRA API</span>
+                        <StatusBadge status={api?.status === 'ready' ? 'verified' : 'warning'} />
+                      </CardTitle>
+                      <CardDescription>Live probe: /api/v1/health/ready</CardDescription>
+                    </CardHeader>
+                    <CardContent className="grid gap-2 text-sm sm:grid-cols-2">
+                      <div><span className="text-muted-foreground">Reported status:</span> {health.status}</div>
+                      <div><span className="text-muted-foreground">Build version:</span> {health.version}</div>
+                    </CardContent>
+                  </Card>
+                  <AsyncState
+                    state="partial"
+                    title="Additional components are not active yet"
+                    description="PostgreSQL, Redis, worker, graph projector, evidence store, models, and optional collector appear only after their implementation plans add measurable probes."
+                  />
+                </div>
+              );
+            } catch (error) {
+              const detail =
+                error instanceof HealthApiError
+                  ? `${error.kind === 'http' ? `HTTP ${error.status}: ` : ''}${error.message}`
+                  : 'The DARKNETRA API probe failed.';
+              return (
+                <div className="space-y-6">
+                  <PageHeader
+                    eyebrow="Operations"
+                    title="System Health"
+                    description="Measured service readiness. A successful page render alone is never treated as API health."
+                  />
+                  <AsyncState
+                    state="offline"
+                    title="DARKNETRA API unreachable"
+                    description={`${detail} This is reported as unavailable rather than shown as a false green state.`}
+                  />
+                </div>
+              );
+            }
+          }
+          EOF
+
+      - name: Verify Task 07 end to end
+        run: |
+          uv run pytest apps/api/tests -v
+          uv run ruff check apps/api
+          pnpm --filter @darknetra/web test
+          pnpm --filter @darknetra/web lint
+          pnpm --filter @darknetra/web typecheck
+          pnpm --filter @darknetra/web build
+
+      - name: Commit Task 07
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add pyproject.toml uv.lock apps/api packages/contracts apps/web/src/lib/api 'apps/web/src/app/(main)/(workspace)/system/health/page.tsx'
+          git commit -m 'feat: add minimal API health boundary [skip ci]'
+          git push origin HEAD:testing-codex
