@@ -1,10 +1,11 @@
 # Plan 02 Task 13 verification
 
-Deterministic fixture RED phase outcomes:
+Deterministic fixture phase outcomes:
 
 - prepare: success
 - disposable DB migration: success
-- fixture safety tests: success
+- Ruff fixture code: failure
+- fixture safety tests: failure
 - fixture integration test: failure
 
 ```text
@@ -46,109 +47,23 @@ _ test_fixture_cli_creates_deterministic_isolated_state_without_secret_output __
             check=False,
         )
     
-        assert result.returncode == 0, result.stderr
-        payload = json.loads(result.stdout)
->       assert payload == {
-            "users": {
-                "analyst_a": {"id": str(ANALYST_A_ID), "username": "e2e.analyst.a"},
-                "analyst_b": {"id": str(ANALYST_B_ID), "username": "e2e.analyst.b"},
-                "bootstrap": {"id": str(BOOTSTRAP_ID), "username": "e2e.bootstrap"},
-            },
-            "cases": {
-                "analyst_a": {"id": str(CASE_A_ID), "case_code": "E2E-A-001"},
-                "analyst_b": {"id": str(CASE_B_ID), "case_code": "E2E-B-001"},
-            },
-        }
-E       AssertionError: assert {'status': 'v...-environment'} == {'cases': {'a....bootstrap'}}}
+>       assert result.returncode == 0, result.stderr
+E       AssertionError: Traceback (most recent call last):
+E           File "/home/runner/work/darknetra/darknetra/scripts/create_e2e_fixture.py", line 14, in <module>
+E             from darknetra_api.models.audit import AuditEvent
+E         ModuleNotFoundError: No module named 'darknetra_api'
 E         
-E         Left contains 1 more item:
-E         {'status': 'validated-test-fixture-environment'}
-E         Right contains 2 more items:
-E         {'cases': {'analyst_a': {'case_code': 'E2E-A-001',
-E                                  'id': '00000000-0000-4000-8000-000000000ca1'},
-E                    'analyst_b': {'case_code': 'E2E-B-001',
-E                                  'id': '00000000-0000-4000-8000-000000000cb1'}},
-E          'users': {'analyst_a': {'id': '00000000-0000-4000-8000-0000000000a1',
-E                                  'username': 'e2e.analyst.a'},
-E                    'analyst_b': {'id': '00000000-0000-4000-8000-0000000000b1',
-E                                  'username': 'e2e.analyst.b'},
-E                    'bootstrap': {'id': '00000000-0000-4000-8000-0000000000c1',
-E                                  'username': 'e2e.bootstrap'}}}
-E         
-E         Full diff:
-E           {
-E         +     'status': 'validated-test-fixture-environment',
-E         -     'cases': {
-E         -         'analyst_a': {
-E         -             'case_code': 'E2E-A-001',
-E         -             'id': '00000000-0000-4000-8000-000000000ca1',
-E         -         },
-E         -         'analyst_b': {
-E         -             'case_code': 'E2E-B-001',
-E         -             'id': '00000000-0000-4000-8000-000000000cb1',
-E         -         },
-E         -     },
-E         -     'users': {
-E         -         'analyst_a': {
-E         -             'id': '00000000-0000-4000-8000-0000000000a1',
-E         -             'username': 'e2e.analyst.a',
-E         -         },
-E         -         'analyst_b': {
-E         -             'id': '00000000-0000-4000-8000-0000000000b1',
-E         -             'username': 'e2e.analyst.b',
-E         -         },
-E         -         'bootstrap': {
-E         -             'id': '00000000-0000-4000-8000-0000000000c1',
-E         -             'username': 'e2e.bootstrap',
-E         -         },
-E         -     },
-E           }
+E       assert 1 == 0
+E        +  where 1 = CompletedProcess(args=['/home/runner/work/darknetra/darknetra/.venv/bin/python', '/home/runner/work/darknetra/darknetra/scripts/create_e2e_fixture.py'], returncode=1, stdout='', stderr='Traceback (most recent call last):\n  File "/home/runner/work/darknetra/darknetra/scripts/create_e2e_fixture.py", line 14, in <module>\n    from darknetra_api.models.audit import AuditEvent\nModuleNotFoundError: No module named \'darknetra_api\'\n').returncode
 
-apps/api/tests/integration/test_e2e_fixture_creation.py:65: AssertionError
+apps/api/tests/integration/test_e2e_fixture_creation.py:63: AssertionError
 =========================== short test summary info ============================
-FAILED apps/api/tests/integration/test_e2e_fixture_creation.py::test_fixture_cli_creates_deterministic_isolated_state_without_secret_output - AssertionError: assert {'status': 'v...-environment'} == {'cases': {'a....bootstrap'}}}
+FAILED apps/api/tests/integration/test_e2e_fixture_creation.py::test_fixture_cli_creates_deterministic_isolated_state_without_secret_output - AssertionError: Traceback (most recent call last):
+    File "/home/runner/work/darknetra/darknetra/scripts/create_e2e_fixture.py", line 14, in <module>
+      from darknetra_api.models.audit import AuditEvent
+  ModuleNotFoundError: No module named 'darknetra_api'
   
-  Left contains 1 more item:
-  {'status': 'validated-test-fixture-environment'}
-  Right contains 2 more items:
-  {'cases': {'analyst_a': {'case_code': 'E2E-A-001',
-                           'id': '00000000-0000-4000-8000-000000000ca1'},
-             'analyst_b': {'case_code': 'E2E-B-001',
-                           'id': '00000000-0000-4000-8000-000000000cb1'}},
-   'users': {'analyst_a': {'id': '00000000-0000-4000-8000-0000000000a1',
-                           'username': 'e2e.analyst.a'},
-             'analyst_b': {'id': '00000000-0000-4000-8000-0000000000b1',
-                           'username': 'e2e.analyst.b'},
-             'bootstrap': {'id': '00000000-0000-4000-8000-0000000000c1',
-                           'username': 'e2e.bootstrap'}}}
-  
-  Full diff:
-    {
-  +     'status': 'validated-test-fixture-environment',
-  -     'cases': {
-  -         'analyst_a': {
-  -             'case_code': 'E2E-A-001',
-  -             'id': '00000000-0000-4000-8000-000000000ca1',
-  -         },
-  -         'analyst_b': {
-  -             'case_code': 'E2E-B-001',
-  -             'id': '00000000-0000-4000-8000-000000000cb1',
-  -         },
-  -     },
-  -     'users': {
-  -         'analyst_a': {
-  -             'id': '00000000-0000-4000-8000-0000000000a1',
-  -             'username': 'e2e.analyst.a',
-  -         },
-  -         'analyst_b': {
-  -             'id': '00000000-0000-4000-8000-0000000000b1',
-  -             'username': 'e2e.analyst.b',
-  -         },
-  -         'bootstrap': {
-  -             'id': '00000000-0000-4000-8000-0000000000c1',
-  -             'username': 'e2e.bootstrap',
-  -         },
-  -     },
-    }
-============================== 1 failed in 0.39s ===============================
+assert 1 == 0
+ +  where 1 = CompletedProcess(args=['/home/runner/work/darknetra/darknetra/.venv/bin/python', '/home/runner/work/darknetra/darknetra/scripts/create_e2e_fixture.py'], returncode=1, stdout='', stderr='Traceback (most recent call last):\n  File "/home/runner/work/darknetra/darknetra/scripts/create_e2e_fixture.py", line 14, in <module>\n    from darknetra_api.models.audit import AuditEvent\nModuleNotFoundError: No module named \'darknetra_api\'\n').returncode
+============================== 1 failed in 0.65s ===============================
 ```
