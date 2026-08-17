@@ -349,9 +349,10 @@ async def change_password(
 ) -> User:
     require_csrf(context.auth_session, csrf_token)
     user = context.user
-    if not user.must_change_password:
-        if not current_password or not verify_password(current_password, user.password_hash):
-            raise AuthenticationError(_GENERIC_AUTH_MESSAGE)
+    if not user.must_change_password and (
+        not current_password or not verify_password(current_password, user.password_hash)
+    ):
+        raise AuthenticationError(_GENERIC_AUTH_MESSAGE)
     validate_password_policy(new_password, username=user.username_normalized)
     user.password_hash = hash_password(new_password)
     user.must_change_password = False
