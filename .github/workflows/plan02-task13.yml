@@ -1,6 +1,6 @@
 name: Plan 02 Task 13 real auth E2E
 
-# Fixture GREEN gate before real browser authentication tests.
+# Fixture GREEN rerun after loading API source only after safety validation.
 on:
   push:
     branches: [testing-codex]
