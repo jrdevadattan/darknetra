@@ -1,0 +1,177 @@
+name: Diagnose Task 09 browser gate
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/diagnose-task09-browser.yml
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - name: Prepare workspaces
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.15.0 --activate
+          uv sync --all-packages --dev --frozen
+          pnpm install --frozen-lockfile
+          pnpm --filter @darknetra/web exec playwright install --with-deps chromium
+      - name: Reproduce final browser candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git grep -n -F '@fullcalendar/react' -- apps/web/src || true)"
+          pnpm --filter @darknetra/web remove @fullcalendar/react
+          mkdir -p apps/web/e2e/online apps/web/e2e/offline docs/verification
+          cat > apps/web/e2e/online/investigator-workspace.spec.ts <<'EOF'
+          import { expect, test } from '@playwright/test';
+
+          const CASE_TABS = [
+            'Overview', 'Evidence', 'Entities', 'Activity Candidates', 'Link Analysis',
+            'NarcoGraph', 'Timeline', 'Alerts', 'Reports',
+          ];
+
+          test('desktop and mobile navigation expose DARKNETRA workspaces', async ({ page }, testInfo) => {
+            await page.goto('/dashboard');
+            await expect(page.getByRole('heading', { name: 'Investigator overview' })).toBeVisible();
+            if (testInfo.project.name.includes('mobile')) {
+              await page.getByRole('button', { name: 'Toggle Sidebar' }).click();
+            }
+            await expect(page.getByRole('link', { name: 'Cases', exact: true }).first()).toBeVisible();
+          });
+
+          test('fixture case exposes all nine investigation tabs', async ({ page }) => {
+            await page.goto('/cases/SYN-DEMO-001');
+            await expect(page.getByRole('heading', { name: 'Alias correlation training case' })).toBeVisible();
+            const caseNav = page.getByRole('navigation', { name: 'Case sections' });
+            for (const label of CASE_TABS) {
+              await expect(caseNav.getByRole('link', { name: label, exact: true })).toBeVisible();
+            }
+            await caseNav.getByRole('link', { name: 'Evidence', exact: true }).click();
+            await expect(page).toHaveURL(/\/cases\/SYN-DEMO-001\/evidence$/);
+            await expect(page.getByText('Evidence Vault begins in Plan 03')).toBeVisible();
+          });
+
+          test('System Health reports a measured reachable API', async ({ page }) => {
+            await page.goto('/system/health');
+            await expect(page.getByRole('heading', { name: 'System Health' })).toBeVisible();
+            await expect(page.getByText('DARKNETRA API', { exact: true })).toBeVisible();
+            await expect(page.getByText('Verified', { exact: true })).toBeVisible();
+            await expect(page.getByText('ready', { exact: true })).toBeVisible();
+          });
+          EOF
+          cat > apps/web/e2e/offline/system-health-offline.spec.ts <<'EOF'
+          import { expect, test } from '@playwright/test';
+          test('System Health reports unavailable API without false green', async ({ page }) => {
+            await page.goto('/system/health');
+            await expect(page.getByRole('heading', { name: 'System Health' })).toBeVisible();
+            await expect(page.getByText('DARKNETRA API unreachable', { exact: true })).toBeVisible();
+            await expect(page.getByText('Offline', { exact: true })).toBeVisible();
+            await expect(page.getByText('Verified', { exact: true })).toHaveCount(0);
+          });
+          EOF
+          cat > apps/web/playwright.config.ts <<'EOF'
+          import path from 'node:path';
+          import { defineConfig, devices } from '@playwright/test';
+          const ROOT = path.resolve(__dirname, '../..');
+          export default defineConfig({
+            testDir: './e2e/online', fullyParallel: false, timeout: 30_000,
+            expect: { timeout: 8_000 }, reporter: [['list']],
+            use: { baseURL: 'http://127.0.0.1:3000', trace: 'retain-on-failure', screenshot: 'only-on-failure' },
+            projects: [
+              { name: 'desktop-chromium', use: { ...devices['Desktop Chrome'] } },
+              { name: 'mobile-chromium', use: { ...devices['Pixel 7'] } },
+            ],
+            webServer: [
+              {
+                command: 'uv run uvicorn --app-dir apps/api darknetra_api.main:app --host 127.0.0.1 --port 8000',
+                cwd: ROOT, url: 'http://127.0.0.1:8000/api/v1/health/live', reuseExistingServer: false,
+                timeout: 120_000, env: { ...process.env, DARKNETRA_BUILD_VERSION: 'e2e' },
+              },
+              {
+                command: 'pnpm --filter @darknetra/web exec next start --hostname 127.0.0.1 --port 3000',
+                cwd: ROOT, url: 'http://127.0.0.1:3000/dashboard', reuseExistingServer: false, timeout: 120_000,
+                env: { ...process.env, DARKNETRA_API_BASE_URL: 'http://127.0.0.1:8000', NEXT_PUBLIC_DARKNETRA_API_BASE_URL: 'http://127.0.0.1:8000' },
+              },
+            ],
+          });
+          EOF
+          cat > apps/web/playwright.offline.config.ts <<'EOF'
+          import path from 'node:path';
+          import { defineConfig, devices } from '@playwright/test';
+          const ROOT = path.resolve(__dirname, '../..');
+          export default defineConfig({
+            testDir: './e2e/offline', fullyParallel: false, timeout: 30_000,
+            expect: { timeout: 8_000 }, reporter: [['list']],
+            use: { baseURL: 'http://127.0.0.1:3001', trace: 'retain-on-failure' },
+            projects: [{ name: 'offline-chromium', use: { ...devices['Desktop Chrome'] } }],
+            webServer: {
+              command: 'pnpm --filter @darknetra/web exec next start --hostname 127.0.0.1 --port 3001',
+              cwd: ROOT, url: 'http://127.0.0.1:3001/system/health', reuseExistingServer: false, timeout: 120_000,
+              env: { ...process.env, DARKNETRA_API_BASE_URL: 'http://127.0.0.1:65534', NEXT_PUBLIC_DARKNETRA_API_BASE_URL: 'http://127.0.0.1:65534' },
+            },
+          });
+          EOF
+          node <<'NODE'
+          const fs = require('fs');
+          const p = 'apps/web/package.json';
+          const pkg = JSON.parse(fs.readFileSync(p, 'utf8'));
+          pkg.scripts['test:e2e:online'] = 'playwright test --config playwright.config.ts';
+          pkg.scripts['test:e2e:offline'] = 'playwright test --config playwright.offline.config.ts';
+          pkg.scripts['test:e2e'] = 'pnpm test:e2e:online && pnpm test:e2e:offline';
+          fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
+          NODE
+      - name: Capture build and browser output
+        shell: bash
+        run: |
+          set +e
+          pnpm --filter @darknetra/web build > /tmp/build.log 2>&1
+          build_status=$?
+          if [ "$build_status" -eq 0 ]; then
+            pnpm --filter @darknetra/web test:e2e > /tmp/e2e.log 2>&1
+            e2e_status=$?
+          else
+            e2e_status=99
+            echo 'E2E not run because build failed.' > /tmp/e2e.log
+          fi
+          set -e
+          {
+            echo '# Task 09 browser diagnostic'
+            echo
+            echo "- build_status: $build_status"
+            echo "- e2e_status: $e2e_status"
+            echo
+            echo '## Build log tail'
+            echo '```text'
+            tail -n 120 /tmp/build.log
+            echo '```'
+            echo
+            echo '## E2E log tail'
+            echo '```text'
+            tail -n 220 /tmp/e2e.log
+            echo '```'
+          } > docs/verification/task09-browser-diagnostic.md
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/verification/task09-browser-diagnostic.md
+          git commit -m 'docs: capture Task 09 browser diagnostic [skip ci]'
+          git push origin HEAD:testing-codex
+          exit 0
