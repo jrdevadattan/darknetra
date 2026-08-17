@@ -1,13 +1,14 @@
 import type { CSSProperties, ReactNode } from 'react';
+
 import { cookies } from 'next/headers';
 
-import { AppSidebar } from '@/app/(main)/dashboard/_components/sidebar/app-sidebar';
 import { LayoutControls } from '@/app/(main)/dashboard/_components/header/layout-controls';
 import { SearchDialog } from '@/app/(main)/dashboard/_components/header/search-dialog';
 import { ThemeSwitcher } from '@/app/(main)/dashboard/_components/header/theme-switcher';
-import { Badge } from '@/components/ui/badge';
+import { AppSidebar } from '@/app/(main)/dashboard/_components/sidebar/app-sidebar';
 import { Separator } from '@/components/ui/separator';
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar';
+import { SessionControls } from '@/features/auth/session-controls';
 import { cn } from '@/lib/utils';
 import { getPreference } from '@/server/server-actions';
 
@@ -43,9 +44,9 @@ export async function InvestigatorShell({ children }: { children: ReactNode }) {
               <SearchDialog />
             </div>
             <div className="flex items-center gap-2">
-              <Badge variant="outline" className="hidden sm:inline-flex">Fixture mode · ADMIN</Badge>
               <LayoutControls />
               <ThemeSwitcher />
+              <SessionControls />
             </div>
           </div>
         </header>
