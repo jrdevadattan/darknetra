@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from darknetra_api.config import get_settings
 from darknetra_api.routers.health import router as health_router
 from darknetra_api.routes.auth import router as auth_router
+from darknetra_api.routes.cases import router as cases_router
 
 settings = get_settings()
 app = FastAPI(title="DARKNETRA API", version="0.1.0")
@@ -16,3 +17,4 @@ app.add_middleware(
 )
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
+app.include_router(cases_router, prefix="/api/v1")
