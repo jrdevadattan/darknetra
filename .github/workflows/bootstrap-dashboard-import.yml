@@ -48,6 +48,15 @@ jobs:
           rm -rf apps/web/.github apps/web/.husky
           rm -f apps/web/package-lock.json
 
+          # These three upstream showcase modules are already rejected by the
+          # DARKNETRA design and fail the pinned snapshot's own TypeScript
+          # baseline against its resolved chart typings. Removing only these
+          # known non-product modules is the smallest root-cause fix.
+          rm -rf \
+            'apps/web/src/app/(main)/dashboard/(legacy)' \
+            'apps/web/src/app/(main)/dashboard/default' \
+            'apps/web/src/app/(main)/dashboard/ecommerce'
+
       - name: Rebrand workspace package and configure tests
         shell: bash
         run: |
