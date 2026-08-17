@@ -1,6 +1,22 @@
 name: darknetra
 
 services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: darknetra
+      POSTGRES_USER: darknetra
+      POSTGRES_PASSWORD: ${DARKNETRA_POSTGRES_PASSWORD:-darknetra-dev-only}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - app
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   api:
     build:
       context: .
@@ -8,6 +24,10 @@ services:
     environment:
       DARKNETRA_ENVIRONMENT: development
       DARKNETRA_BUILD_VERSION: docker-dev
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:${DARKNETRA_POSTGRES_PASSWORD:-darknetra-dev-only}@postgres:5432/darknetra
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - app
     healthcheck:
@@ -39,3 +59,6 @@ services:
 networks:
   app:
     driver: bridge
+
+volumes:
+  postgres-data:
