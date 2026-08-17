@@ -4,12 +4,16 @@ from logging.config import fileConfig
 from alembic import context
 from darknetra_api.config import get_settings
 from darknetra_api.db.base import Base
+from darknetra_api.models import metadata_models
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+if not metadata_models:
+    raise RuntimeError("SQLAlchemy model registry is empty")
 
 settings = get_settings()
 config.set_main_option("sqlalchemy.url", settings.database_url)
