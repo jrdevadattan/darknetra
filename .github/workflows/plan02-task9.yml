@@ -1,0 +1,31 @@
+name: Plan 02 Task 9 frontend API client
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan02-task9.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Prepare pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.15.0 --activate
+          pnpm install --frozen-lockfile
+      - name: Task 9 RED client tests
+        run: pnpm --filter @darknetra/web test -- src/lib/api
