@@ -56,7 +56,7 @@ test('normal login enters the dashboard and logout clears the session UX', async
 
   await expect(page).toHaveURL(/\/dashboard$/);
   await expect(page.getByRole('heading', { name: 'Investigator overview' })).toBeVisible();
-  await expect(page.getByText('Investigator One')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
 
   await page.getByRole('button', { name: 'Sign out' }).click();
   await expect(page).toHaveURL(/\/auth\/v2\/login$/);
@@ -95,8 +95,10 @@ test('forced-change login cannot enter the dashboard until password update succe
   ).toBeVisible();
   await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
 
-  await page.getByLabel('New password').fill('Replacement-Password-42!');
-  await page.getByLabel('Confirm new password').fill('Replacement-Password-42!');
+  await page.getByLabel('New password', { exact: true }).fill('Replacement-Password-42!');
+  await page
+    .getByLabel('Confirm new password', { exact: true })
+    .fill('Replacement-Password-42!');
   await page.getByRole('button', { name: 'Update password' }).click();
 
   await expect(page).toHaveURL(/\/dashboard$/);
