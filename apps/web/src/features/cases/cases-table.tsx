@@ -132,7 +132,7 @@ export function CasesTable({ cases }: { cases: CaseSummary[] }) {
             ) : (
               <TableRow>
                 <TableCell colSpan={7} className="h-24 text-center text-muted-foreground">
-                  No fixture cases match the current filters.
+                  No cases match the current filters.
                 </TableCell>
               </TableRow>
             )}
