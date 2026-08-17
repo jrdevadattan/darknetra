@@ -7,6 +7,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CaseShell } from './case-shell';
 import { CasesLiveView } from './cases-live-view';
 
+vi.mock('next/navigation', () => ({
+  usePathname: () => '/cases/4d61f3aa-b46e-4ed2-b516-e91ec5930abc',
+}));
+
 const fetchMock = vi.fn();
 
 const API_CASE = {
