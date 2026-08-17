@@ -1,6 +1,6 @@
 name: Plan 02 Task 10 live cases
 
-# Full GREEN gate, rerun after providing Next pathname context to the isolated CaseShell test.
+# Diagnostic GREEN gate: persist each outcome, then fail if any required check is non-green.
 on:
   push:
     branches: [testing-codex]
@@ -23,41 +23,80 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Prepare pnpm
+
+      - id: prepare
+        name: Prepare pnpm
+        continue-on-error: true
         run: |
           corepack enable
           corepack prepare pnpm@10.15.0 --activate
           pnpm install --frozen-lockfile
-      - name: Task 10 focused tests
+
+      - id: focused
+        name: Task 10 focused tests
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
         run: |
           pnpm --filter @darknetra/web test -- src/features/cases/queries.test.ts src/features/cases/live-case-views.test.tsx
-      - name: Prove production routes do not import case fixtures
+
+      - id: fixture_sweep
+        name: Prove production routes do not import case fixtures
+        continue-on-error: true
         run: |
           if grep -R "features/cases/fixtures" apps/web/src/app apps/web/src/features \
             --include='*.ts' --include='*.tsx' | grep -vE '\.(test|spec)\.(ts|tsx):'; then
             echo 'Production fixture import detected.' >&2
             exit 1
           fi
-      - name: Web quality gate
-        run: |
-          pnpm --filter @darknetra/web lint
-          pnpm --filter @darknetra/web typecheck
-          pnpm --filter @darknetra/web test
-          pnpm --filter @darknetra/web build
-      - name: Record successful Task 10 gate
+
+      - id: lint
+        name: Biome lint
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: pnpm --filter @darknetra/web lint
+
+      - id: typecheck
+        name: TypeScript typecheck
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: pnpm --filter @darknetra/web typecheck
+
+      - id: full_tests
+        name: Full frontend tests
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: pnpm --filter @darknetra/web test
+
+      - id: build
+        name: Production build
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: pnpm --filter @darknetra/web build
+
+      - name: Persist Task 10 diagnostic record
+        if: always()
+        env:
+          PREPARE: ${{ steps.prepare.outcome }}
+          FOCUSED: ${{ steps.focused.outcome }}
+          FIXTURE_SWEEP: ${{ steps.fixture_sweep.outcome }}
+          LINT: ${{ steps.lint.outcome }}
+          TYPECHECK: ${{ steps.typecheck.outcome }}
+          FULL_TESTS: ${{ steps.full_tests.outcome }}
+          BUILD: ${{ steps.build.outcome }}
         run: |
           mkdir -p docs/verification
-          cat > docs/verification/plan02-task10-live-cases.md <<'EOF'
+          cat > docs/verification/plan02-task10-live-cases.md <<EOF
           # Plan 02 Task 10 verification
 
-          Verified on GitHub Actions after the live-case migration:
+          GitHub Actions outcomes for the live-case migration:
 
-          - focused mapper and live-view tests passed;
-          - production case routes/features contain no fixture imports;
-          - Biome lint passed;
-          - TypeScript typecheck passed;
-          - full frontend test suite passed;
-          - Next.js production build passed.
+          - prepare: ${PREPARE}
+          - focused mapper/live-view tests: ${FOCUSED}
+          - production fixture-import sweep: ${FIXTURE_SWEEP}
+          - Biome lint: ${LINT}
+          - TypeScript typecheck: ${TYPECHECK}
+          - full frontend tests: ${FULL_TESTS}
+          - Next.js production build: ${BUILD}
           EOF
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -66,3 +105,22 @@ jobs:
             git commit -m 'docs: record Plan 02 Task 10 verification [skip ci]'
             git push origin HEAD:testing-codex
           fi
+
+      - name: Enforce Task 10 gate
+        if: always()
+        env:
+          PREPARE: ${{ steps.prepare.outcome }}
+          FOCUSED: ${{ steps.focused.outcome }}
+          FIXTURE_SWEEP: ${{ steps.fixture_sweep.outcome }}
+          LINT: ${{ steps.lint.outcome }}
+          TYPECHECK: ${{ steps.typecheck.outcome }}
+          FULL_TESTS: ${{ steps.full_tests.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+        run: |
+          test "$PREPARE" = success
+          test "$FOCUSED" = success
+          test "$FIXTURE_SWEEP" = success
+          test "$LINT" = success
+          test "$TYPECHECK" = success
+          test "$FULL_TESTS" = success
+          test "$BUILD" = success
