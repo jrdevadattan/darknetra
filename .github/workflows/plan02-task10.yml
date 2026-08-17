@@ -1,6 +1,6 @@
 name: Plan 02 Task 10 live cases
 
-# Full GREEN gate: prove live case mapping, view states, no production fixture imports, and build health.
+# Full GREEN gate, rerun after providing Next pathname context to the isolated CaseShell test.
 on:
   push:
     branches: [testing-codex]
