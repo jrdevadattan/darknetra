@@ -35,12 +35,12 @@ jobs:
           set -euo pipefail
           cat > apps/web/src/config/metadata-contract.test.ts <<'EOF'
           import { describe, expect, it } from 'vitest';
-          import { metadata } from '@/app/layout';
+          import { ROOT_METADATA } from './root-metadata';
 
           describe('root metadata', () => {
             it('uses the approved DARKNETRA metadata', () => {
-              expect(metadata.title).toBe('DARKNETRA — Investigator Intelligence');
-              expect(metadata.description).toBe('Evidence-first narcotics intelligence for authorized investigators.');
+              expect(ROOT_METADATA.title).toBe('DARKNETRA — Investigator Intelligence');
+              expect(ROOT_METADATA.description).toBe('Evidence-first narcotics intelligence for authorized investigators.');
             });
           });
           EOF
@@ -112,13 +112,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cat > apps/web/src/config/root-metadata.ts <<'EOF'
+          import type { Metadata } from 'next';
+
+          export const ROOT_METADATA: Metadata = {
+            title: 'DARKNETRA — Investigator Intelligence',
+            description: 'Evidence-first narcotics intelligence for authorized investigators.',
+          };
+          EOF
+
           python - <<'PY'
           from pathlib import Path
           path = Path('apps/web/src/app/layout.tsx')
           text = path.read_text()
           text = text.replace('import { APP_CONFIG } from "@/config/app-config";\n', '')
+          if 'import { ROOT_METADATA } from "@/config/root-metadata";\n' not in text:
+              text = text.replace('import { Toaster } from "@/components/ui/sonner";\n', 'import { Toaster } from "@/components/ui/sonner";\nimport { ROOT_METADATA } from "@/config/root-metadata";\n')
           old = '''export const metadata: Metadata = {\n  title: APP_CONFIG.meta.title,\n  description: APP_CONFIG.meta.description,\n};'''
-          new = '''export const metadata: Metadata = {\n  title: "DARKNETRA — Investigator Intelligence",\n  description: "Evidence-first narcotics intelligence for authorized investigators.",\n};'''
+          new = 'export const metadata: Metadata = ROOT_METADATA;'
           if old not in text:
               raise SystemExit('root metadata block not found')
           path.write_text(text.replace(old, new))
