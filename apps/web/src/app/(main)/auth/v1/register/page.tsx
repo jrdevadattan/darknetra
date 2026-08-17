@@ -3,7 +3,6 @@ import Link from "next/link";
 import { Command } from "lucide-react";
 
 import { RegisterForm } from "../../_components/register-form";
-import { GoogleButton } from "../../_components/social-auth/google-button";
 
 export default function RegisterV1() {
   return (
@@ -18,7 +17,6 @@ export default function RegisterV1() {
           </div>
           <div className="space-y-4">
             <RegisterForm />
-            <GoogleButton className="w-full" variant="outline" />
             <p className="text-center text-muted-foreground text-xs">
               Already have an account?{" "}
               <Link prefetch={false} href="login" className="text-primary">
