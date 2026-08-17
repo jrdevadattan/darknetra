@@ -56,7 +56,9 @@ test('System Health reports a measured reachable API', async ({ page }) => {
   await page.goto('/system/health');
   await expect(page.getByRole('heading', { name: 'System Health' })).toBeVisible();
 
-  const apiCard = page.getByText('DARKNETRA API', { exact: true }).locator('..').locator('..');
+  const apiCard = page
+    .getByText('DARKNETRA API', { exact: true })
+    .locator('xpath=ancestor::*[@data-slot="card"][1]');
   await expect(apiCard.getByText('Verified', { exact: true })).toBeVisible();
-  await expect(apiCard).toContainText('Reported status: ready');
+  await expect(apiCard.getByText('Reported status: ready', { exact: true })).toBeVisible();
 });
