@@ -1,5 +1,6 @@
 name: Plan 02 Task 8 administration reads
 
+# Retry marker: administration read routes are wired for redaction and scope verification.
 on:
   push:
     branches: [testing-codex]
@@ -38,16 +39,6 @@ jobs:
       - uses: astral-sh/setup-uv@v10.0.1
         with:
           version: '0.12.4'
-      - name: Generate runtime-only auth signing key
-        run: |
-          KEY="$(python - <<'PY'
-          import base64
-          import secrets
-          print(base64.b64encode(secrets.token_bytes(32)).decode("ascii"))
-          PY
-          )"
-          echo "::add-mask::$KEY"
-          echo "DARKNETRA_JWT_SIGNING_KEY_B64=$KEY" >> "$GITHUB_ENV"
       - name: Sync Python workspace
         run: uv sync --all-packages --dev --frozen
       - name: Migrate database
@@ -55,4 +46,4 @@ jobs:
       - name: Ruff and Task 8 tests
         run: |
           uv run ruff check .
-          uv run pytest apps/api/tests/integration/test_admin_reads.py -v
+          DARKNETRA_JWT_SIGNING_KEY_B64="$(python -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())')" uv run pytest apps/api/tests/integration/test_admin_reads.py -v
