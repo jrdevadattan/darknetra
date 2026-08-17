@@ -1,9 +1,8 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
 from darknetra_api.models.enums import CaseSensitivity, CaseStatus
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 CASE_CODE_PATTERN = r"^[A-Z0-9]+(?:-[A-Z0-9]+)*$"
 
