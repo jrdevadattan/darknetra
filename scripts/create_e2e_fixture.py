@@ -5,19 +5,15 @@ import json
 import os
 import sys
 from collections.abc import Mapping
+from pathlib import Path
 from urllib.parse import urlparse
 from uuid import UUID
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from darknetra_api.models.audit import AuditEvent
-from darknetra_api.models.auth_session import AuthSession
-from darknetra_api.models.case import Case
-from darknetra_api.models.case_membership import CaseMembership, CaseMembershipRole
-from darknetra_api.models.enums import CaseSensitivity, GlobalRole
-from darknetra_api.models.user import User
-from darknetra_api.security.passwords import PasswordPolicyError, hash_password, validate_password_policy
+ROOT = Path(__file__).resolve().parents[1]
+API_ROOT = ROOT / "apps" / "api"
 
 REQUIRED_CREDENTIAL_VARIABLES = (
     "DARKNETRA_E2E_ANALYST_A_PASSWORD",
@@ -61,40 +57,46 @@ def validate_fixture_environment(environment: Mapping[str, str]) -> None:
         )
 
 
-def _validated_password(environment: Mapping[str, str], variable: str, *, username: str) -> str:
-    password = environment[variable]
-    try:
-        validate_password_policy(password, username=username)
-    except PasswordPolicyError as exc:
-        raise FixtureSafetyError(f"{variable} violates the password policy: {exc}") from exc
-    return password
-
-
-async def _reset_plan02_state(session: AsyncSession) -> None:
-    await session.execute(sa.delete(CaseMembershipRole))
-    await session.execute(sa.delete(CaseMembership))
-    await session.execute(sa.delete(AuditEvent))
-    await session.execute(sa.delete(Case))
-    await session.execute(sa.delete(AuthSession))
-    await session.execute(sa.delete(User))
-    await session.flush()
+def _enable_api_imports() -> None:
+    api_root = str(API_ROOT)
+    if api_root not in sys.path:
+        sys.path.insert(0, api_root)
 
 
 async def create_fixture(environment: Mapping[str, str]) -> dict[str, object]:
     validate_fixture_environment(environment)
+    _enable_api_imports()
+
+    from darknetra_api.models.audit import AuditEvent
+    from darknetra_api.models.auth_session import AuthSession
+    from darknetra_api.models.case import Case
+    from darknetra_api.models.case_membership import CaseMembership, CaseMembershipRole
+    from darknetra_api.models.enums import CaseSensitivity, GlobalRole
+    from darknetra_api.models.user import User
+    from darknetra_api.security.passwords import (
+        PasswordPolicyError,
+        hash_password,
+        validate_password_policy,
+    )
+
+    def validated_password(variable: str, *, username: str) -> str:
+        password = environment[variable]
+        try:
+            validate_password_policy(password, username=username)
+        except PasswordPolicyError as exc:
+            raise FixtureSafetyError(f"{variable} violates the password policy: {exc}") from exc
+        return password
+
     database_url = environment["DARKNETRA_DATABASE_URL"]
-    analyst_a_password = _validated_password(
-        environment,
+    analyst_a_password = validated_password(
         "DARKNETRA_E2E_ANALYST_A_PASSWORD",
         username="e2e.analyst.a",
     )
-    analyst_b_password = _validated_password(
-        environment,
+    analyst_b_password = validated_password(
         "DARKNETRA_E2E_ANALYST_B_PASSWORD",
         username="e2e.analyst.b",
     )
-    bootstrap_password = _validated_password(
-        environment,
+    bootstrap_password = validated_password(
         "DARKNETRA_E2E_BOOTSTRAP_PASSWORD",
         username="e2e.bootstrap",
     )
@@ -103,7 +105,13 @@ async def create_fixture(environment: Mapping[str, str]) -> dict[str, object]:
     sessions = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     try:
         async with sessions() as session:
-            await _reset_plan02_state(session)
+            await session.execute(sa.delete(CaseMembershipRole))
+            await session.execute(sa.delete(CaseMembership))
+            await session.execute(sa.delete(AuditEvent))
+            await session.execute(sa.delete(Case))
+            await session.execute(sa.delete(AuthSession))
+            await session.execute(sa.delete(User))
+            await session.flush()
 
             analyst_a = User(
                 id=ANALYST_A_ID,
