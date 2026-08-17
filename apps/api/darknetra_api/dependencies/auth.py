@@ -2,6 +2,9 @@ from collections.abc import Callable, Coroutine
 from typing import Annotated, Any
 from uuid import UUID
 
+from fastapi import Depends, HTTPException, Request, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from darknetra_api.authz.permissions import Permission
 from darknetra_api.authz.policy import (
     AuthorizationDenied,
@@ -14,8 +17,6 @@ from darknetra_api.db.session import get_db_session
 from darknetra_api.models.case import Case
 from darknetra_api.models.user import User
 from darknetra_api.services.auth import AuthContext, AuthenticationError, get_auth_context
-from fastapi import Depends, HTTPException, Request, status
-from sqlalchemy.ext.asyncio import AsyncSession
 
 ACCESS_COOKIE = "darknetra_access"
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
