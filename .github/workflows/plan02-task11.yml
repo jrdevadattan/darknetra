@@ -1,6 +1,6 @@
 name: Plan 02 Task 11 authenticated session UX
 
-# Diagnostic component gate: capture the exact focused Vitest failure before changing auth logic.
+# Diagnostic component gate: rerun after explicit Testing Library cleanup between Vitest cases.
 on:
   push:
     branches: [testing-codex]
@@ -98,7 +98,7 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add docs/verification/plan02-task11-auth.md
           if ! git diff --cached --quiet; then
-            git commit -m 'docs: capture Plan 02 Task 11 auth failure [skip ci]'
+            git commit -m 'docs: capture Plan 02 Task 11 auth result [skip ci]'
             git push origin HEAD:testing-codex
           fi
 
