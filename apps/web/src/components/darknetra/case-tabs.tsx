@@ -1,10 +1,10 @@
-'use client';
+"use client";
 
-import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 
-import { cn } from '@/lib/utils';
-import { CASE_NAVIGATION } from '@/navigation/darknetra-navigation';
+import { cn } from "@/lib/utils";
+import { CASE_NAVIGATION } from "@/navigation/darknetra-navigation";
 
 export function CaseTabs({ caseId }: { caseId: string }) {
   const pathname = usePathname();
@@ -20,10 +20,10 @@ export function CaseTabs({ caseId }: { caseId: string }) {
             <Link
               key={item.title}
               href={href}
-              aria-current={active ? 'page' : undefined}
+              aria-current={active ? "page" : undefined}
               className={cn(
-                'border-b-2 border-transparent px-3 py-2 text-sm text-muted-foreground hover:text-foreground',
-                active && 'border-primary font-medium text-foreground',
+                "border-transparent border-b-2 px-3 py-2 text-muted-foreground text-sm hover:text-foreground",
+                active && "border-primary font-medium text-foreground",
               )}
             >
               {item.title}
