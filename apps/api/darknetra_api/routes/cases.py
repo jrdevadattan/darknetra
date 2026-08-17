@@ -3,6 +3,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
+from darknetra_api.authz.permissions import Permission
 from darknetra_api.authz.policy import AuthorizationDenied, CaseNotFound, PasswordChangeRequired
 from darknetra_api.dependencies.auth import (
     CurrentUser,
@@ -89,7 +90,7 @@ async def list_cases_route(
 
 @router.get("/{case_id}", response_model=CaseResponse)
 async def get_case_route(
-    case: Annotated[Case, Depends(require_case_permission(permission="CASE_READ"))],
+    case: Annotated[Case, Depends(require_case_permission(Permission.CASE_READ))],
 ) -> Case:
     return case
 
