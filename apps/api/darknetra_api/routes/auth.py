@@ -1,16 +1,19 @@
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from darknetra_api.config import get_settings
 from darknetra_api.db.session import get_db_session
-from darknetra_api.schemas.auth import AuthResponse, AuthUserResponse, ChangePasswordRequest, LoginRequest
+from darknetra_api.models.user import User
+from darknetra_api.schemas.auth import (
+    AuthResponse,
+    AuthUserResponse,
+    ChangePasswordRequest,
+    LoginRequest,
+)
 from darknetra_api.security.passwords import PasswordPolicyError
 from darknetra_api.services.auth import (
-    AuthenticationError,
     AuthContext,
+    AuthenticationError,
     CsrfError,
     IssuedSession,
     LoginRateLimited,
@@ -20,6 +23,8 @@ from darknetra_api.services.auth import (
     logout,
     refresh,
 )
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
@@ -42,7 +47,7 @@ def _validate_browser_origin(request: Request, *, required: bool) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="request origin rejected")
 
 
-def _user_response(context_user) -> AuthUserResponse:
+def _user_response(context_user: User) -> AuthUserResponse:
     return AuthUserResponse.model_validate(context_user)
 
 
