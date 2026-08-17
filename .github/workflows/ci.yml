@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-ci@127.0.0.1:5432/darknetra
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_ENVIRONMENT: development
     services:
       postgres:
         image: postgres:18
@@ -35,6 +37,16 @@ jobs:
       - uses: astral-sh/setup-uv@v10.0.1
         with:
           version: '0.12.4'
+      - name: Generate runtime-only auth signing key
+        run: |
+          KEY="$(python - <<'PY'
+          import base64
+          import secrets
+          print(base64.b64encode(secrets.token_bytes(32)).decode("ascii"))
+          PY
+          )"
+          echo "::add-mask::$KEY"
+          echo "DARKNETRA_JWT_SIGNING_KEY_B64=$KEY" >> "$GITHUB_ENV"
       - name: Sync Python workspace
         run: uv sync --all-packages --dev --frozen
       - name: Migrate database
