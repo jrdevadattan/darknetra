@@ -1,8 +1,9 @@
 from typing import Annotated, Literal
 
-from darknetra_api.config import Settings, get_settings
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+
+from darknetra_api.config import Settings, get_settings
 
 router = APIRouter(prefix="/health", tags=["health"])
 
