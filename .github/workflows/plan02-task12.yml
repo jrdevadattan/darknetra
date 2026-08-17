@@ -1,5 +1,6 @@
 name: Plan 02 Task 12 administration reads
 
+# GREEN gate: backend-sourced role/user reads, no duplicated frontend policy truth.
 on:
   push:
     branches: [testing-codex]
@@ -22,6 +23,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+
       - id: prepare
         name: Prepare pnpm
         continue-on-error: true
@@ -29,28 +31,71 @@ jobs:
           corepack enable
           corepack prepare pnpm@10.15.0 --activate
           pnpm install --frozen-lockfile
+
       - id: admin_tests
-        name: Task 12 RED admin tests
+        name: Focused administration tests
         if: steps.prepare.outcome == 'success'
         continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
-          pnpm --filter @darknetra/web test -- src/features/admin 2>&1 | tee /tmp/task12-admin-tests.log
-      - name: Record Task 12 RED outcome
+          pnpm --filter @darknetra/web exec vitest run src/features/admin/admin-reads.test.tsx 2>&1 | tee /tmp/task12-admin-tests.log
+
+      - id: policy_sweep
+        name: Prove duplicated role matrix is removed
+        continue-on-error: true
+        run: test ! -f apps/web/src/features/admin/roles/role-matrix.tsx
+
+      - id: lint
+        name: Biome lint
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: pnpm --filter @darknetra/web lint
+
+      - id: typecheck
+        name: TypeScript typecheck
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: pnpm --filter @darknetra/web typecheck
+
+      - id: full_tests
+        name: Full frontend tests
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: pnpm --filter @darknetra/web test
+
+      - id: build
+        name: Production build
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: pnpm --filter @darknetra/web build
+
+      - name: Persist Task 12 verification record
         if: always()
         env:
           PREPARE: ${{ steps.prepare.outcome }}
           ADMIN_TESTS: ${{ steps.admin_tests.outcome }}
+          POLICY_SWEEP: ${{ steps.policy_sweep.outcome }}
+          LINT: ${{ steps.lint.outcome }}
+          TYPECHECK: ${{ steps.typecheck.outcome }}
+          FULL_TESTS: ${{ steps.full_tests.outcome }}
+          BUILD: ${{ steps.build.outcome }}
         run: |
           mkdir -p docs/verification
           {
             echo '# Plan 02 Task 12 verification'
             echo
-            echo 'RED phase outcomes:'
+            echo 'GitHub Actions outcomes for backend-sourced administration reads:'
             echo
             echo "- prepare: ${PREPARE}"
             echo "- focused administration tests: ${ADMIN_TESTS}"
+            echo "- duplicated policy sweep: ${POLICY_SWEEP}"
+            echo "- Biome lint: ${LINT}"
+            echo "- TypeScript typecheck: ${TYPECHECK}"
+            echo "- full frontend tests: ${FULL_TESTS}"
+            echo "- Next.js production build: ${BUILD}"
+            echo
+            echo '## Focused administration test tail'
             echo
             echo '```text'
             tail -n 120 /tmp/task12-admin-tests.log 2>/dev/null || true
@@ -60,14 +105,25 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add docs/verification/plan02-task12-admin.md
           if ! git diff --cached --quiet; then
-            git commit -m 'docs: record Plan 02 Task 12 RED outcome [skip ci]'
+            git commit -m 'docs: record Plan 02 Task 12 verification [skip ci]'
             git push origin HEAD:testing-codex
           fi
-      - name: Require RED before implementation
+
+      - name: Enforce Task 12 gate
         if: always()
         env:
           PREPARE: ${{ steps.prepare.outcome }}
           ADMIN_TESTS: ${{ steps.admin_tests.outcome }}
+          POLICY_SWEEP: ${{ steps.policy_sweep.outcome }}
+          LINT: ${{ steps.lint.outcome }}
+          TYPECHECK: ${{ steps.typecheck.outcome }}
+          FULL_TESTS: ${{ steps.full_tests.outcome }}
+          BUILD: ${{ steps.build.outcome }}
         run: |
           test "$PREPARE" = success
-          test "$ADMIN_TESTS" = failure
+          test "$ADMIN_TESTS" = success
+          test "$POLICY_SWEEP" = success
+          test "$LINT" = success
+          test "$TYPECHECK" = success
+          test "$FULL_TESTS" = success
+          test "$BUILD" = success
