@@ -4,14 +4,13 @@ from uuid import uuid4
 import httpx
 import pytest
 import sqlalchemy as sa
-from sqlalchemy import select
-
 from darknetra_api.db.session import async_session_factory
 from darknetra_api.main import app
 from darknetra_api.models.audit import AuditEvent
 from darknetra_api.models.auth_session import AuthSession
 from darknetra_api.models.user import User, utc_now
 from darknetra_api.services.bootstrap import bootstrap_admin
+from sqlalchemy import select
 
 ORIGIN = "http://localhost:3000"
 INITIAL_PASSWORD = "Initial admin password 42"
