@@ -111,6 +111,7 @@ jobs:
               HOSTNAME=0.0.0.0
           RUN useradd --create-home --uid 10001 appuser
           WORKDIR /app
+          COPY --from=builder --chown=appuser:appuser /app/node_modules ./node_modules
           COPY --from=builder --chown=appuser:appuser /app/apps/web/.next/standalone ./
           COPY --from=builder --chown=appuser:appuser /app/apps/web/.next/static ./apps/web/.next/static
           USER appuser
