@@ -1,6 +1,6 @@
 name: Plan 02 Task 1 database foundation
 
-# Retry marker: PostgreSQL 18 stores versioned data under /var/lib/postgresql.
+# Retry marker: PostgreSQL 18 mount and Alembic Ruff ordering are corrected.
 on:
   push:
     branches: [testing-codex]
