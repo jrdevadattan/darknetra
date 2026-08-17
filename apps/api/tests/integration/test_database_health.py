@@ -1,5 +1,4 @@
 import pytest
-
 from darknetra_api.db.session import async_session_factory
 
 
