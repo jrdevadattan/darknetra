@@ -1,11 +1,14 @@
 import base64
+import json
 
 import pytest
+from darknetra_api.config import Settings
 from darknetra_api.security.encryption import (
     EncryptedValue,
     SensitiveFieldConfigurationError,
     SensitiveFieldCrypto,
     UnknownKeyVersionError,
+    crypto_from_settings,
 )
 from darknetra_api.security.keyring import SensitiveFieldKeyring
 
@@ -122,3 +125,26 @@ def test_empty_or_invalid_keyring_fails_closed() -> None:
             active_version="v1",
             blind_index_key_b64=base64.b64encode(key(0x33)).decode("ascii"),
         )
+
+
+def test_default_crypto_boundary_uses_active_versioned_keyring_from_settings() -> None:
+    settings = Settings(
+        field_keyring_b64_json=json.dumps(
+            {
+                "v1": base64.b64encode(key(0x11)).decode("ascii"),
+                "v2": base64.b64encode(key(0x22)).decode("ascii"),
+            }
+        ),
+        field_active_key_version="v2",
+        field_blind_index_key_b64=base64.b64encode(key(0x33)).decode("ascii"),
+    )
+
+    boundary = crypto_from_settings(settings)
+    encrypted = boundary.encrypt(
+        "versioned setting",
+        purpose="evidence.source_locator",
+        resource_id="evidence-settings",
+    )
+
+    assert encrypted.key_version == "v2"
+    assert boundary.key_versions == frozenset({"v1", "v2"})
