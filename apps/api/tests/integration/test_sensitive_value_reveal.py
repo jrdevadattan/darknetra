@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import pytest
 import sqlalchemy as sa
