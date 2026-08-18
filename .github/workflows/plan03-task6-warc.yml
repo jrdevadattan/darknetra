@@ -1,0 +1,389 @@
+name: Plan 03 Task 6 WARC derivative TDD
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task6-warc.yml
+
+permissions:
+  contents: write
+
+jobs:
+  red-green:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task6-warc@127.0.0.1:5432/darknetra_plan03_task6_warc
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-task6-warc
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task6_warc
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task6-warc
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task6_warc"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - name: Require Task 6 text and tabular checkpoints
+        run: |
+          test -f docs/verification/plan03-task6-text-html.md
+          test -f docs/verification/plan03-task6-json-csv.md
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f"::add-mask::{value}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n")
+              out.write(f"DARKNETRA_FIELD_KEY_V1_B64={field}\n")
+              out.write("DARKNETRA_FIELD_KEYRING_B64_JSON=" + json.dumps({"v1": field}, separators=(",", ":")) + "\n")
+              out.write("DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n")
+              out.write(f"DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n")
+          PY
+      - name: Install frozen workspace
+        run: uv sync --all-packages --dev --frozen
+      - name: Write WARC contracts first
+        run: |
+          cat > apps/api/tests/unit/test_warc_parser.py <<'PY'
+          from __future__ import annotations
+
+          import gzip
+          import importlib
+          import importlib.util
+
+          import pytest
+
+
+          def module():
+              spec = importlib.util.find_spec("darknetra_api.parsers.warc")
+              assert spec is not None, "bounded WARC parser is not implemented"
+              return importlib.import_module("darknetra_api.parsers.warc")
+
+
+          def response_record(uri: str, body: bytes, content_type: str = "text/plain") -> bytes:
+              http = (
+                  b"HTTP/1.1 200 OK\r\n"
+                  + f"Content-Type: {content_type}\r\n".encode()
+                  + f"Content-Length: {len(body)}\r\n".encode()
+                  + b"\r\n"
+                  + body
+              )
+              headers = (
+                  b"WARC/1.0\r\n"
+                  b"WARC-Type: response\r\n"
+                  + f"WARC-Target-URI: {uri}\r\n".encode()
+                  + b"WARC-Date: 2026-01-01T00:00:00Z\r\n"
+                  b"WARC-Record-ID: <urn:uuid:00000000-0000-0000-0000-000000000001>\r\n"
+                  b"Content-Type: application/http; msgtype=response\r\n"
+                  + f"Content-Length: {len(http)}\r\n".encode()
+                  + b"\r\n"
+              )
+              return headers + http + b"\r\n\r\n"
+
+
+          def metadata_record() -> bytes:
+              payload = b"metadata only"
+              return (
+                  b"WARC/1.0\r\nWARC-Type: metadata\r\n"
+                  b"WARC-Record-ID: <urn:uuid:00000000-0000-0000-0000-000000000002>\r\n"
+                  b"WARC-Date: 2026-01-01T00:00:00Z\r\n"
+                  b"Content-Type: application/warc-fields\r\n"
+                  + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+                  + payload
+                  + b"\r\n\r\n"
+              )
+
+
+          def test_response_records_extract_body_and_protected_locator_metadata() -> None:
+              parser = module()
+              data = response_record(
+                  "http://example.invalid/authorized-observation",
+                  b"authorized synthetic body",
+                  "text/plain; charset=utf-8",
+              )
+              result = parser.parse_warc(data)
+              assert len(result.records) == 1
+              record = result.records[0]
+              assert record.target_uri == "http://example.invalid/authorized-observation"
+              assert record.media_type == "text/plain"
+              assert record.payload == b"authorized synthetic body"
+              assert record.captured_at == "2026-01-01T00:00:00Z"
+              assert record.record_id.endswith("000000000001>")
+              assert result.metadata["response_records"] == 1
+              assert "example.invalid" not in result.normalized_text
+
+
+          def test_gzip_warc_and_multiple_responses_are_supported() -> None:
+              parser = module()
+              raw = (
+                  metadata_record()
+                  + response_record("http://one.invalid/", b"one")
+                  + response_record("http://two.invalid/", b"two", "application/json")
+              )
+              result = parser.parse_warc(gzip.compress(raw))
+              assert [record.payload for record in result.records] == [b"one", b"two"]
+              assert result.metadata["warc_records_seen"] == 3
+              assert result.metadata["gzip"] is True
+
+
+          def test_record_and_payload_limits_fail_closed() -> None:
+              parser = module()
+              raw = response_record("http://one.invalid/", b"12345")
+              with pytest.raises(parser.WarcLimitExceeded):
+                  parser.parse_warc(raw, limits=parser.WarcParseLimits(max_record_payload_bytes=4))
+              two = raw + response_record("http://two.invalid/", b"x")
+              with pytest.raises(parser.WarcLimitExceeded):
+                  parser.parse_warc(two, limits=parser.WarcParseLimits(max_records=1))
+
+
+          def test_missing_target_uri_is_retained_with_warning_not_invented() -> None:
+              parser = module()
+              data = response_record("http://placeholder.invalid/", b"safe").replace(
+                  b"WARC-Target-URI: http://placeholder.invalid/\r\n", b""
+              )
+              result = parser.parse_warc(data)
+              assert result.records[0].target_uri is None
+              assert "MISSING_TARGET_URI" in result.warnings
+
+
+          def test_malformed_and_corrupt_gzip_inputs_are_rejected() -> None:
+              parser = module()
+              with pytest.raises(parser.WarcParseError):
+                  parser.parse_warc(b"not a WARC")
+              compressed = gzip.compress(response_record("http://safe.invalid/", b"safe"))
+              with pytest.raises(parser.WarcParseError):
+                  parser.parse_warc(compressed[:-8])
+          PY
+      - name: Prove RED before implementation
+        run: |
+          set +e
+          uv run pytest -q apps/api/tests/unit/test_warc_parser.py >/tmp/task6-warc-red.log 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          grep -q 'bounded WARC parser is not implemented' /tmp/task6-warc-red.log
+      - name: Add locked warcio dependency
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("apps/api/pyproject.toml")
+          text = path.read_text(encoding="utf-8")
+          dependency = '    "warcio>=1.7,<2",\n'
+          if "warcio" not in text:
+              marker = "dependencies = [\n"
+              if text.count(marker) != 1:
+                  raise SystemExit("dependency list marker missing or ambiguous")
+              text = text.replace(marker, marker + dependency, 1)
+              path.write_text(text, encoding="utf-8")
+          PY
+          uv lock
+          uv sync --all-packages --dev --frozen
+      - name: Implement bounded WARC response parser
+        run: |
+          cat > apps/api/darknetra_api/parsers/warc.py <<'PY'
+          from __future__ import annotations
+
+          import io
+          from dataclasses import dataclass
+
+          from warcio.archiveiterator import ArchiveIterator
+
+
+          class WarcParseError(ValueError):
+              pass
+
+
+          class WarcLimitExceeded(WarcParseError):
+              pass
+
+
+          @dataclass(frozen=True, slots=True)
+          class WarcParseLimits:
+              max_input_bytes: int = 250 * 1024 * 1024
+              max_records: int = 50_000
+              max_response_records: int = 20_000
+              max_record_payload_bytes: int = 100 * 1024 * 1024
+              max_total_payload_bytes: int = 500 * 1024 * 1024
+
+              def __post_init__(self) -> None:
+                  if min(
+                      self.max_input_bytes,
+                      self.max_records,
+                      self.max_response_records,
+                      self.max_record_payload_bytes,
+                      self.max_total_payload_bytes,
+                  ) <= 0:
+                      raise ValueError("WARC parser limits must be positive")
+
+
+          @dataclass(frozen=True, slots=True)
+          class WarcResponseRecord:
+              index: int
+              record_id: str | None
+              target_uri: str | None
+              captured_at: str | None
+              media_type: str | None
+              status_code: str | None
+              payload: bytes
+
+
+          @dataclass(frozen=True, slots=True)
+          class WarcParseResult:
+              records: tuple[WarcResponseRecord, ...]
+              metadata: dict[str, int | bool]
+              warnings: tuple[str, ...] = ()
+
+              @property
+              def normalized_text(self) -> str:
+                  # Target URIs are intentionally excluded. They enter protected
+                  # evidence metadata in the ingestion pipeline rather than UI text.
+                  return "\n".join(
+                      f"record[{record.index}] media_type={record.media_type or 'unknown'} bytes={len(record.payload)}"
+                      for record in self.records
+                  )
+
+
+          def parse_warc(
+              data: bytes,
+              *,
+              limits: WarcParseLimits | None = None,
+          ) -> WarcParseResult:
+              active = limits or WarcParseLimits()
+              if not isinstance(data, bytes):
+                  raise TypeError("WARC evidence must be bytes")
+              if not data or len(data) > active.max_input_bytes:
+                  if not data:
+                      raise WarcParseError("WARC evidence is empty")
+                  raise WarcLimitExceeded("WARC evidence exceeds the input limit")
+              gzip_input = data.startswith(b"\x1f\x8b")
+              seen = 0
+              response_count = 0
+              total_payload = 0
+              warnings: list[str] = []
+              records: list[WarcResponseRecord] = []
+              try:
+                  iterator = ArchiveIterator(io.BytesIO(data), arc2warc=True)
+                  for record in iterator:
+                      seen += 1
+                      if seen > active.max_records:
+                          raise WarcLimitExceeded("WARC exceeds the record limit")
+                      if record.rec_type != "response":
+                          continue
+                      response_count += 1
+                      if response_count > active.max_response_records:
+                          raise WarcLimitExceeded("WARC exceeds the response-record limit")
+                      stream = record.content_stream()
+                      payload = stream.read(active.max_record_payload_bytes + 1)
+                      if len(payload) > active.max_record_payload_bytes:
+                          raise WarcLimitExceeded("WARC response payload exceeds the per-record limit")
+                      total_payload += len(payload)
+                      if total_payload > active.max_total_payload_bytes:
+                          raise WarcLimitExceeded("WARC exceeds the total response-payload limit")
+                      target = record.rec_headers.get_header("WARC-Target-URI")
+                      if not target:
+                          warnings.append("MISSING_TARGET_URI")
+                      content_type = (
+                          record.http_headers.get_header("Content-Type")
+                          if record.http_headers is not None
+                          else None
+                      )
+                      media_type = content_type.split(";", 1)[0].strip().casefold() if content_type else None
+                      status_code = record.http_headers.get_statuscode() if record.http_headers is not None else None
+                      records.append(
+                          WarcResponseRecord(
+                              index=response_count - 1,
+                              record_id=record.rec_headers.get_header("WARC-Record-ID"),
+                              target_uri=target,
+                              captured_at=record.rec_headers.get_header("WARC-Date"),
+                              media_type=media_type,
+                              status_code=status_code,
+                              payload=payload,
+                          )
+                      )
+              except WarcParseError:
+                  raise
+              except Exception as exc:
+                  raise WarcParseError("WARC structure or gzip stream is malformed") from exc
+              if seen == 0:
+                  raise WarcParseError("no WARC records were found")
+              return WarcParseResult(
+                  records=tuple(records),
+                  metadata={
+                      "warc_records_seen": seen,
+                      "response_records": response_count,
+                      "response_payload_bytes": total_payload,
+                      "gzip": gzip_input,
+                      "network_access": False,
+                  },
+                  warnings=tuple(dict.fromkeys(warnings)),
+              )
+          PY
+      - name: Verify GREEN and full regression
+        run: |
+          uv run ruff check .
+          uv run pytest -q apps/api/tests/unit/test_warc_parser.py
+          uv run pytest -q
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml build api worker
+      - name: Record WARC checkpoint
+        run: |
+          mkdir -p docs/verification
+          cat > docs/verification/plan03-task6-warc.md <<EOF
+          # Plan 03 Task 6 — bounded WARC response derivatives
+
+          - **Source before implementation:** \`$(git rev-parse HEAD)\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          ## RED
+
+          WARC contracts were written first and failed with the expected missing-parser assertion.
+
+          ## GREEN
+
+          | Gate | Outcome |
+          |---|---|
+          | Ruff | success |
+          | Plain/gzip WARC response tests | success |
+          | Record/per-record/total payload limits | success |
+          | Missing locator warning and non-exposure test | success |
+          | Malformed/corrupt gzip rejection | success |
+          | Complete Python suite | success |
+          | Compose validation and image build | success |
+
+          The parser performs no network requests. Target URIs remain structured fields for later protected metadata and are deliberately absent from normalized investigator text.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/api/pyproject.toml uv.lock apps/api/darknetra_api/parsers/warc.py apps/api/tests/unit/test_warc_parser.py docs/verification/plan03-task6-warc.md
+          git rm .github/workflows/plan03-task6-warc.yml
+          git commit -m 'feat: add bounded no network WARC derivatives'
+          git push origin HEAD:testing-codex
