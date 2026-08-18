@@ -1,6 +1,6 @@
 name: Plan 02 Task 14 final verification
 
-# RED diagnostic for the local SameSite hostname contract.
+# Fresh Plan 02 release gate with observed outcomes committed to docs/verification.
 on:
   push:
     branches: [testing-codex]
@@ -11,57 +11,427 @@ permissions:
   contents: write
 
 jobs:
-  verify-local-origin-red:
+  verify-plan-02:
     runs-on: ubuntu-latest
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_BUILD_VERSION: plan02-final-verification
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-e2e@127.0.0.1:55432/darknetra_e2e_test
+      DARKNETRA_E2E_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-e2e@127.0.0.1:55432/darknetra_e2e_test
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_API_BASE_URL: http://127.0.0.1:8000
+      NEXT_PUBLIC_DARKNETRA_API_BASE_URL: http://127.0.0.1:8000
+      DARKNETRA_E2E_ANALYST_A_PASSWORD: Synthetic-A-Password-42!
+      DARKNETRA_E2E_ANALYST_B_PASSWORD: Synthetic-B-Password-42!
+      DARKNETRA_E2E_BOOTSTRAP_PASSWORD: Synthetic-Bootstrap-42!
+      DARKNETRA_E2E_BOOTSTRAP_NEW_PASSWORD: Synthetic-Bootstrap-Replaced-42!
     steps:
       - uses: actions/checkout@v4
         with:
           ref: testing-codex
           fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
       - uses: astral-sh/setup-uv@v10.0.1
         with:
           version: '0.12.4'
-      - id: prepare
+
+      - id: auth_key
+        name: Generate runtime-only signing key
         continue-on-error: true
-        run: uv sync --all-packages --dev --frozen
-      - id: compose_test
+        run: |
+          KEY="$(python - <<'PY'
+          import base64
+          import secrets
+          print(base64.b64encode(secrets.token_bytes(32)).decode("ascii"))
+          PY
+          )"
+          echo "::add-mask::$KEY"
+          echo "DARKNETRA_JWT_SIGNING_KEY_B64=$KEY" >> "$GITHUB_ENV"
+
+      - id: docs_preflight
+        name: Apply and validate final documentation corrections
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          readme = Path("README.md")
+          text = readme.read_text(encoding="utf-8")
+          text = text.replace(
+              "export NEXT_PUBLIC_DARKNETRA_API_BASE_URL='http://127.0.0.1:8000'",
+              "export NEXT_PUBLIC_DARKNETRA_API_BASE_URL='http://localhost:8000'",
+          )
+          expected = "export NEXT_PUBLIC_DARKNETRA_API_BASE_URL='http://localhost:8000'"
+          if expected not in text:
+              raise SystemExit("README is missing the same-site browser API example")
+          readme.write_text(text, encoding="utf-8")
+
+          required = [
+              Path("docs/architecture/authentication-authorization.md"),
+              Path("docs/decisions/0002-use-uuid4-until-approved-uuidv7.md"),
+          ]
+          for path in required:
+              if not path.is_file() or path.stat().st_size < 500:
+                  raise SystemExit(f"required Plan 02 documentation is missing: {path}")
+          PY
+
+      - id: prepare
+        name: Install locked Python and JavaScript workspaces
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            python --version
+            uv --version
+            node --version
+            corepack enable
+            corepack prepare pnpm@10.15.0 --activate
+            pnpm --version
+            pnpm install --frozen-lockfile
+            uv sync --all-packages --dev --frozen
+          } 2>&1 | tee /tmp/plan02-prepare.log
+
+      - id: compose_config
+        name: Validate development and isolated Compose configurations
+        if: steps.auth_key.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+            docker compose -f docker-compose.yml -f docker-compose.e2e.yml config >/dev/null
+          } 2>&1 | tee /tmp/plan02-compose-config.log
+
+      - id: database
+        name: Start fresh disposable PostgreSQL
+        if: steps.prepare.outcome == 'success' && steps.compose_config.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          docker compose -p darknetra-plan02-final \
+            -f docker-compose.yml -f docker-compose.e2e.yml up -d postgres
+          for attempt in $(seq 1 30); do
+            if docker compose -p darknetra-plan02-final \
+              -f docker-compose.yml -f docker-compose.e2e.yml \
+              exec -T postgres pg_isready -U darknetra -d darknetra_e2e_test; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
+      - id: migration
+        name: Verify Alembic upgrade and downgrade round-trip
+        if: steps.database.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            uv run alembic -c apps/api/alembic.ini upgrade head
+            uv run alembic -c apps/api/alembic.ini current
+            uv run alembic -c apps/api/alembic.ini downgrade base
+            uv run alembic -c apps/api/alembic.ini upgrade head
+            uv run alembic -c apps/api/alembic.ini current
+            uv run alembic -c apps/api/alembic.ini heads
+          } 2>&1 | tee /tmp/plan02-migration.log
+          uv run alembic -c apps/api/alembic.ini heads | tail -n 1 > /tmp/plan02-migration-head.txt
+
+      - id: ruff
+        name: Ruff
         if: steps.prepare.outcome == 'success'
         continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
-          uv run pytest tests/repo/test_compose_contract.py -q 2>&1 | tee /tmp/task14-origin-red.log
-      - name: Record SameSite RED outcome
+          uv run ruff check . 2>&1 | tee /tmp/plan02-ruff.log
+
+      - id: pytest
+        name: Complete Python test suite
+        if: steps.migration.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run pytest -q 2>&1 | tee /tmp/plan02-pytest.log
+
+      - id: web_lint
+        name: Biome lint
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm --filter @darknetra/web lint 2>&1 | tee /tmp/plan02-web-lint.log
+
+      - id: web_typecheck
+        name: TypeScript typecheck
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm --filter @darknetra/web typecheck 2>&1 | tee /tmp/plan02-web-typecheck.log
+
+      - id: web_tests
+        name: Complete frontend test suite
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm --filter @darknetra/web test 2>&1 | tee /tmp/plan02-web-tests.log
+
+      - id: web_build
+        name: Next.js production build
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm --filter @darknetra/web build 2>&1 | tee /tmp/plan02-web-build.log
+
+      - id: playwright
+        name: Install Playwright Chromium
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm --filter @darknetra/web exec playwright install --with-deps chromium \
+            2>&1 | tee /tmp/plan02-playwright-install.log
+
+      - id: synthetic_e2e
+        name: Synthetic online and offline browser regressions
+        if: steps.web_build.outcome == 'success' && steps.playwright.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm --filter @darknetra/web test:e2e 2>&1 | tee /tmp/plan02-synthetic-e2e.log
+
+      - id: real_fixture
+        name: Create deterministic real-E2E users and cases
+        if: steps.pytest.outcome == 'success'
+        continue-on-error: true
+        env:
+          DARKNETRA_ENVIRONMENT: test
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run python scripts/create_e2e_fixture.py 2>&1 | tee /tmp/plan02-real-fixture.log
+
+      - id: real_stack
+        name: Build and start real authenticated Compose stack
+        if: steps.real_fixture.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          docker compose -p darknetra-plan02-final \
+            -f docker-compose.yml -f docker-compose.e2e.yml up -d --build api web
+          curl --fail --retry 40 --retry-all-errors --retry-delay 2 \
+            http://127.0.0.1:8000/api/v1/health/live
+          curl --fail --retry 40 --retry-all-errors --retry-delay 2 \
+            http://127.0.0.1:3000/auth/v2/login >/dev/null
+
+      - id: real_e2e
+        name: Real authentication and cross-case authorization browser regressions
+        if: steps.real_stack.outcome == 'success' && steps.playwright.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm --filter @darknetra/web test:e2e:real 2>&1 | tee /tmp/plan02-real-e2e.log
+
+      - id: teardown_test_stack
+        name: Destroy disposable Plan 02 test stack and volume
+        if: always()
+        continue-on-error: true
+        run: |
+          docker compose -p darknetra-plan02-final \
+            -f docker-compose.yml -f docker-compose.e2e.yml \
+            down -v --remove-orphans
+
+      - id: smoke
+        name: Independent Docker smoke test
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          bash scripts/smoke.sh 2>&1 | tee /tmp/plan02-smoke.log
+
+      - name: Record observed Plan 02 verification
         if: always()
         env:
+          AUTH_KEY: ${{ steps.auth_key.outcome }}
+          DOCS_PREFLIGHT: ${{ steps.docs_preflight.outcome }}
           PREPARE: ${{ steps.prepare.outcome }}
-          COMPOSE_TEST: ${{ steps.compose_test.outcome }}
+          COMPOSE_CONFIG: ${{ steps.compose_config.outcome }}
+          DATABASE: ${{ steps.database.outcome }}
+          MIGRATION: ${{ steps.migration.outcome }}
+          RUFF: ${{ steps.ruff.outcome }}
+          PYTEST: ${{ steps.pytest.outcome }}
+          WEB_LINT: ${{ steps.web_lint.outcome }}
+          WEB_TYPECHECK: ${{ steps.web_typecheck.outcome }}
+          WEB_TESTS: ${{ steps.web_tests.outcome }}
+          WEB_BUILD: ${{ steps.web_build.outcome }}
+          PLAYWRIGHT: ${{ steps.playwright.outcome }}
+          SYNTHETIC_E2E: ${{ steps.synthetic_e2e.outcome }}
+          REAL_FIXTURE: ${{ steps.real_fixture.outcome }}
+          REAL_STACK: ${{ steps.real_stack.outcome }}
+          REAL_E2E: ${{ steps.real_e2e.outcome }}
+          TEARDOWN: ${{ steps.teardown_test_stack.outcome }}
+          SMOKE: ${{ steps.smoke.outcome }}
         run: |
+          VERIFIED_COMMIT="$(git rev-parse HEAD)"
+          VERIFIED_UTC="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          MIGRATION_HEAD="$(cat /tmp/plan02-migration-head.txt 2>/dev/null || echo unavailable)"
+          mkdir -p docs/verification
           {
-            echo '# Plan 02 Task 14 preflight'
+            echo '# Plan 02 — API, authentication, RBAC, and case lifecycle verification'
             echo
-            echo "- prepare: ${PREPARE}"
-            echo "- local SameSite hostname contract: ${COMPOSE_TEST}"
+            echo '- **Verified commit:** `'$VERIFIED_COMMIT'`'
+            echo '- **Observed at (UTC):** `'$VERIFIED_UTC'`'
+            echo '- **Alembic head:** `'$MIGRATION_HEAD'`'
+            echo '- **Runner:** GitHub Actions `ubuntu-latest`'
+            echo
+            echo '## Command outcomes'
+            echo
+            echo '| Gate | Observed outcome |'
+            echo '|---|---|'
+            echo "| Runtime-only JWT signing key | ${AUTH_KEY} |"
+            echo "| Documentation preflight | ${DOCS_PREFLIGHT} |"
+            echo "| Locked workspace installation | ${PREPARE} |"
+            echo "| Development + E2E Compose config | ${COMPOSE_CONFIG} |"
+            echo "| Disposable PostgreSQL | ${DATABASE} |"
+            echo "| Alembic upgrade/downgrade/upgrade | ${MIGRATION} |"
+            echo "| \`uv run ruff check .\` | ${RUFF} |"
+            echo "| \`uv run pytest -q\` | ${PYTEST} |"
+            echo "| Frontend Biome lint | ${WEB_LINT} |"
+            echo "| Frontend TypeScript typecheck | ${WEB_TYPECHECK} |"
+            echo "| Full frontend Vitest suite | ${WEB_TESTS} |"
+            echo "| Next.js production build | ${WEB_BUILD} |"
+            echo "| Chromium installation | ${PLAYWRIGHT} |"
+            echo "| Synthetic online/offline Playwright | ${SYNTHETIC_E2E} |"
+            echo "| Deterministic real-E2E fixture | ${REAL_FIXTURE} |"
+            echo "| Real API/web Compose stack | ${REAL_STACK} |"
+            echo "| Real auth/cross-case Playwright | ${REAL_E2E} |"
+            echo "| Disposable stack + volume teardown | ${TEARDOWN} |"
+            echo "| \`bash scripts/smoke.sh\` | ${SMOKE} |"
+            echo
+            echo '## Observed summaries'
+            echo
+            echo '### Migration round-trip'
             echo
             echo '```text'
-            cat /tmp/task14-origin-red.log 2>/dev/null || true
+            tail -n 30 /tmp/plan02-migration.log 2>/dev/null || true
             echo '```'
-          } > docs/verification/plan02-task14-preflight.md
+            echo
+            echo '### Python suite'
+            echo
+            echo '```text'
+            tail -n 30 /tmp/plan02-pytest.log 2>/dev/null || true
+            echo '```'
+            echo
+            echo '### Frontend suite'
+            echo
+            echo '```text'
+            tail -n 35 /tmp/plan02-web-tests.log 2>/dev/null || true
+            echo '```'
+            echo
+            echo '### Synthetic browser suite'
+            echo
+            echo '```text'
+            tail -n 45 /tmp/plan02-synthetic-e2e.log 2>/dev/null || true
+            echo '```'
+            echo
+            echo '### Real authentication/authorization browser suite'
+            echo
+            echo '```text'
+            tail -n 60 /tmp/plan02-real-e2e.log 2>/dev/null || true
+            echo '```'
+            echo
+            echo '### Docker smoke'
+            echo
+            echo '```text'
+            tail -n 35 /tmp/plan02-smoke.log 2>/dev/null || true
+            echo '```'
+            echo
+            echo '## Architecture deviation'
+            echo
+            echo 'Plan 02 uses UUID4 until an approved UUIDv7 implementation is adopted; no custom UUID algorithm was introduced. See [ADR-0002](../decisions/0002-use-uuid4-until-approved-uuidv7.md).'
+            echo
+            echo '## Plan 03 handoff'
+            echo
+            echo 'Plan 03 may rely on authenticated current-user context, authoritative PostgreSQL case identifiers, case-scoped authorization dependencies, rotating sessions with CSRF protection, the transactional append-only audit service, the async SQLAlchemy session factory, Alembic migrations, the typed frontend API client, and the protected case route shell.'
+            echo
+            echo 'Evidence ingestion and analytic features were not implemented or claimed by Plan 02.'
+          } > docs/verification/plan-02-api-auth-cases.md
+
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add docs/verification/plan02-task14-preflight.md
+          git add README.md \
+            docs/verification/plan-02-api-auth-cases.md \
+            docs/architecture/authentication-authorization.md \
+            docs/decisions/0002-use-uuid4-until-approved-uuidv7.md
           if ! git diff --cached --quiet; then
-            git commit -m 'docs: record Plan 02 Task 14 SameSite RED outcome [skip ci]'
+            git commit -m 'docs: verify authentication and case foundation [skip ci]'
             git push origin HEAD:testing-codex
           fi
-      - name: Require SameSite RED before example fix
+
+      - name: Enforce complete Plan 02 verification
         if: always()
         env:
+          AUTH_KEY: ${{ steps.auth_key.outcome }}
+          DOCS_PREFLIGHT: ${{ steps.docs_preflight.outcome }}
           PREPARE: ${{ steps.prepare.outcome }}
-          COMPOSE_TEST: ${{ steps.compose_test.outcome }}
+          COMPOSE_CONFIG: ${{ steps.compose_config.outcome }}
+          DATABASE: ${{ steps.database.outcome }}
+          MIGRATION: ${{ steps.migration.outcome }}
+          RUFF: ${{ steps.ruff.outcome }}
+          PYTEST: ${{ steps.pytest.outcome }}
+          WEB_LINT: ${{ steps.web_lint.outcome }}
+          WEB_TYPECHECK: ${{ steps.web_typecheck.outcome }}
+          WEB_TESTS: ${{ steps.web_tests.outcome }}
+          WEB_BUILD: ${{ steps.web_build.outcome }}
+          PLAYWRIGHT: ${{ steps.playwright.outcome }}
+          SYNTHETIC_E2E: ${{ steps.synthetic_e2e.outcome }}
+          REAL_FIXTURE: ${{ steps.real_fixture.outcome }}
+          REAL_STACK: ${{ steps.real_stack.outcome }}
+          REAL_E2E: ${{ steps.real_e2e.outcome }}
+          TEARDOWN: ${{ steps.teardown_test_stack.outcome }}
+          SMOKE: ${{ steps.smoke.outcome }}
         run: |
+          test "$AUTH_KEY" = success
+          test "$DOCS_PREFLIGHT" = success
           test "$PREPARE" = success
-          test "$COMPOSE_TEST" = failure
+          test "$COMPOSE_CONFIG" = success
+          test "$DATABASE" = success
+          test "$MIGRATION" = success
+          test "$RUFF" = success
+          test "$PYTEST" = success
+          test "$WEB_LINT" = success
+          test "$WEB_TYPECHECK" = success
+          test "$WEB_TESTS" = success
+          test "$WEB_BUILD" = success
+          test "$PLAYWRIGHT" = success
+          test "$SYNTHETIC_E2E" = success
+          test "$REAL_FIXTURE" = success
+          test "$REAL_STACK" = success
+          test "$REAL_E2E" = success
+          test "$TEARDOWN" = success
+          test "$SMOKE" = success
