@@ -1,0 +1,916 @@
+name: Plan 03 Task 13 Evidence Vault operations TDD
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task13-operations.yml
+
+permissions:
+  contents: write
+
+jobs:
+  red-green:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task13-ops@127.0.0.1:5432/darknetra_plan03_task13_ops
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-task13-ops
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task13_ops
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task13-ops
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task13_ops"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Require offline corpus checkpoint
+        run: test -f docs/verification/plan03-task12-demo-corpus.md
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f"::add-mask::{value}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n")
+              out.write(f"DARKNETRA_FIELD_KEY_V1_B64={field}\n")
+              out.write("DARKNETRA_FIELD_KEYRING_B64_JSON=" + json.dumps({"v1": field}, separators=(",", ":")) + "\n")
+              out.write("DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n")
+              out.write(f"DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n")
+          PY
+
+      - name: Install and migrate
+        run: |
+          uv sync --all-packages --dev --frozen
+          uv run alembic -c apps/api/alembic.ini upgrade head
+
+      - name: Write reconciliation and backup contracts first
+        run: |
+          cat > apps/api/tests/integration/test_evidence_vault_operations.py <<'PY'
+          from __future__ import annotations
+
+          import importlib
+          import importlib.util
+          import io
+          import json
+          from datetime import UTC, datetime
+          from pathlib import Path
+          from uuid import uuid4
+
+          import pytest
+          import sqlalchemy as sa
+          from darknetra_api.db.session import async_session_factory
+          from darknetra_api.models.audit import AuditEvent
+          from darknetra_api.models.auth_session import AuthSession
+          from darknetra_api.models.case import Case
+          from darknetra_api.models.case_membership import CaseMembership, CaseMembershipRole
+          from darknetra_api.models.custody import CustodyEvent
+          from darknetra_api.models.enums import CaseSensitivity
+          from darknetra_api.models.evidence import EvidenceArtifact, EvidenceDerivation, EvidenceSourceClass, EvidenceState
+          from darknetra_api.models.job import Job
+          from darknetra_api.models.user import User
+          from darknetra_api.security.encryption import SensitiveFieldCrypto
+          from darknetra_api.services.evidence import preserve_evidence_manifest
+          from darknetra_api.storage.local import LocalObjectStore
+
+
+          def backup_module():
+              spec = importlib.util.find_spec("darknetra_api.services.evidence_backup")
+              assert spec is not None, "case Evidence Vault backup service is not implemented"
+              return importlib.import_module("darknetra_api.services.evidence_backup")
+
+
+          def reconciliation_module():
+              spec = importlib.util.find_spec("darknetra_api.services.storage_reconciliation")
+              assert spec is not None, "Evidence Vault reconciliation service is not implemented"
+              return importlib.import_module("darknetra_api.services.storage_reconciliation")
+
+
+          async def clean_database() -> None:
+              async with async_session_factory() as session:
+                  await session.execute(sa.delete(CustodyEvent))
+                  await session.execute(sa.delete(EvidenceDerivation))
+                  await session.execute(sa.delete(EvidenceArtifact))
+                  await session.execute(sa.delete(Job))
+                  await session.execute(sa.delete(CaseMembershipRole))
+                  await session.execute(sa.delete(CaseMembership))
+                  await session.execute(sa.delete(AuditEvent))
+                  await session.execute(sa.delete(Case))
+                  await session.execute(sa.delete(AuthSession))
+                  await session.execute(sa.delete(User))
+                  await session.commit()
+
+
+          @pytest.fixture(autouse=True)
+          async def clean() -> None:
+              await clean_database()
+              yield
+              await clean_database()
+
+
+          async def seed(store: LocalObjectStore):
+              boundary = SensitiveFieldCrypto(
+                  field_keys={"v1": b"O" * 32},
+                  active_key_version="v1",
+                  blind_index_key=b"P" * 32,
+              )
+              async with async_session_factory() as session:
+                  suffix = uuid4().hex[:10]
+                  owner = User(
+                      username=f"ops-owner-{suffix}",
+                      username_normalized=f"ops-owner-{suffix}",
+                      display_name="Operations Owner",
+                      password_hash="unused",
+                      global_roles=[],
+                      is_active=True,
+                      must_change_password=False,
+                  )
+                  session.add(owner)
+                  await session.flush()
+                  case = Case(
+                      case_code=f"OPS-{suffix.upper()}",
+                      title="Authorized Evidence Vault operations fixture",
+                      sensitivity=CaseSensitivity.RESTRICTED,
+                      owner_user_id=owner.id,
+                      source_authority_summary="Authorized synthetic operations fixture",
+                  )
+                  other_case = Case(
+                      case_code=f"OPX-{suffix.upper()}",
+                      title="Other case",
+                      sensitivity=CaseSensitivity.RESTRICTED,
+                      owner_user_id=owner.id,
+                      source_authority_summary="Other case",
+                  )
+                  session.add_all([case, other_case])
+                  await session.flush()
+
+                  artifacts = []
+                  for index, data in enumerate((b"original operations bytes", b"derived operations bytes")):
+                      stored = store.put_verified(io.BytesIO(data))
+                      artifact = EvidenceArtifact(
+                          case_id=case.id,
+                          source_class=EvidenceSourceClass.SYNTHETIC,
+                          source_type="synthetic.ops.original" if index == 0 else "derivative.normalized_text",
+                          acquisition_method="authorized_test_generation" if index == 0 else "derived_processing",
+                          collector_user_id=owner.id,
+                          captured_at=datetime(2026, 1, 1, 0, index, tzinfo=UTC),
+                          original_timezone="UTC",
+                          state=EvidenceState.STAGING,
+                      )
+                      preserve_evidence_manifest(
+                          artifact,
+                          media_type="text/plain",
+                          size_bytes=stored.size_bytes,
+                          sha256=stored.sha256,
+                          sha512=None,
+                          object_key=stored.object_key,
+                          ingested_at=datetime(2026, 1, 1, 0, index, tzinfo=UTC),
+                      )
+                      artifact.source_locator_ciphertext = boundary.encrypt(
+                          f"https://secret.example.invalid/{index}",
+                          purpose="evidence.source_locator",
+                          resource_id=str(artifact.id),
+                      )
+                      artifact.source_locator_hash = boundary.blind_index(
+                          f"https://secret.example.invalid/{index}",
+                          purpose="evidence.source_locator",
+                      )
+                      artifact.notes_ciphertext = boundary.encrypt(
+                          "restricted analyst note",
+                          purpose="evidence.notes",
+                          resource_id=str(artifact.id),
+                      )
+                      session.add(artifact)
+                      artifacts.append(artifact)
+                  await session.flush()
+                  edge = EvidenceDerivation(
+                      parent_evidence_id=artifacts[0].id,
+                      child_evidence_id=artifacts[1].id,
+                      transformation="normalized_text",
+                      transformer_version="v1",
+                      parameters_json={"parser": "text"},
+                  )
+                  session.add(edge)
+                  session.add(
+                      CustodyEvent(
+                          evidence_id=artifacts[0].id,
+                          case_id=case.id,
+                          actor_user_id=owner.id,
+                          event_type="CUSTODY_CREATED",
+                          request_id="ops-custody",
+                          reason="Authorized synthetic custody",
+                          metadata_json={"safe": True},
+                          created_at=datetime(2026, 1, 1, 0, 2, tzinfo=UTC),
+                      )
+                  )
+                  other_stored = store.put_verified(io.BytesIO(b"other case must not export"))
+                  other = EvidenceArtifact(
+                      case_id=other_case.id,
+                      source_class=EvidenceSourceClass.SYNTHETIC,
+                      source_type="synthetic.other",
+                      acquisition_method="authorized_test_generation",
+                      collector_user_id=owner.id,
+                      captured_at=datetime(2026, 1, 1, tzinfo=UTC),
+                      original_timezone="UTC",
+                      state=EvidenceState.STAGING,
+                  )
+                  preserve_evidence_manifest(
+                      other,
+                      media_type="text/plain",
+                      size_bytes=other_stored.size_bytes,
+                      sha256=other_stored.sha256,
+                      sha512=None,
+                      object_key=other_stored.object_key,
+                      ingested_at=datetime(2026, 1, 1, tzinfo=UTC),
+                  )
+                  session.add(other)
+                  await session.commit()
+                  for value in [owner, case, other_case, *artifacts, edge, other]:
+                      await session.refresh(value)
+                  return owner, case, other_case, artifacts, edge, other
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_reconciliation_reports_referenced_missing_orphan_and_mismatch_without_deleting(tmp_path: Path) -> None:
+              reconciliation = reconciliation_module()
+              store = LocalObjectStore(tmp_path / "vault")
+              _owner, _case, _other_case, artifacts, _edge, _other = await seed(store)
+              orphan = store.put_verified(io.BytesIO(b"safe unreferenced object"))
+              missing_key = artifacts[1].object_key
+              assert missing_key
+              (store.root / missing_key).unlink()
+              mismatch_key = artifacts[0].object_key
+              assert mismatch_key
+              mismatch_path = store.root / mismatch_key
+              mismatch_path.chmod(0o600)
+              mismatch_path.write_bytes(b"modified")
+              mismatch_path.chmod(0o400)
+
+              async with async_session_factory() as session:
+                  report = await reconciliation.reconcile_local_evidence_store(
+                      session=session,
+                      object_store=store,
+                  )
+              assert missing_key in report.missing_object_keys
+              assert mismatch_key in report.mismatched_object_keys
+              assert orphan.object_key in report.unreferenced_object_keys
+              assert report.deleted_object_keys == ()
+              assert (store.root / orphan.object_key).exists()
+              assert not hasattr(report, "absolute_paths")
+              assert str(tmp_path) not in repr(report)
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_case_backup_is_deterministic_scoped_hash_verified_and_secret_free(tmp_path: Path) -> None:
+              backup = backup_module()
+              store = LocalObjectStore(tmp_path / "vault")
+              _owner, case, _other_case, artifacts, edge, other = await seed(store)
+              first = tmp_path / "backup-a"
+              second = tmp_path / "backup-b"
+              async with async_session_factory() as session:
+                  first_manifest = await backup.create_case_evidence_backup(
+                      session=session,
+                      case_id=case.id,
+                      object_store=store,
+                      destination=first,
+                  )
+              async with async_session_factory() as session:
+                  second_manifest = await backup.create_case_evidence_backup(
+                      session=session,
+                      case_id=case.id,
+                      object_store=store,
+                      destination=second,
+                  )
+              assert first_manifest == second_manifest
+              assert (first / "manifest.json").read_bytes() == (second / "manifest.json").read_bytes()
+              assert {entry["evidence_id"] for entry in first_manifest["artifacts"]} == {str(item.id) for item in artifacts}
+              assert str(other.id) not in json.dumps(first_manifest)
+              assert first_manifest["derivations"][0]["id"] == str(edge.id)
+              for entry in first_manifest["artifacts"]:
+                  path = first / entry["backup_content_path"]
+                  assert path.exists()
+                  assert backup.sha256_file(path) == entry["sha256"]
+              serialized = json.dumps(first_manifest).lower()
+              for forbidden in (
+                  "ciphertext", "source_locator_hash", "object_key", "secret.example.invalid",
+                  "restricted analyst note", str(tmp_path).lower(), "postgresql+",
+              ):
+                  assert forbidden not in serialized
+              verification = backup.verify_case_evidence_backup(first)
+              assert verification.valid is True
+              assert verification.missing_paths == ()
+              assert verification.mismatched_paths == ()
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_backup_verifier_detects_modified_missing_and_path_escape(tmp_path: Path) -> None:
+              backup = backup_module()
+              store = LocalObjectStore(tmp_path / "vault")
+              _owner, case, _other_case, _artifacts, _edge, _other = await seed(store)
+              destination = tmp_path / "backup"
+              async with async_session_factory() as session:
+                  manifest = await backup.create_case_evidence_backup(
+                      session=session,
+                      case_id=case.id,
+                      object_store=store,
+                      destination=destination,
+                  )
+              first = destination / manifest["artifacts"][0]["backup_content_path"]
+              first.chmod(0o600)
+              first.write_bytes(b"modified backup")
+              report = backup.verify_case_evidence_backup(destination)
+              assert report.valid is False
+              assert manifest["artifacts"][0]["backup_content_path"] in report.mismatched_paths
+
+              first.unlink()
+              report = backup.verify_case_evidence_backup(destination)
+              assert manifest["artifacts"][0]["backup_content_path"] in report.missing_paths
+
+              raw = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
+              raw["artifacts"][0]["backup_content_path"] = "../escape"
+              (destination / "manifest.json").write_text(json.dumps(raw), encoding="utf-8")
+              with pytest.raises(backup.InvalidBackupManifest):
+                  backup.verify_case_evidence_backup(destination)
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_backup_refuses_nonempty_destination_and_missing_live_object(tmp_path: Path) -> None:
+              backup = backup_module()
+              store = LocalObjectStore(tmp_path / "vault")
+              _owner, case, _other_case, artifacts, _edge, _other = await seed(store)
+              occupied = tmp_path / "occupied"
+              occupied.mkdir()
+              (occupied / "keep.txt").write_text("keep", encoding="utf-8")
+              async with async_session_factory() as session:
+                  with pytest.raises(backup.BackupError):
+                      await backup.create_case_evidence_backup(
+                          session=session,
+                          case_id=case.id,
+                          object_store=store,
+                          destination=occupied,
+                      )
+              assert (occupied / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+              key = artifacts[0].object_key
+              assert key
+              (store.root / key).unlink()
+              async with async_session_factory() as session:
+                  with pytest.raises(backup.BackupIntegrityError):
+                      await backup.create_case_evidence_backup(
+                          session=session,
+                          case_id=case.id,
+                          object_store=store,
+                          destination=tmp_path / "missing-source",
+                      )
+          PY
+
+      - name: Prove RED before implementation
+        run: |
+          set +e
+          uv run pytest -q apps/api/tests/integration/test_evidence_vault_operations.py >/tmp/task13-ops-red.log 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          grep -Eq 'backup service is not implemented|reconciliation service is not implemented' /tmp/task13-ops-red.log
+
+      - name: Add safe content-key enumeration to local object store
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("apps/api/darknetra_api/storage/local.py")
+          text = path.read_text(encoding="utf-8")
+          if "def iter_object_keys(" not in text:
+              addition = '''
+
+              def iter_object_keys(self) -> tuple[str, ...]:
+                  root = self.root / "sha256"
+                  if not root.exists():
+                      return ()
+                  keys: list[str] = []
+                  for path in root.rglob("*"):
+                      if not path.is_file():
+                          continue
+                      relative = path.relative_to(self.root).as_posix()
+                      try:
+                          self._path_for_key(relative)
+                      except InvalidObjectKey:
+                          continue
+                      keys.append(relative)
+                  return tuple(sorted(keys))
+              '''
+              addition = "\n".join(
+                  line[10:] if line.startswith("          ") else line
+                  for line in addition.splitlines()
+              )
+              # Place inside LocalObjectStore at end of class by appending with indentation.
+              text = text.rstrip() + "\n" + addition + "\n"
+              path.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Implement non-destructive store reconciliation
+        run: |
+          cat > apps/api/darknetra_api/services/storage_reconciliation.py <<'PY'
+          from __future__ import annotations
+
+          from dataclasses import dataclass
+
+          import sqlalchemy as sa
+          from sqlalchemy.ext.asyncio import AsyncSession
+          from starlette.concurrency import run_in_threadpool
+
+          from darknetra_api.models.evidence import EvidenceArtifact
+          from darknetra_api.storage.local import LocalObjectStore
+
+
+          @dataclass(frozen=True, slots=True)
+          class StorageReconciliationReport:
+              referenced_object_keys: tuple[str, ...]
+              present_object_keys: tuple[str, ...]
+              missing_object_keys: tuple[str, ...]
+              mismatched_object_keys: tuple[str, ...]
+              unreferenced_object_keys: tuple[str, ...]
+              deleted_object_keys: tuple[str, ...] = ()
+
+
+          async def reconcile_local_evidence_store(
+              *,
+              session: AsyncSession,
+              object_store: LocalObjectStore,
+          ) -> StorageReconciliationReport:
+              rows = (
+                  await session.execute(
+                      sa.select(
+                          EvidenceArtifact.object_key,
+                          EvidenceArtifact.sha256,
+                      ).where(
+                          EvidenceArtifact.object_key.is_not(None),
+                          EvidenceArtifact.sha256.is_not(None),
+                      )
+                  )
+              ).all()
+              expected = {
+                  object_key: sha256
+                  for object_key, sha256 in rows
+                  if object_key and sha256
+              }
+              present = set(await run_in_threadpool(object_store.iter_object_keys))
+              referenced = set(expected)
+              missing = referenced - present
+              unreferenced = present - referenced
+              mismatched: list[str] = []
+              for key in sorted(referenced & present):
+                  if not await run_in_threadpool(object_store.verify, key, expected[key]):
+                      mismatched.append(key)
+              # Reporting is intentionally non-destructive. Deletion requires a
+              # future explicit retention/legal-hold workflow and is never implied.
+              return StorageReconciliationReport(
+                  referenced_object_keys=tuple(sorted(referenced)),
+                  present_object_keys=tuple(sorted(present)),
+                  missing_object_keys=tuple(sorted(missing)),
+                  mismatched_object_keys=tuple(mismatched),
+                  unreferenced_object_keys=tuple(sorted(unreferenced)),
+                  deleted_object_keys=(),
+              )
+          PY
+
+      - name: Implement deterministic case backup and offline verifier
+        run: |
+          cat > apps/api/darknetra_api/services/evidence_backup.py <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          import shutil
+          from dataclasses import dataclass
+          from pathlib import Path, PurePosixPath
+          from uuid import UUID
+
+          import sqlalchemy as sa
+          from sqlalchemy.ext.asyncio import AsyncSession
+          from starlette.concurrency import run_in_threadpool
+
+          from darknetra_api.models.case import Case
+          from darknetra_api.models.custody import CustodyEvent
+          from darknetra_api.models.evidence import EvidenceArtifact, EvidenceDerivation
+          from darknetra_api.storage.local import LocalObjectStore
+
+
+          class BackupError(ValueError):
+              pass
+
+
+          class BackupIntegrityError(BackupError):
+              pass
+
+
+          class InvalidBackupManifest(BackupError):
+              pass
+
+
+          @dataclass(frozen=True, slots=True)
+          class BackupVerification:
+              valid: bool
+              artifact_count: int
+              verified_paths: tuple[str, ...]
+              missing_paths: tuple[str, ...]
+              mismatched_paths: tuple[str, ...]
+
+
+          def sha256_file(path: Path) -> str:
+              digest = hashlib.sha256()
+              with path.open("rb") as source:
+                  while chunk := source.read(1024 * 1024):
+                      digest.update(chunk)
+              return digest.hexdigest()
+
+
+          def _safe_backup_relative(value: str) -> Path:
+              pure = PurePosixPath(value)
+              if (
+                  not value
+                  or value.startswith("/")
+                  or "\\" in value
+                  or any(part in {"", ".", ".."} for part in pure.parts)
+              ):
+                  raise InvalidBackupManifest("backup content path is unsafe")
+              return Path(*pure.parts)
+
+
+          def _copy_verified(
+              *,
+              object_store: LocalObjectStore,
+              object_key: str,
+              expected_sha256: str,
+              destination: Path,
+          ) -> None:
+              if not object_store.verify(object_key, expected_sha256):
+                  raise BackupIntegrityError("live evidence object failed integrity verification")
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              temporary = destination.with_name(f".{destination.name}.staging")
+              try:
+                  with object_store.open(object_key) as source, temporary.open("xb") as target:
+                      shutil.copyfileobj(source, target, length=1024 * 1024)
+                      target.flush()
+                      os.fsync(target.fileno())
+                  if sha256_file(temporary) != expected_sha256:
+                      raise BackupIntegrityError("backup copy digest mismatch")
+                  os.replace(temporary, destination)
+                  destination.chmod(0o400)
+              finally:
+                  temporary.unlink(missing_ok=True)
+
+
+          async def create_case_evidence_backup(
+              *,
+              session: AsyncSession,
+              case_id: UUID,
+              object_store: LocalObjectStore,
+              destination: Path,
+          ) -> dict[str, object]:
+              destination = Path(destination)
+              if destination.exists() and any(destination.iterdir()):
+                  raise BackupError("backup destination must be empty")
+              destination.mkdir(parents=True, exist_ok=True)
+              case = await session.get(Case, case_id)
+              if case is None:
+                  raise BackupError("case was not found")
+              artifacts = (
+                  await session.execute(
+                      sa.select(EvidenceArtifact)
+                      .where(EvidenceArtifact.case_id == case_id)
+                      .order_by(EvidenceArtifact.ingested_at, EvidenceArtifact.id)
+                  )
+              ).scalars().all()
+              artifact_ids = [artifact.id for artifact in artifacts]
+              derivations = []
+              custody = []
+              if artifact_ids:
+                  derivations = (
+                      await session.execute(
+                          sa.select(EvidenceDerivation)
+                          .where(
+                              EvidenceDerivation.parent_evidence_id.in_(artifact_ids),
+                              EvidenceDerivation.child_evidence_id.in_(artifact_ids),
+                          )
+                          .order_by(EvidenceDerivation.created_at, EvidenceDerivation.id)
+                      )
+                  ).scalars().all()
+                  custody = (
+                      await session.execute(
+                          sa.select(CustodyEvent)
+                          .where(
+                              CustodyEvent.case_id == case_id,
+                              CustodyEvent.evidence_id.in_(artifact_ids),
+                          )
+                          .order_by(CustodyEvent.created_at, CustodyEvent.id)
+                      )
+                  ).scalars().all()
+
+              artifact_entries = []
+              try:
+                  for artifact in artifacts:
+                      if not artifact.object_key or not artifact.sha256 or artifact.size_bytes is None:
+                          raise BackupIntegrityError("evidence manifest is incomplete")
+                      content_path = f"objects/sha256/{artifact.sha256[:2]}/{artifact.sha256[2:4]}/{artifact.sha256}"
+                      await run_in_threadpool(
+                          _copy_verified,
+                          object_store=object_store,
+                          object_key=artifact.object_key,
+                          expected_sha256=artifact.sha256,
+                          destination=destination / _safe_backup_relative(content_path),
+                      )
+                      artifact_entries.append(
+                          {
+                              "evidence_id": str(artifact.id),
+                              "case_id": str(case_id),
+                              "source_class": artifact.source_class.value,
+                              "source_type": artifact.source_type,
+                              "acquisition_method": artifact.acquisition_method,
+                              "collector_user_id": str(artifact.collector_user_id),
+                              "captured_at": artifact.captured_at.isoformat(),
+                              "ingested_at": artifact.ingested_at.isoformat() if artifact.ingested_at else None,
+                              "original_timezone": artifact.original_timezone,
+                              "media_type": artifact.media_type,
+                              "size_bytes": artifact.size_bytes,
+                              "sha256": artifact.sha256,
+                              "sha512": artifact.sha512,
+                              "state": artifact.state.value,
+                              "quarantine_reason": artifact.quarantine_reason,
+                              "tool_name": artifact.tool_name,
+                              "tool_version": artifact.tool_version,
+                              "backup_content_path": content_path,
+                          }
+                      )
+              except Exception:
+                  # Leave no misleading complete manifest. Existing verified copies
+                  # may remain for operator inspection but are never called complete.
+                  (destination / "manifest.json").unlink(missing_ok=True)
+                  raise
+
+              manifest: dict[str, object] = {
+                  "format": "darknetra-evidence-backup-v1",
+                  "case": {
+                      "id": str(case.id),
+                      "case_code": case.case_code,
+                      "title": case.title,
+                      "sensitivity": case.sensitivity.value,
+                  },
+                  "artifacts": artifact_entries,
+                  "derivations": [
+                      {
+                          "id": str(edge.id),
+                          "parent_evidence_id": str(edge.parent_evidence_id),
+                          "child_evidence_id": str(edge.child_evidence_id),
+                          "transformation": edge.transformation,
+                          "transformer_version": edge.transformer_version,
+                          "parameters_digest": edge.parameters_digest,
+                          "created_at": edge.created_at.isoformat(),
+                      }
+                      for edge in derivations
+                  ],
+                  "custody": [
+                      {
+                          "id": str(event.id),
+                          "evidence_id": str(event.evidence_id),
+                          "case_id": str(event.case_id),
+                          "actor_user_id": str(event.actor_user_id) if event.actor_user_id else None,
+                          "event_type": event.event_type,
+                          "request_id": event.request_id,
+                          "reason": event.reason,
+                          "metadata": event.metadata_json,
+                          "created_at": event.created_at.isoformat(),
+                      }
+                      for event in custody
+                  ],
+              }
+              manifest_bytes = (
+                  json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+              ).encode("utf-8")
+              temporary = destination / ".manifest.json.staging"
+              temporary.write_bytes(manifest_bytes)
+              os.replace(temporary, destination / "manifest.json")
+              (destination / "manifest.json").chmod(0o400)
+              return manifest
+
+
+          def verify_case_evidence_backup(destination: Path) -> BackupVerification:
+              destination = Path(destination)
+              manifest_path = destination / "manifest.json"
+              try:
+                  manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+              except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                  raise InvalidBackupManifest("backup manifest is unreadable") from exc
+              if manifest.get("format") != "darknetra-evidence-backup-v1":
+                  raise InvalidBackupManifest("backup format is unsupported")
+              artifacts = manifest.get("artifacts")
+              if not isinstance(artifacts, list):
+                  raise InvalidBackupManifest("backup artifact list is invalid")
+              verified: list[str] = []
+              missing: list[str] = []
+              mismatched: list[str] = []
+              for entry in artifacts:
+                  if not isinstance(entry, dict):
+                      raise InvalidBackupManifest("backup artifact entry is invalid")
+                  relative_value = entry.get("backup_content_path")
+                  expected = entry.get("sha256")
+                  if not isinstance(relative_value, str) or not isinstance(expected, str):
+                      raise InvalidBackupManifest("backup artifact digest/path is invalid")
+                  relative = _safe_backup_relative(relative_value)
+                  path = destination / relative
+                  if not path.exists():
+                      missing.append(relative_value)
+                  elif sha256_file(path) != expected:
+                      mismatched.append(relative_value)
+                  else:
+                      verified.append(relative_value)
+              return BackupVerification(
+                  valid=not missing and not mismatched,
+                  artifact_count=len(artifacts),
+                  verified_paths=tuple(verified),
+                  missing_paths=tuple(missing),
+                  mismatched_paths=tuple(mismatched),
+              )
+          PY
+
+      - name: Add operator CLI without destructive commands
+        run: |
+          cat > scripts/evidence_vault_maintenance.py <<'PY'
+          from __future__ import annotations
+
+          import argparse
+          import asyncio
+          import json
+          from dataclasses import asdict
+          from pathlib import Path
+          from uuid import UUID
+
+          from darknetra_api.config import get_settings
+          from darknetra_api.db.session import async_session_factory
+          from darknetra_api.services.evidence_backup import (
+              create_case_evidence_backup,
+              verify_case_evidence_backup,
+          )
+          from darknetra_api.services.storage_reconciliation import (
+              reconcile_local_evidence_store,
+          )
+          from darknetra_api.storage.local import LocalObjectStore
+
+
+          async def run_backup(case_id: UUID, destination: Path) -> dict[str, object]:
+              settings = get_settings()
+              store = LocalObjectStore(settings.evidence_store_path)
+              async with async_session_factory() as session:
+                  return await create_case_evidence_backup(
+                      session=session,
+                      case_id=case_id,
+                      object_store=store,
+                      destination=destination,
+                  )
+
+
+          async def run_reconcile() -> dict[str, object]:
+              settings = get_settings()
+              store = LocalObjectStore(settings.evidence_store_path)
+              async with async_session_factory() as session:
+                  return asdict(
+                      await reconcile_local_evidence_store(
+                          session=session,
+                          object_store=store,
+                      )
+                  )
+
+
+          def main() -> int:
+              parser = argparse.ArgumentParser(
+                  description="Non-destructive DARKNETRA Evidence Vault maintenance."
+              )
+              subparsers = parser.add_subparsers(dest="command", required=True)
+              reconcile = subparsers.add_parser("reconcile", help="Report DB/object-store divergence without deleting anything.")
+              reconcile.set_defaults(handler="reconcile")
+              backup = subparsers.add_parser("backup-case", help="Create a verified case-scoped backup directory.")
+              backup.add_argument("case_id", type=UUID)
+              backup.add_argument("destination", type=Path)
+              backup.set_defaults(handler="backup")
+              verify = subparsers.add_parser("verify-backup", help="Verify an offline backup directory.")
+              verify.add_argument("destination", type=Path)
+              verify.set_defaults(handler="verify")
+              args = parser.parse_args()
+              if args.handler == "reconcile":
+                  result = asyncio.run(run_reconcile())
+              elif args.handler == "backup":
+                  result = asyncio.run(run_backup(args.case_id, args.destination))
+              else:
+                  result = asdict(verify_case_evidence_backup(args.destination))
+              print(json.dumps(result, indent=2, sort_keys=True, default=str))
+              return 0
+
+
+          if __name__ == "__main__":
+              raise SystemExit(main())
+          PY
+
+      - name: Verify GREEN and full regression
+        run: |
+          uv run ruff check .
+          uv run pytest -q apps/api/tests/integration/test_evidence_vault_operations.py
+          uv run pytest -q
+          uv run python scripts/evidence_vault_maintenance.py --help | grep -q 'Non-destructive'
+          ! uv run python scripts/evidence_vault_maintenance.py --help | grep -qi delete
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml build api worker
+
+      - name: Record Task 13 operations checkpoint
+        run: |
+          mkdir -p docs/operations docs/verification
+          cat > docs/operations/evidence-vault-backup-reconciliation.md <<'EOF'
+          # Evidence Vault backup and reconciliation runbook
+
+          ## Non-destructive reconciliation
+
+          ```bash
+          uv run python scripts/evidence_vault_maintenance.py reconcile
+          ```
+
+          The report distinguishes referenced, present, missing, mismatched and unreferenced content-addressed objects. It never deletes an object. An unreferenced object can be the safe result of a database rollback after verified promotion; removal requires a future legal-hold-aware, explicitly authorized retention process.
+
+          ## Case-scoped verified backup
+
+          ```bash
+          uv run python scripts/evidence_vault_maintenance.py backup-case <case-uuid> /secure/offline/destination
+          uv run python scripts/evidence_vault_maintenance.py verify-backup /secure/offline/destination
+          ```
+
+          The destination must be empty. Every object is independently verified before and after copying, written through a staging path, atomically promoted and made read-only. The deterministic manifest includes safe case, manifest, lineage and custody fields. It deliberately excludes encrypted envelopes, blind indexes, object-store keys, credentials, host paths and plaintext sensitive metadata.
+
+          Store the completed backup on access-controlled encrypted media according to police retention and chain-of-custody policy. A backup is not a substitute for database backups, encryption-key escrow or a tested full-system disaster-recovery procedure.
+          EOF
+          cat > docs/verification/plan03-task13-operations.md <<EOF
+          # Plan 03 Task 13 — Evidence Vault operations TDD checkpoint
+
+          - **Source before implementation:** \`$(git rev-parse HEAD)\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          ## RED
+
+          Reconciliation, deterministic backup, secret exclusion, modified/missing backup and safe-path contracts were authored before the services existed.
+
+          ## GREEN
+
+          | Gate | Outcome |
+          |---|---|
+          | Ruff | success |
+          | Non-destructive referenced/missing/mismatch/orphan reconciliation | success |
+          | Case-scoped deterministic verified backup | success |
+          | Ciphertext/path/secret exclusion | success |
+          | Modified/missing/path-escape verification | success |
+          | Nonempty destination and missing-live-object rejection | success |
+          | Complete Python suite | success |
+          | Operator CLI and no-delete inspection | success |
+          | Compose validation and image build | success |
+
+          Operational reconciliation reports divergence but cannot delete content. The backup format is deterministic, case-scoped, digest-verified and intentionally excludes protected metadata and runtime/storage internals.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/api/darknetra_api/storage/local.py apps/api/darknetra_api/services/storage_reconciliation.py apps/api/darknetra_api/services/evidence_backup.py apps/api/tests/integration/test_evidence_vault_operations.py scripts/evidence_vault_maintenance.py docs/operations/evidence-vault-backup-reconciliation.md docs/verification/plan03-task13-operations.md
+          git rm .github/workflows/plan03-task13-operations.yml
+          git commit -m 'feat: add non destructive Evidence Vault operations'
+          git push origin HEAD:testing-codex
