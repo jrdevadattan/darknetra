@@ -1,6 +1,6 @@
 name: Plan 02 Task 13 real auth E2E
 
-# Fixture GREEN rerun after loading API source only after safety validation.
+# Fixture GREEN gate before real browser authentication tests; capture Ruff diagnostics precisely.
 on:
   push:
     branches: [testing-codex]
@@ -55,7 +55,10 @@ jobs:
         name: Ruff fixture code
         if: steps.prepare.outcome == 'success'
         continue-on-error: true
-        run: uv run ruff check scripts/create_e2e_fixture.py apps/api/tests/unit/test_e2e_fixture_cli.py apps/api/tests/integration/test_e2e_fixture_creation.py
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run ruff check scripts/create_e2e_fixture.py apps/api/tests/unit/test_e2e_fixture_cli.py apps/api/tests/integration/test_e2e_fixture_creation.py 2>&1 | tee /tmp/task13-ruff.log
       - id: safety_tests
         name: Fixture safety tests
         if: steps.prepare.outcome == 'success'
@@ -90,8 +93,16 @@ jobs:
             echo "- fixture safety tests: ${SAFETY_TESTS}"
             echo "- fixture integration test: ${FIXTURE_TEST}"
             echo
+            echo '## Ruff output'
+            echo
             echo '```text'
-            tail -n 160 /tmp/task13-fixture.log 2>/dev/null || true
+            tail -n 120 /tmp/task13-ruff.log 2>/dev/null || true
+            echo '```'
+            echo
+            echo '## Fixture integration output'
+            echo
+            echo '```text'
+            tail -n 120 /tmp/task13-fixture.log 2>/dev/null || true
             echo '```'
           } > docs/verification/plan02-task13-real-e2e.md
           git config user.name 'github-actions[bot]'
