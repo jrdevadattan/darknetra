@@ -1,6 +1,6 @@
 name: Plan 03 Task 1 durable job boundary
 
-# Decode the staged runner defensively, then execute the TDD and release gates.
+# Canonicalize and verify the staged runner before executing the TDD and release gates.
 on:
   push:
     branches: [testing-codex]
@@ -77,7 +77,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          base64 --decode --ignore-garbage .automation/plan03-task1-run.sh.gz.b64 \
-            | gzip --decompress > /tmp/plan03-task1-run.sh
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          source = Path('.automation/plan03-task1-run.sh.gz.b64')
+          raw = source.read_text(encoding='ascii')
+          compact = ''.join(raw.split())
+          padding = compact.find('=')
+          if padding >= 0:
+              compact = compact[:padding] + ('==' if compact[padding:padding + 2] == '==' else '=')
+          expected = 'e4cf8f5bf83f2af00acf07fe1f3c4c99bc3c730d7d78646c45f09468b7b50935'
+          observed = hashlib.sha256(compact.encode('ascii')).hexdigest()
+          if observed != expected:
+              raise SystemExit(
+                  f'canonical runner payload mismatch: raw_length={len(raw)} '
+                  f'canonical_length={len(compact)} sha256={observed} tail={raw[-16:]!r}'
+              )
+          Path('/tmp/plan03-task1-run.b64').write_text(compact, encoding='ascii')
+          PY
+          base64 --decode /tmp/plan03-task1-run.b64 | gzip --decompress > /tmp/plan03-task1-run.sh
           chmod 700 /tmp/plan03-task1-run.sh
           /tmp/plan03-task1-run.sh
