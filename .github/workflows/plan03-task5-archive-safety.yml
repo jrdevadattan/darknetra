@@ -1,0 +1,553 @@
+name: Plan 03 Task 5 secure ZIP boundary TDD
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task5-archive-safety.yml
+
+permissions:
+  contents: write
+
+jobs:
+  red-green:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task5-archive@127.0.0.1:5432/darknetra_plan03_task5_archive
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-task5-archive
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task5_archive
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task5-archive
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task5_archive"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - name: Require completed safe-preservation boundary
+        run: test -f docs/verification/plan03-task4-final.md
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f"::add-mask::{value}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n")
+              out.write(f"DARKNETRA_FIELD_KEY_V1_B64={field}\n")
+              out.write("DARKNETRA_FIELD_KEYRING_B64_JSON=" + json.dumps({"v1": field}, separators=(",", ":")) + "\n")
+              out.write("DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n")
+              out.write(f"DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n")
+          PY
+      - name: Install frozen workspace
+        run: uv sync --all-packages --dev --frozen
+
+      - name: Write adversarial archive contracts first
+        run: |
+          mkdir -p apps/api/tests/unit
+          cat > apps/api/tests/unit/test_archive_safety.py <<'PY'
+          from __future__ import annotations
+
+          import importlib
+          import importlib.util
+          import io
+          import stat
+          import unicodedata
+          import zipfile
+          from pathlib import Path
+
+          import pytest
+          from darknetra_api.storage.local import LocalObjectStore
+
+
+          def archive_module():
+              spec = importlib.util.find_spec("darknetra_api.parsers.archive")
+              assert spec is not None, "secure archive parser is not implemented"
+              return importlib.import_module("darknetra_api.parsers.archive")
+
+
+          def make_zip(entries: list[tuple[str | zipfile.ZipInfo, bytes]], *, compression=zipfile.ZIP_DEFLATED) -> bytes:
+              buffer = io.BytesIO()
+              with zipfile.ZipFile(buffer, "w", compression=compression) as archive:
+                  for name, payload in entries:
+                      archive.writestr(name, payload)
+              return buffer.getvalue()
+
+
+          def test_benign_members_stream_to_content_store_without_using_member_paths(tmp_path: Path) -> None:
+              module = archive_module()
+              data = make_zip(
+                  [
+                      ("chat/result.json", b'{"messages": []}'),
+                      ("chat/index.html", b"<html><body>safe</body></html>"),
+                      ("notes.txt", b"authorized synthetic export"),
+                      ("media/image.png", b"\x89PNG\r\n\x1a\nfixture"),
+                  ]
+              )
+              store = LocalObjectStore(tmp_path / "vault")
+              extracted = module.extract_zip_to_store(io.BytesIO(data), object_store=store)
+              assert [item.member.normalized_path for item in extracted] == [
+                  "chat/result.json",
+                  "chat/index.html",
+                  "notes.txt",
+                  "media/image.png",
+              ]
+              assert all(item.stored_object.object_key.startswith("sha256/") for item in extracted)
+              assert all("chat" not in item.stored_object.object_key for item in extracted)
+              assert len([p for p in (tmp_path / "vault" / "sha256").rglob("*") if p.is_file()]) == 4
+
+
+          @pytest.mark.parametrize(
+              "name",
+              [
+                  "../escape.txt",
+                  "folder/../../escape.txt",
+                  "/absolute.txt",
+                  "C:/windows.txt",
+                  "folder\\windows.txt",
+                  "././../escape.txt",
+              ],
+          )
+          def test_path_traversal_and_platform_ambiguous_names_are_rejected(name: str) -> None:
+              module = archive_module()
+              with pytest.raises(module.UnsafeArchivePath):
+                  module.inspect_zip(io.BytesIO(make_zip([(name, b"x")])))
+
+
+          def test_duplicate_normalized_and_unicode_equivalent_paths_are_rejected() -> None:
+              module = archive_module()
+              composed = "caf\u00e9.txt"
+              decomposed = unicodedata.normalize("NFD", composed)
+              data = make_zip([(composed, b"one"), (decomposed, b"two")])
+              with pytest.raises(module.DuplicateArchiveMember):
+                  module.inspect_zip(io.BytesIO(data))
+
+
+          def test_symlinks_and_special_devices_are_rejected() -> None:
+              module = archive_module()
+              symlink = zipfile.ZipInfo("link")
+              symlink.create_system = 3
+              symlink.external_attr = (stat.S_IFLNK | 0o777) << 16
+              with pytest.raises(module.UnsafeArchiveEntry):
+                  module.inspect_zip(io.BytesIO(make_zip([(symlink, b"target")], compression=zipfile.ZIP_STORED)))
+
+              device = zipfile.ZipInfo("device")
+              device.create_system = 3
+              device.external_attr = (stat.S_IFCHR | 0o600) << 16
+              with pytest.raises(module.UnsafeArchiveEntry):
+                  module.inspect_zip(io.BytesIO(make_zip([(device, b"x")], compression=zipfile.ZIP_STORED)))
+
+
+          def test_high_compression_ratio_and_total_expansion_are_rejected() -> None:
+              module = archive_module()
+              compressed = make_zip([("bomb.txt", b"0" * 100_000)])
+              with pytest.raises(module.ArchiveBombDetected):
+                  module.inspect_zip(
+                      io.BytesIO(compressed),
+                      policy=module.ArchivePolicy(max_compression_ratio=10),
+                  )
+
+              total = make_zip([("one.txt", b"1" * 60), ("two.txt", b"2" * 60)], compression=zipfile.ZIP_STORED)
+              with pytest.raises(module.ArchiveBombDetected):
+                  module.inspect_zip(
+                      io.BytesIO(total),
+                      policy=module.ArchivePolicy(max_expanded_bytes=100),
+                  )
+
+
+          def test_excessive_member_count_is_rejected_before_extraction() -> None:
+              module = archive_module()
+              data = make_zip([(f"{index}.txt", b"x") for index in range(4)])
+              with pytest.raises(module.ArchiveMemberLimitExceeded):
+                  module.inspect_zip(io.BytesIO(data), policy=module.ArchivePolicy(max_members=3))
+
+
+          def test_nested_archives_are_rejected_by_name_and_magic() -> None:
+              module = archive_module()
+              nested = make_zip([("inside.txt", b"x")])
+              for name in ("nested.zip", "nested.bin"):
+                  with pytest.raises(module.NestedArchiveRejected):
+                      module.extract_zip_to_store(
+                          io.BytesIO(make_zip([(name, nested)])),
+                          object_store=LocalObjectStore(Path(pytest.ensuretemp(name.replace('.', '_')))),
+                      )
+
+
+          def test_malformed_or_non_zip_input_is_rejected() -> None:
+              module = archive_module()
+              with pytest.raises(module.InvalidArchive):
+                  module.inspect_zip(io.BytesIO(b"not a zip"))
+              truncated = make_zip([("safe.txt", b"safe")])[:-7]
+              with pytest.raises(module.InvalidArchive):
+                  module.inspect_zip(io.BytesIO(truncated))
+
+
+          def test_failure_cleans_staging_and_does_not_promote_unsafe_members(tmp_path: Path) -> None:
+              module = archive_module()
+              store = LocalObjectStore(tmp_path / "vault")
+              data = make_zip([("safe.txt", b"safe"), ("nested.zip", make_zip([("x", b"x")]))])
+              with pytest.raises(module.NestedArchiveRejected):
+                  module.extract_zip_to_store(io.BytesIO(data), object_store=store)
+              assert not any(path.is_file() for path in (tmp_path / "vault").rglob("*"))
+          PY
+          # pytest.ensuretemp no longer exists; make the nested-magic test use tmp_path.
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("apps/api/tests/unit/test_archive_safety.py")
+          text = path.read_text(encoding="utf-8")
+          text = text.replace(
+              "          def test_nested_archives_are_rejected_by_name_and_magic() -> None:\n",
+              "          def test_nested_archives_are_rejected_by_name_and_magic(tmp_path: Path) -> None:\n",
+          )
+          text = text.replace(
+              "object_store=LocalObjectStore(Path(pytest.ensuretemp(name.replace('.', '_')))),",
+              "object_store=LocalObjectStore(tmp_path / name.replace('.', '_')),")
+          path.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Prove RED before implementation
+        run: |
+          set +e
+          uv run pytest -q apps/api/tests/unit/test_archive_safety.py >/tmp/task5-archive-red.log 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          grep -q 'secure archive parser is not implemented' /tmp/task5-archive-red.log
+
+      - name: Implement fail-closed ZIP scanner and streaming extractor
+        run: |
+          mkdir -p apps/api/darknetra_api/parsers
+          cat > apps/api/darknetra_api/parsers/__init__.py <<'PY'
+          """Deterministic, no-network parsers for preserved evidence derivatives."""
+          PY
+          cat > apps/api/darknetra_api/parsers/archive.py <<'PY'
+          from __future__ import annotations
+
+          import io
+          import re
+          import stat
+          import unicodedata
+          import zipfile
+          from dataclasses import dataclass
+          from pathlib import PurePosixPath
+          from typing import BinaryIO
+
+          from darknetra_api.storage.base import ObjectStore, StoredObject
+
+          _DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
+          _ARCHIVE_SUFFIXES = (
+              ".zip", ".jar", ".apk", ".7z", ".rar", ".tar", ".tgz", ".tar.gz",
+              ".gz", ".bz2", ".xz", ".warc.gz",
+          )
+          _ZIP_MAGIC = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+
+
+          class ArchiveSafetyError(ValueError):
+              """Base class for archive policy violations."""
+
+
+          class InvalidArchive(ArchiveSafetyError):
+              pass
+
+
+          class UnsafeArchivePath(ArchiveSafetyError):
+              pass
+
+
+          class DuplicateArchiveMember(ArchiveSafetyError):
+              pass
+
+
+          class UnsafeArchiveEntry(ArchiveSafetyError):
+              pass
+
+
+          class ArchiveBombDetected(ArchiveSafetyError):
+              pass
+
+
+          class ArchiveMemberLimitExceeded(ArchiveSafetyError):
+              pass
+
+
+          class NestedArchiveRejected(ArchiveSafetyError):
+              pass
+
+
+          @dataclass(frozen=True, slots=True)
+          class ArchivePolicy:
+              max_members: int = 2_000
+              max_expanded_bytes: int = 250 * 1024 * 1024
+              max_compression_ratio: float = 100.0
+              max_member_bytes: int = 100 * 1024 * 1024
+              max_nesting_depth: int = 1
+
+              def __post_init__(self) -> None:
+                  if self.max_members <= 0:
+                      raise ValueError("max_members must be positive")
+                  if self.max_expanded_bytes <= 0 or self.max_member_bytes <= 0:
+                      raise ValueError("archive byte limits must be positive")
+                  if self.max_member_bytes > self.max_expanded_bytes:
+                      raise ValueError("max_member_bytes cannot exceed max_expanded_bytes")
+                  if self.max_compression_ratio < 1:
+                      raise ValueError("max_compression_ratio must be at least 1")
+                  if self.max_nesting_depth != 1:
+                      raise ValueError("MVP archive nesting depth is fixed at 1")
+
+
+          @dataclass(frozen=True, slots=True)
+          class ArchiveMember:
+              archive_index: int
+              original_path: str
+              normalized_path: str
+              size_bytes: int
+              compressed_size: int
+              crc32: int
+
+
+          @dataclass(frozen=True, slots=True)
+          class StoredArchiveMember:
+              member: ArchiveMember
+              stored_object: StoredObject
+
+
+          def _normalize_member_path(name: str) -> tuple[str, str]:
+              if not isinstance(name, str) or not name or "\x00" in name:
+                  raise UnsafeArchivePath("archive member name is empty or contains NUL")
+              if "\\" in name or name.startswith("/") or _DRIVE_PREFIX.match(name):
+                  raise UnsafeArchivePath("archive member path is absolute or platform ambiguous")
+              path = PurePosixPath(name)
+              parts = path.parts
+              if not parts or any(part in {"", ".", ".."} for part in parts):
+                  raise UnsafeArchivePath("archive member path escapes the synthetic root")
+              normalized = "/".join(parts)
+              comparison_key = unicodedata.normalize("NFKC", normalized).casefold()
+              if not comparison_key:
+                  raise UnsafeArchivePath("archive member path normalizes to an empty value")
+              return normalized, comparison_key
+
+
+          def _entry_type(info: zipfile.ZipInfo) -> int:
+              if info.create_system != 3:
+                  return 0
+              return stat.S_IFMT(info.external_attr >> 16)
+
+
+          def _validate_entry_type(info: zipfile.ZipInfo) -> None:
+              entry_type = _entry_type(info)
+              if entry_type in {0, stat.S_IFREG, stat.S_IFDIR}:
+                  return
+              raise UnsafeArchiveEntry("symlink, device, socket and FIFO entries are not allowed")
+
+
+          def _is_nested_name(path: str) -> bool:
+              lower = path.casefold()
+              return any(lower.endswith(suffix) for suffix in _ARCHIVE_SUFFIXES)
+
+
+          def _open_zip(stream: BinaryIO) -> zipfile.ZipFile:
+              try:
+                  return zipfile.ZipFile(stream, "r")
+              except (zipfile.BadZipFile, OSError, ValueError) as exc:
+                  raise InvalidArchive("artifact is not a valid ZIP archive") from exc
+
+
+          def inspect_zip(
+              stream: BinaryIO,
+              *,
+              policy: ArchivePolicy | None = None,
+          ) -> list[ArchiveMember]:
+              active = policy or ArchivePolicy()
+              try:
+                  archive = _open_zip(stream)
+                  with archive:
+                      infos = archive.infolist()
+                      if len(infos) > active.max_members:
+                          raise ArchiveMemberLimitExceeded(
+                              f"archive contains more than {active.max_members} members"
+                          )
+                      members: list[ArchiveMember] = []
+                      seen: set[str] = set()
+                      total = 0
+                      for index, info in enumerate(infos):
+                          _validate_entry_type(info)
+                          if info.flag_bits & 0x1:
+                              raise UnsafeArchiveEntry("encrypted ZIP members are not supported")
+                          if info.is_dir():
+                              continue
+                          normalized, key = _normalize_member_path(info.filename)
+                          if key in seen:
+                              raise DuplicateArchiveMember(
+                                  "archive contains duplicate normalized member paths"
+                              )
+                          seen.add(key)
+                          if _is_nested_name(normalized):
+                              raise NestedArchiveRejected("nested archive members are not allowed")
+                          if info.file_size < 0 or info.compress_size < 0:
+                              raise InvalidArchive("archive member contains negative size metadata")
+                          if info.file_size > active.max_member_bytes:
+                              raise ArchiveBombDetected("archive member exceeds the expanded-size limit")
+                          total += info.file_size
+                          if total > active.max_expanded_bytes:
+                              raise ArchiveBombDetected("archive exceeds the total expanded-size limit")
+                          ratio = info.file_size / max(info.compress_size, 1)
+                          if ratio > active.max_compression_ratio:
+                              raise ArchiveBombDetected("archive member exceeds the compression-ratio limit")
+                          members.append(
+                              ArchiveMember(
+                                  archive_index=index,
+                                  original_path=info.filename,
+                                  normalized_path=normalized,
+                                  size_bytes=info.file_size,
+                                  compressed_size=info.compress_size,
+                                  crc32=info.CRC,
+                              )
+                          )
+                      return members
+              except ArchiveSafetyError:
+                  raise
+              except (zipfile.BadZipFile, RuntimeError, OSError, ValueError) as exc:
+                  raise InvalidArchive("ZIP metadata could not be read safely") from exc
+              finally:
+                  try:
+                      stream.seek(0)
+                  except (AttributeError, OSError):
+                      pass
+
+
+          class _VerifiedMemberStream(io.RawIOBase):
+              def __init__(self, source: BinaryIO, *, expected_size: int, max_size: int) -> None:
+                  self._source = source
+                  self._expected_size = expected_size
+                  self._max_size = max_size
+                  self._observed = 0
+
+              def readable(self) -> bool:
+                  return True
+
+              def read(self, size: int = -1) -> bytes:
+                  data = self._source.read(size)
+                  self._observed += len(data)
+                  if self._observed > self._max_size or self._observed > self._expected_size:
+                      raise ArchiveBombDetected("archive member expanded beyond declared policy limits")
+                  if not data and self._observed != self._expected_size:
+                      raise InvalidArchive("archive member length does not match central-directory metadata")
+                  return data
+
+
+          def extract_zip_to_store(
+              stream: BinaryIO,
+              *,
+              object_store: ObjectStore,
+              policy: ArchivePolicy | None = None,
+          ) -> list[StoredArchiveMember]:
+              active = policy or ArchivePolicy()
+              members = inspect_zip(stream, policy=active)
+              # Validate every member and nesting signature before promoting any child object.
+              try:
+                  archive = _open_zip(stream)
+                  with archive:
+                      for member in members:
+                          info = archive.infolist()[member.archive_index]
+                          with archive.open(info, "r") as source:
+                              prefix = source.read(8)
+                              if prefix.startswith(_ZIP_MAGIC):
+                                  raise NestedArchiveRejected("nested ZIP content is not allowed")
+                  stream.seek(0)
+
+                  promoted: list[StoredArchiveMember] = []
+                  archive = _open_zip(stream)
+                  with archive:
+                      infos = archive.infolist()
+                      for member in members:
+                          info = infos[member.archive_index]
+                          with archive.open(info, "r") as source:
+                              bounded = _VerifiedMemberStream(
+                                  source,
+                                  expected_size=member.size_bytes,
+                                  max_size=active.max_member_bytes,
+                              )
+                              stored = object_store.put_verified(bounded)
+                          if stored.size_bytes != member.size_bytes:
+                              raise InvalidArchive("promoted member length differs from archive metadata")
+                          promoted.append(StoredArchiveMember(member=member, stored_object=stored))
+                      return promoted
+              except ArchiveSafetyError:
+                  raise
+              except (zipfile.BadZipFile, RuntimeError, OSError, ValueError) as exc:
+                  raise InvalidArchive("ZIP member extraction failed integrity checks") from exc
+              finally:
+                  try:
+                      stream.seek(0)
+                  except (AttributeError, OSError):
+                      pass
+          PY
+
+      - name: Verify GREEN and full regression
+        run: |
+          uv run ruff check .
+          uv run pytest -q apps/api/tests/unit/test_archive_safety.py
+          uv run pytest -q
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml build api worker
+
+      - name: Record Task 5 archive checkpoint and commit
+        run: |
+          mkdir -p docs/verification
+          cat > docs/verification/plan03-task5-archive-safety.md <<EOF
+          # Plan 03 Task 5 — secure ZIP boundary TDD checkpoint
+
+          - **Source before implementation:** \`$(git rev-parse HEAD)\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          ## RED
+
+          Adversarial archive contracts were written first and failed with \`secure archive parser is not implemented\`.
+
+          ## GREEN
+
+          | Gate | Outcome |
+          |---|---|
+          | Ruff | success |
+          | Adversarial ZIP safety tests | success |
+          | Complete Python suite | success |
+          | Compose validation | success |
+          | API and worker image build | success |
+
+          The parser rejects traversal, absolute and platform-ambiguous paths, Unicode-normalized duplicates, symlinks/devices/FIFOs/sockets, encrypted entries, excessive members, expanded-byte excess, high compression ratios, malformed archives and nested archives by filename or magic. All members are validated before any child object is promoted, and approved members stream directly into content-addressed storage without extraction to a shared filesystem path.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/api/darknetra_api/parsers apps/api/tests/unit/test_archive_safety.py docs/verification/plan03-task5-archive-safety.md
+          git rm .github/workflows/plan03-task5-archive-safety.yml
+          git commit -m 'feat: add fail closed ZIP extraction boundary'
+          git push origin HEAD:testing-codex
