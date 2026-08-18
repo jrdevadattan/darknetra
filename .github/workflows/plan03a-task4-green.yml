@@ -1,0 +1,147 @@
+name: Plan 03a Task 4 keyring GREEN gate
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03a-task4-green.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-plan03a@127.0.0.1:5432/darknetra_plan03a_test
+      DARKNETRA_E2E_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-plan03a@127.0.0.1:5432/darknetra_plan03a_test
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03a_test
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-plan03a
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03a_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - id: keys
+        name: Generate runtime-only keys
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          import base64, os
+          from pathlib import Path
+          with Path(os.environ['GITHUB_ENV']).open('a', encoding='utf-8') as output:
+              for name in (
+                  'DARKNETRA_JWT_SIGNING_KEY_B64',
+                  'DARKNETRA_FIELD_KEY_V1_B64',
+                  'DARKNETRA_FIELD_BLIND_INDEX_KEY_B64',
+              ):
+                  value = base64.b64encode(os.urandom(32)).decode('ascii')
+                  print(f'::add-mask::{value}')
+                  output.write(f'{name}={value}\n')
+          PY
+      - id: prepare
+        if: steps.keys.outcome == 'success'
+        continue-on-error: true
+        run: uv sync --all-packages --dev --frozen
+      - id: migrate
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: uv run alembic -c apps/api/alembic.ini upgrade head
+      - id: focused
+        name: Versioned keyring tests
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run pytest apps/api/tests/unit/test_sensitive_field_keyring.py -v 2>&1 | tee /tmp/task4-focused.log
+      - id: ruff
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run ruff check apps/api/darknetra_api/config.py apps/api/darknetra_api/security/keyring.py apps/api/tests/unit/test_sensitive_field_keyring.py 2>&1 | tee /tmp/task4-ruff.log
+      - id: full
+        if: steps.migrate.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run pytest -q 2>&1 | tee /tmp/task4-full.log
+      - name: Record observed result
+        if: always()
+        env:
+          KEYS: ${{ steps.keys.outcome }}
+          PREPARE: ${{ steps.prepare.outcome }}
+          MIGRATE: ${{ steps.migrate.outcome }}
+          FOCUSED: ${{ steps.focused.outcome }}
+          RUFF: ${{ steps.ruff.outcome }}
+          FULL: ${{ steps.full.outcome }}
+        run: |
+          mkdir -p docs/verification
+          {
+            echo '# Plan 03a Task 4 key-version verification'
+            echo
+            echo "- runtime-only keys: ${KEYS}"
+            echo "- locked installation: ${PREPARE}"
+            echo "- disposable DB migration: ${MIGRATE}"
+            echo "- focused keyring tests: ${FOCUSED}"
+            echo "- Ruff: ${RUFF}"
+            echo "- complete Python regression: ${FULL}"
+            echo
+            echo '## Focused tests'
+            echo '```text'
+            tail -n 100 /tmp/task4-focused.log 2>/dev/null || true
+            echo '```'
+            echo
+            echo '## Ruff'
+            echo '```text'
+            cat /tmp/task4-ruff.log 2>/dev/null || true
+            echo '```'
+            echo
+            echo '## Full suite'
+            echo '```text'
+            tail -n 45 /tmp/task4-full.log 2>/dev/null || true
+            echo '```'
+          } > docs/verification/plan03a-task4-keyring.md
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/verification/plan03a-task4-keyring.md
+          if ! git diff --cached --quiet; then
+            git commit -m 'docs: verify Plan 03a key rotation [skip ci]'
+            git push origin HEAD:testing-codex
+          fi
+      - name: Enforce GREEN
+        if: always()
+        env:
+          KEYS: ${{ steps.keys.outcome }}
+          PREPARE: ${{ steps.prepare.outcome }}
+          MIGRATE: ${{ steps.migrate.outcome }}
+          FOCUSED: ${{ steps.focused.outcome }}
+          RUFF: ${{ steps.ruff.outcome }}
+          FULL: ${{ steps.full.outcome }}
+        run: |
+          test "$KEYS" = success
+          test "$PREPARE" = success
+          test "$MIGRATE" = success
+          test "$FOCUSED" = success
+          test "$RUFF" = success
+          test "$FULL" = success
