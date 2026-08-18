@@ -76,7 +76,7 @@ def test_final_object_is_read_only_where_permissions_are_supported(tmp_path: Pat
     assert mode & 0o222 == 0
 
 
-@given(st.binary(max_size=128 * 1024))
+@given(payload=st.binary(max_size=128 * 1024))
 @settings(max_examples=40, deadline=None)
 def test_arbitrary_bytes_round_trip_to_digest_address(payload: bytes, tmp_path: Path) -> None:
     store = LocalObjectStore(tmp_path)
