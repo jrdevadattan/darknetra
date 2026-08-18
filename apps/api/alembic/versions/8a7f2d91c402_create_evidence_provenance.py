@@ -18,14 +18,13 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    source_class = sa.Enum(
+    source_values = (
         "SYNTHETIC",
         "RESEARCH_ARCHIVE",
         "AUTHORIZED_IMPORT",
         "PUBLIC_OBSERVATION",
-        name="evidence_source_class",
     )
-    state = sa.Enum(
+    state_values = (
         "STAGING",
         "PRESERVED",
         "QUARANTINED",
@@ -34,16 +33,23 @@ def upgrade() -> None:
         "PARTIAL",
         "FAILED",
         "INTEGRITY_MISMATCH",
-        name="evidence_state",
     )
-    source_class.create(op.get_bind(), checkfirst=True)
-    state.create(op.get_bind(), checkfirst=True)
+    source_type = postgresql.ENUM(*source_values, name="evidence_source_class")
+    state_type = postgresql.ENUM(*state_values, name="evidence_state")
+    source_type.create(op.get_bind(), checkfirst=True)
+    state_type.create(op.get_bind(), checkfirst=True)
+    source_column_type = postgresql.ENUM(
+        *source_values, name="evidence_source_class", create_type=False
+    )
+    state_column_type = postgresql.ENUM(
+        *state_values, name="evidence_state", create_type=False
+    )
 
     op.create_table(
         "evidence_artifacts",
         sa.Column("id", sa.UUID(), nullable=False),
         sa.Column("case_id", sa.UUID(), nullable=False),
-        sa.Column("source_class", source_class, nullable=False),
+        sa.Column("source_class", source_column_type, nullable=False),
         sa.Column("source_type", sa.String(length=120), nullable=False),
         sa.Column("source_locator_ciphertext", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column("source_locator_hash", sa.String(length=64), nullable=True),
@@ -58,7 +64,7 @@ def upgrade() -> None:
         sa.Column("sha256", sa.String(length=64), nullable=True),
         sa.Column("sha512", sa.String(length=128), nullable=True),
         sa.Column("object_key", sa.String(length=180), nullable=True),
-        sa.Column("state", state, server_default="STAGING", nullable=False),
+        sa.Column("state", state_column_type, server_default="STAGING", nullable=False),
         sa.Column("quarantine_reason", sa.Text(), nullable=True),
         sa.Column("tool_name", sa.String(length=120), nullable=True),
         sa.Column("tool_version", sa.String(length=80), nullable=True),
