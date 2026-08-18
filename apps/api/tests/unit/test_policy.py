@@ -19,17 +19,27 @@ EXPECTED_ROLE_PERMISSIONS = {
             Permission.CASE_CLOSE,
             Permission.CASE_REOPEN,
             Permission.CASE_MEMBERSHIP_MANAGE,
+            Permission.SENSITIVE_VALUE_REVEAL,
             Permission.USER_READ,
             Permission.ROLE_READ,
             Permission.AUDIT_READ,
         }
     ),
     GlobalRole.COLLECTOR: frozenset({Permission.CASE_READ}),
-    GlobalRole.ANALYST: frozenset({Permission.CASE_READ}),
-    GlobalRole.REVIEWER: frozenset({Permission.CASE_READ, Permission.AUDIT_READ}),
+    GlobalRole.ANALYST: frozenset(
+        {Permission.CASE_READ, Permission.SENSITIVE_VALUE_REVEAL}
+    ),
+    GlobalRole.REVIEWER: frozenset(
+        {
+            Permission.CASE_READ,
+            Permission.SENSITIVE_VALUE_REVEAL,
+            Permission.AUDIT_READ,
+        }
+    ),
     GlobalRole.AUDITOR: frozenset(
         {
             Permission.CASE_READ,
+            Permission.SENSITIVE_VALUE_REVEAL,
             Permission.ROLE_READ,
             Permission.AUDIT_READ,
             Permission.SYSTEM_HEALTH_READ,
@@ -64,11 +74,12 @@ def test_global_authorization_uses_current_role_state() -> None:
 
     authorize_global(owner, Permission.CASE_CREATE)
     authorize_global(admin, Permission.USER_MANAGE)
+    authorize_global(analyst, Permission.SENSITIVE_VALUE_REVEAL)
     with pytest.raises(AuthorizationDenied):
         authorize_global(analyst, Permission.CASE_CREATE)
 
 
-def test_forced_password_change_blocks_normal_mutations_not_safe_reads() -> None:
+def test_forced_password_change_blocks_normal_mutations_and_sensitive_reveals() -> None:
     admin = make_user(GlobalRole.ADMIN, must_change_password=True)
 
     authorize_global(admin, Permission.ROLE_READ)
@@ -76,3 +87,5 @@ def test_forced_password_change_blocks_normal_mutations_not_safe_reads() -> None
         authorize_global(admin, Permission.CASE_CREATE)
     with pytest.raises(PasswordChangeRequired):
         authorize_global(admin, Permission.USER_MANAGE)
+    with pytest.raises(PasswordChangeRequired):
+        authorize_global(admin, Permission.SENSITIVE_VALUE_REVEAL)
