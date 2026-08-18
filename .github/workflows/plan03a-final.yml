@@ -1,5 +1,6 @@
 name: Plan 03a final sensitive-field encryption verification
 
+# Rerun after exposing loaded key versions to the runtime probe.
 on:
   push:
     branches: [testing-codex]
@@ -172,6 +173,7 @@ jobs:
           service = crypto_from_settings(Settings())
           envelope = service.encrypt('runtime probe', purpose='evidence.notes', resource_id='probe-1')
           assert envelope.key_version == 'v2'
+          assert service.key_versions == frozenset({'v1', 'v2'})
           assert service.decrypt(envelope, purpose='evidence.notes', resource_id='probe-1') == 'runtime probe'
           PY
 
