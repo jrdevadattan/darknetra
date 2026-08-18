@@ -1,0 +1,1009 @@
+name: Plan 03 Task 8 idempotent ingestion pipeline TDD
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task8-pipeline.yml
+
+permissions:
+  contents: write
+
+jobs:
+  red-green:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task8-pipeline@127.0.0.1:5432/darknetra_plan03_task8_pipeline
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-task8-pipeline
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task8_pipeline
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task8-pipeline
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task8_pipeline"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Require derivative foundation
+        run: test -f docs/verification/plan03-task8-derivative-foundation.md
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f"::add-mask::{value}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n")
+              out.write(f"DARKNETRA_FIELD_KEY_V1_B64={field}\n")
+              out.write("DARKNETRA_FIELD_KEYRING_B64_JSON=" + json.dumps({"v1": field}, separators=(",", ":")) + "\n")
+              out.write("DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n")
+              out.write(f"DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n")
+          PY
+
+      - name: Install and migrate
+        run: |
+          uv sync --all-packages --dev --frozen
+          uv run alembic -c apps/api/alembic.ini upgrade head
+
+      - name: Write orchestration contracts before production code
+        run: |
+          cat > apps/api/tests/integration/test_ingestion_pipeline.py <<'PY'
+          from __future__ import annotations
+
+          import importlib
+          import importlib.util
+          import io
+          import zipfile
+          from datetime import UTC, datetime
+          from pathlib import Path
+          from uuid import uuid4
+
+          import pytest
+          import sqlalchemy as sa
+          from darknetra_api.db.session import async_session_factory
+          from darknetra_api.models.audit import AuditEvent
+          from darknetra_api.models.auth_session import AuthSession
+          from darknetra_api.models.case import Case
+          from darknetra_api.models.case_membership import CaseMembership, CaseMembershipRole
+          from darknetra_api.models.custody import CustodyEvent
+          from darknetra_api.models.enums import CaseSensitivity
+          from darknetra_api.models.evidence import EvidenceArtifact, EvidenceDerivation, EvidenceSourceClass, EvidenceState
+          from darknetra_api.models.job import Job, JobState
+          from darknetra_api.models.user import User
+          from darknetra_api.security.encryption import SensitiveFieldCrypto
+          from darknetra_api.services.evidence import preserve_evidence_manifest
+          from darknetra_api.storage.local import LocalObjectStore
+
+
+          def module():
+              spec = importlib.util.find_spec("darknetra_api.services.ingestion_pipeline")
+              assert spec is not None, "idempotent ingestion pipeline is not implemented"
+              return importlib.import_module("darknetra_api.services.ingestion_pipeline")
+
+
+          async def clean_database() -> None:
+              async with async_session_factory() as session:
+                  await session.execute(sa.delete(CustodyEvent))
+                  await session.execute(sa.delete(EvidenceDerivation))
+                  await session.execute(sa.delete(EvidenceArtifact))
+                  await session.execute(sa.delete(Job))
+                  await session.execute(sa.delete(CaseMembershipRole))
+                  await session.execute(sa.delete(CaseMembership))
+                  await session.execute(sa.delete(AuditEvent))
+                  await session.execute(sa.delete(Case))
+                  await session.execute(sa.delete(AuthSession))
+                  await session.execute(sa.delete(User))
+                  await session.commit()
+
+
+          @pytest.fixture(autouse=True)
+          async def clean() -> None:
+              await clean_database()
+              yield
+              await clean_database()
+
+
+          def boundary() -> SensitiveFieldCrypto:
+              return SensitiveFieldCrypto(
+                  field_keys={"v1": b"G" * 32},
+                  active_key_version="v1",
+                  blind_index_key=b"H" * 32,
+              )
+
+
+          async def seed_artifact(
+              store: LocalObjectStore,
+              *,
+              data: bytes,
+              media_type: str,
+              source_type: str = "synthetic.input",
+          ) -> tuple[User, Case, EvidenceArtifact]:
+              stored = store.put_verified(io.BytesIO(data))
+              async with async_session_factory() as session:
+                  suffix = uuid4().hex[:10]
+                  owner = User(
+                      username=f"pipeline-owner-{suffix}",
+                      username_normalized=f"pipeline-owner-{suffix}",
+                      display_name="Pipeline Owner",
+                      password_hash="unused",
+                      global_roles=[],
+                      is_active=True,
+                      must_change_password=False,
+                  )
+                  session.add(owner)
+                  await session.flush()
+                  case = Case(
+                      case_code=f"PIP-{suffix.upper()}",
+                      title="Authorized pipeline fixture",
+                      sensitivity=CaseSensitivity.RESTRICTED,
+                      owner_user_id=owner.id,
+                      source_authority_summary="Authorized synthetic pipeline fixture",
+                  )
+                  session.add(case)
+                  await session.flush()
+                  artifact = EvidenceArtifact(
+                      case_id=case.id,
+                      source_class=EvidenceSourceClass.SYNTHETIC,
+                      source_type=source_type,
+                      acquisition_method="authorized_test_generation",
+                      collector_user_id=owner.id,
+                      captured_at=datetime.now(UTC),
+                      original_timezone="UTC",
+                      state=EvidenceState.STAGING,
+                  )
+                  preserve_evidence_manifest(
+                      artifact,
+                      media_type=media_type,
+                      size_bytes=stored.size_bytes,
+                      sha256=stored.sha256,
+                      sha512=None,
+                      object_key=stored.object_key,
+                  )
+                  session.add(artifact)
+                  await session.flush()
+                  session.add(
+                      Job(
+                          case_id=case.id,
+                          resource_type="evidence",
+                          resource_id=str(artifact.id),
+                          task_name="darknetra.ingestion.process_evidence",
+                          queue="ingest",
+                          idempotency_key=f"ingest:{artifact.id}:v1",
+                          state=JobState.PENDING,
+                      )
+                  )
+                  await session.commit()
+                  await session.refresh(owner)
+                  await session.refresh(case)
+                  await session.refresh(artifact)
+                  return owner, case, artifact
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_text_pipeline_is_idempotent_and_marks_ready(tmp_path: Path) -> None:
+              pipeline = module()
+              store = LocalObjectStore(tmp_path / "vault")
+              _owner, _case, parent = await seed_artifact(
+                  store,
+                  data=b"  authorized\r\n synthetic   text  \n",
+                  media_type="text/plain",
+              )
+              first_ids = []
+              for _ in range(2):
+                  async with async_session_factory() as session:
+                      outcome = await pipeline.process_evidence_once(
+                          session=session,
+                          evidence_id=parent.id,
+                          pipeline_version="v1",
+                          object_store=store,
+                          crypto=boundary(),
+                          request_id=str(uuid4()),
+                      )
+                      await session.commit()
+                      first_ids.append(tuple(outcome.derivative_ids))
+              assert first_ids[0] == first_ids[1]
+              assert len(first_ids[0]) == 1
+              async with async_session_factory() as session:
+                  refreshed = await session.get(EvidenceArtifact, parent.id)
+                  job = (
+                      await session.execute(
+                          sa.select(Job).where(Job.idempotency_key == f"ingest:{parent.id}:v1")
+                      )
+                  ).scalar_one()
+                  assert refreshed is not None and refreshed.state is EvidenceState.READY
+                  assert job.state is JobState.SUCCEEDED
+                  assert job.attempt_count == 1
+                  assert (
+                      await session.execute(
+                          sa.select(sa.func.count(EvidenceDerivation.id)).where(
+                              EvidenceDerivation.parent_evidence_id == parent.id
+                          )
+                      )
+                  ).scalar_one() == 1
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_new_pipeline_version_creates_a_new_derivative_set(tmp_path: Path) -> None:
+              pipeline = module()
+              store = LocalObjectStore(tmp_path / "vault")
+              _owner, _case, parent = await seed_artifact(
+                  store,
+                  data=b"versioned synthetic text",
+                  media_type="text/plain",
+              )
+              outputs = []
+              for version in ("v1", "v2"):
+                  async with async_session_factory() as session:
+                      outcome = await pipeline.process_evidence_once(
+                          session=session,
+                          evidence_id=parent.id,
+                          pipeline_version=version,
+                          object_store=store,
+                          crypto=boundary(),
+                          request_id=str(uuid4()),
+                      )
+                      await session.commit()
+                      outputs.append(tuple(outcome.derivative_ids))
+              assert outputs[0] != outputs[1]
+              async with async_session_factory() as session:
+                  assert (
+                      await session.execute(
+                          sa.select(sa.func.count(EvidenceDerivation.id)).where(
+                              EvidenceDerivation.parent_evidence_id == parent.id
+                          )
+                      )
+                  ).scalar_one() == 2
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_retryable_parser_failure_records_retrying_without_changing_original_manifest(tmp_path: Path) -> None:
+              pipeline = module()
+              store = LocalObjectStore(tmp_path / "vault")
+              _owner, _case, parent = await seed_artifact(
+                  store,
+                  data=b"retryable text",
+                  media_type="text/plain",
+              )
+              original_hash = parent.sha256
+
+              def fail(_data: bytes, _version: str):
+                  raise RuntimeError("synthetic parser failure")
+
+              async with async_session_factory() as session:
+                  with pytest.raises(pipeline.RetryablePipelineError):
+                      await pipeline.process_evidence_once(
+                          session=session,
+                          evidence_id=parent.id,
+                          pipeline_version="v1",
+                          object_store=store,
+                          crypto=boundary(),
+                          request_id=str(uuid4()),
+                          parser_overrides={"text/plain": fail},
+                      )
+                  await session.commit()
+              async with async_session_factory() as session:
+                  refreshed = await session.get(EvidenceArtifact, parent.id)
+                  job = (
+                      await session.execute(
+                          sa.select(Job).where(Job.idempotency_key == f"ingest:{parent.id}:v1")
+                      )
+                  ).scalar_one()
+                  assert refreshed is not None
+                  assert refreshed.sha256 == original_hash
+                  assert refreshed.state is EvidenceState.PRESERVED
+                  assert job.state is JobState.RETRYING
+                  assert job.attempt_count == 1
+                  assert job.error_code == "PARSER_FAILURE"
+
+                  await pipeline.mark_retry_exhausted(
+                      session=session,
+                      evidence_id=parent.id,
+                      pipeline_version="v1",
+                      error_code="PARSER_FAILURE",
+                      error_message="Parser failed after bounded retries",
+                  )
+                  await session.commit()
+              async with async_session_factory() as session:
+                  refreshed = await session.get(EvidenceArtifact, parent.id)
+                  job = (
+                      await session.execute(
+                          sa.select(Job).where(Job.idempotency_key == f"ingest:{parent.id}:v1")
+                      )
+                  ).scalar_one()
+                  assert refreshed is not None and refreshed.state is EvidenceState.FAILED
+                  assert refreshed.sha256 == original_hash
+                  assert job.state is JobState.FAILED
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_image_only_pdf_is_partial_and_explicitly_no_ocr(tmp_path: Path) -> None:
+              from pypdf import PdfWriter
+
+              output = io.BytesIO()
+              writer = PdfWriter()
+              writer.add_blank_page(width=100, height=100)
+              writer.write(output)
+              pipeline = module()
+              store = LocalObjectStore(tmp_path / "vault")
+              _owner, _case, parent = await seed_artifact(
+                  store,
+                  data=output.getvalue(),
+                  media_type="application/pdf",
+              )
+              async with async_session_factory() as session:
+                  outcome = await pipeline.process_evidence_once(
+                      session=session,
+                      evidence_id=parent.id,
+                      pipeline_version="v1",
+                      object_store=store,
+                      crypto=boundary(),
+                      request_id=str(uuid4()),
+                  )
+                  await session.commit()
+                  assert outcome.state is EvidenceState.PARTIAL
+                  assert outcome.derivative_ids == ()
+                  assert "PDF_TEXT_NOT_AVAILABLE" in outcome.warnings
+              async with async_session_factory() as session:
+                  refreshed = await session.get(EvidenceArtifact, parent.id)
+                  assert refreshed is not None and refreshed.state is EvidenceState.PARTIAL
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_unsupported_media_is_preserved_but_quarantined(tmp_path: Path) -> None:
+              pipeline = module()
+              store = LocalObjectStore(tmp_path / "vault")
+              _owner, _case, parent = await seed_artifact(
+                  store,
+                  data=b"\x7fELF\x02\x01",
+                  media_type="application/octet-stream",
+              )
+              async with async_session_factory() as session:
+                  outcome = await pipeline.process_evidence_once(
+                      session=session,
+                      evidence_id=parent.id,
+                      pipeline_version="v1",
+                      object_store=store,
+                      crypto=boundary(),
+                      request_id=str(uuid4()),
+                  )
+                  await session.commit()
+                  assert outcome.state is EvidenceState.QUARANTINED
+              async with async_session_factory() as session:
+                  refreshed = await session.get(EvidenceArtifact, parent.id)
+                  job = (
+                      await session.execute(
+                          sa.select(Job).where(Job.idempotency_key == f"ingest:{parent.id}:v1")
+                      )
+                  ).scalar_one()
+                  assert refreshed is not None
+                  assert refreshed.state is EvidenceState.QUARANTINED
+                  assert refreshed.quarantine_reason == "UNSUPPORTED_PARSER"
+                  assert job.state is JobState.FAILED
+                  assert job.error_code == "UNSUPPORTED_PARSER"
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_zip_pipeline_creates_child_lineage_and_partial_when_binary_is_quarantined(tmp_path: Path) -> None:
+              archive = io.BytesIO()
+              with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+                  bundle.writestr("chat.json", b'{"messages":[{"from":"Alias","text":"safe"}]}')
+                  bundle.writestr("binary.bin", b"\x7fELF\x02\x01")
+              pipeline = module()
+              store = LocalObjectStore(tmp_path / "vault")
+              _owner, _case, parent = await seed_artifact(
+                  store,
+                  data=archive.getvalue(),
+                  media_type="application/zip",
+              )
+              async with async_session_factory() as session:
+                  outcome = await pipeline.process_evidence_once(
+                      session=session,
+                      evidence_id=parent.id,
+                      pipeline_version="v1",
+                      object_store=store,
+                      crypto=boundary(),
+                      request_id=str(uuid4()),
+                  )
+                  await session.commit()
+                  assert outcome.state is EvidenceState.PARTIAL
+                  assert len(outcome.derivative_ids) == 2
+              async with async_session_factory() as session:
+                  children = (
+                      await session.execute(
+                          sa.select(EvidenceArtifact)
+                          .join(EvidenceDerivation, EvidenceDerivation.child_evidence_id == EvidenceArtifact.id)
+                          .where(EvidenceDerivation.parent_evidence_id == parent.id)
+                      )
+                  ).scalars().all()
+                  assert {child.state for child in children} == {
+                      EvidenceState.PRESERVED,
+                      EvidenceState.QUARANTINED,
+                  }
+          PY
+
+      - name: Prove RED before implementation
+        run: |
+          set +e
+          uv run pytest -q apps/api/tests/integration/test_ingestion_pipeline.py >/tmp/task8-pipeline-red.log 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          grep -q 'idempotent ingestion pipeline is not implemented' /tmp/task8-pipeline-red.log
+
+      - name: Implement idempotent parser dispatch and state semantics
+        run: |
+          cat > apps/api/darknetra_api/services/ingestion_pipeline.py <<'PY'
+          from __future__ import annotations
+
+          import io
+          from collections.abc import Callable
+          from dataclasses import dataclass
+          from datetime import UTC, datetime
+          from typing import Any
+          from uuid import UUID
+
+          import sqlalchemy as sa
+          from sqlalchemy.ext.asyncio import AsyncSession
+          from starlette.concurrency import run_in_threadpool
+
+          from darknetra_api.models.evidence import EvidenceArtifact, EvidenceState
+          from darknetra_api.models.job import Job, JobState
+          from darknetra_api.parsers.archive import extract_zip_to_store
+          from darknetra_api.parsers.html import parse_html
+          from darknetra_api.parsers.image import parse_image
+          from darknetra_api.parsers.pdf import parse_pdf
+          from darknetra_api.parsers.tabular import parse_csv, parse_json
+          from darknetra_api.parsers.text import parse_text
+          from darknetra_api.parsers.warc import parse_warc
+          from darknetra_api.security.encryption import SensitiveFieldCrypto
+          from darknetra_api.services.archive_ingest import create_archive_member_evidence
+          from darknetra_api.services.audit import append_audit_event
+          from darknetra_api.services.derivatives import DerivativePayload, create_derivative
+          from darknetra_api.storage.base import ObjectStore
+
+
+          class PipelineError(RuntimeError):
+              pass
+
+
+          class RetryablePipelineError(PipelineError):
+              pass
+
+
+          @dataclass(frozen=True, slots=True)
+          class PipelineOutcome:
+              evidence_id: UUID
+              pipeline_version: str
+              state: EvidenceState
+              derivative_ids: tuple[UUID, ...]
+              warnings: tuple[str, ...]
+              idempotent_replay: bool = False
+
+
+          ParserOverride = Callable[[bytes, str], Any]
+
+
+          async def _read_original(
+              object_store: ObjectStore,
+              artifact: EvidenceArtifact,
+          ) -> bytes:
+              if not artifact.object_key or not artifact.sha256:
+                  raise PipelineError("preserved evidence manifest is incomplete")
+
+              def read() -> bytes:
+                  if not object_store.verify(artifact.object_key, artifact.sha256):
+                      raise PipelineError("preserved evidence failed integrity verification")
+                  with object_store.open(artifact.object_key) as source:
+                      return source.read()
+
+              return await run_in_threadpool(read)
+
+
+          async def _job_for(
+              session: AsyncSession,
+              *,
+              artifact: EvidenceArtifact,
+              pipeline_version: str,
+          ) -> Job:
+              key = f"ingest:{artifact.id}:{pipeline_version}"
+              job = (
+                  await session.execute(sa.select(Job).where(Job.idempotency_key == key))
+              ).scalar_one_or_none()
+              if job is None:
+                  job = Job(
+                      case_id=artifact.case_id,
+                      resource_type="evidence",
+                      resource_id=str(artifact.id),
+                      task_name="darknetra.ingestion.process_evidence",
+                      queue="ingest",
+                      idempotency_key=key,
+                      state=JobState.PENDING,
+                  )
+                  session.add(job)
+                  await session.flush()
+              return job
+
+
+          def _text_payload(
+              *,
+              transformation: str,
+              version: str,
+              text: str,
+              parser: str,
+              metadata: dict[str, Any],
+              warnings: tuple[str, ...],
+          ) -> DerivativePayload | None:
+              if not text:
+                  return None
+              return DerivativePayload(
+                  transformation=transformation,
+                  transformer_version=version,
+                  media_type="text/plain",
+                  data=text.encode("utf-8"),
+                  source_type=f"derivative.{transformation}",
+                  parameters={
+                      "parser": parser,
+                      "parser_metadata": metadata,
+                      "warnings": list(warnings),
+                  },
+              )
+
+
+          async def _create_payloads(
+              *,
+              session: AsyncSession,
+              parent: EvidenceArtifact,
+              payloads: list[DerivativePayload],
+              object_store: ObjectStore,
+              request_id: str,
+          ) -> tuple[UUID, ...]:
+              child_ids: list[UUID] = []
+              for payload in payloads:
+                  result = await create_derivative(
+                      session=session,
+                      parent_evidence_id=parent.id,
+                      actor_user_id=parent.collector_user_id,
+                      payload=payload,
+                      object_store=object_store,
+                      request_id=request_id,
+                  )
+                  child_ids.append(result.child.id)
+              return tuple(child_ids)
+
+
+          async def process_evidence_once(
+              *,
+              session: AsyncSession,
+              evidence_id: UUID,
+              pipeline_version: str,
+              object_store: ObjectStore,
+              crypto: SensitiveFieldCrypto,
+              request_id: str,
+              parser_overrides: dict[str, ParserOverride] | None = None,
+          ) -> PipelineOutcome:
+              parent = await session.get(EvidenceArtifact, evidence_id)
+              if parent is None:
+                  raise PipelineError("evidence was not found")
+              job = await _job_for(
+                  session,
+                  artifact=parent,
+                  pipeline_version=pipeline_version,
+              )
+              if job.state is JobState.SUCCEEDED:
+                  rows = (
+                      await session.execute(
+                          sa.select(sa.distinct(sa.text("child_evidence_id"))).select_from(
+                              sa.text("evidence_derivations")
+                          ).where(
+                              sa.text("parent_evidence_id = :parent_id AND transformer_version = :version")
+                          ).params(parent_id=parent.id, version=pipeline_version)
+                      )
+                  ).all()
+                  return PipelineOutcome(
+                      evidence_id=parent.id,
+                      pipeline_version=pipeline_version,
+                      state=parent.state,
+                      derivative_ids=tuple(row[0] for row in rows),
+                      warnings=(),
+                      idempotent_replay=True,
+                  )
+              if parent.state is EvidenceState.QUARANTINED:
+                  job.state = JobState.FAILED
+                  job.error_code = "EVIDENCE_QUARANTINED"
+                  job.error_message = "Evidence is quarantined and cannot be processed"
+                  job.finished_at = datetime.now(UTC)
+                  return PipelineOutcome(
+                      evidence_id=parent.id,
+                      pipeline_version=pipeline_version,
+                      state=parent.state,
+                      derivative_ids=(),
+                      warnings=("EVIDENCE_QUARANTINED",),
+                  )
+
+              job.state = JobState.RUNNING
+              job.attempt_count += 1
+              job.started_at = job.started_at or datetime.now(UTC)
+              job.finished_at = None
+              job.error_code = None
+              job.error_message = None
+              parent.state = EvidenceState.PROCESSING
+              await session.flush()
+
+              try:
+                  data = await _read_original(object_store, parent)
+                  media_type = (parent.media_type or "").split(";", 1)[0].casefold()
+                  override = (parser_overrides or {}).get(media_type)
+                  payloads: list[DerivativePayload] = []
+                  warnings: list[str] = []
+                  state = EvidenceState.READY
+
+                  if override is not None:
+                      overridden = override(data, pipeline_version)
+                      if isinstance(overridden, list):
+                          payloads.extend(overridden)
+                      elif overridden is not None:
+                          raise PipelineError("parser override returned an invalid result")
+                  elif media_type == "text/plain":
+                      parsed = parse_text(data)
+                      warnings.extend(parsed.warnings)
+                      payload = _text_payload(
+                          transformation="normalized_text",
+                          version=pipeline_version,
+                          text=parsed.text,
+                          parser="text",
+                          metadata=parsed.metadata,
+                          warnings=parsed.warnings,
+                      )
+                      if payload is not None:
+                          payloads.append(payload)
+                  elif media_type == "text/html":
+                      parsed = parse_html(data)
+                      warnings.extend(parsed.warnings)
+                      text_payload = _text_payload(
+                          transformation="normalized_html_text",
+                          version=pipeline_version,
+                          text=parsed.text,
+                          parser="html",
+                          metadata={key: value for key, value in parsed.metadata.items() if key != "sanitized_preview_html"},
+                          warnings=parsed.warnings,
+                      )
+                      if text_payload is not None:
+                          payloads.append(text_payload)
+                      preview = str(parsed.metadata.get("sanitized_preview_html") or "")
+                      if preview:
+                          payloads.append(
+                              DerivativePayload(
+                                  transformation="sanitized_html_preview",
+                                  transformer_version=pipeline_version,
+                                  media_type="text/html",
+                                  data=preview.encode("utf-8"),
+                                  source_type="derivative.sanitized_html_preview",
+                                  parameters={
+                                      "parser": "html",
+                                      "active_content_removed": True,
+                                      "links_inert": True,
+                                  },
+                              )
+                          )
+                  elif media_type == "application/json":
+                      parsed = parse_json(data)
+                      warnings.extend(parsed.warnings)
+                      payload = _text_payload(
+                          transformation="normalized_json_text",
+                          version=pipeline_version,
+                          text=parsed.text,
+                          parser="json",
+                          metadata=parsed.metadata,
+                          warnings=parsed.warnings,
+                      )
+                      if payload is not None:
+                          payloads.append(payload)
+                  elif media_type == "text/csv":
+                      parsed = parse_csv(data)
+                      warnings.extend(parsed.warnings)
+                      payload = _text_payload(
+                          transformation="normalized_csv_text",
+                          version=pipeline_version,
+                          text=parsed.text,
+                          parser="csv",
+                          metadata=parsed.metadata,
+                          warnings=parsed.warnings,
+                      )
+                      if payload is not None:
+                          payloads.append(payload)
+                  elif media_type in {"image/png", "image/jpeg", "image/webp"}:
+                      parsed = parse_image(data)
+                      warnings.extend(parsed.warnings)
+                      payloads.append(
+                          DerivativePayload(
+                              transformation="safe_image_preview",
+                              transformer_version=pipeline_version,
+                              media_type=parsed.preview_media_type,
+                              data=parsed.preview_bytes,
+                              source_type="derivative.safe_image_preview",
+                              parameters={
+                                  "parser": "image",
+                                  "metadata": parsed.metadata,
+                                  "warnings": list(parsed.warnings),
+                              },
+                          )
+                      )
+                  elif media_type == "application/pdf":
+                      parsed = parse_pdf(data)
+                      warnings.extend(parsed.warnings)
+                      if parsed.text_status == "TEXT_AVAILABLE":
+                          payload = _text_payload(
+                              transformation="pdf_text",
+                              version=pipeline_version,
+                              text=parsed.text,
+                              parser="pdf",
+                              metadata=parsed.metadata,
+                              warnings=parsed.warnings,
+                          )
+                          if payload is not None:
+                              payloads.append(payload)
+                      else:
+                          state = EvidenceState.PARTIAL
+                  elif media_type == "application/zip":
+                      extracted = await run_in_threadpool(
+                          extract_zip_to_store,
+                          io.BytesIO(data),
+                          object_store=object_store,
+                      )
+                      archive_result = await create_archive_member_evidence(
+                          session=session,
+                          parent_evidence_id=parent.id,
+                          actor=await session.get(__import__("darknetra_api.models.user", fromlist=["User"]).User, parent.collector_user_id),
+                          members=extracted,
+                          object_store=object_store,
+                          crypto=crypto,
+                          request_id=request_id,
+                          transformer_version=pipeline_version,
+                      )
+                      child_ids = tuple(child.id for child in archive_result.children)
+                      if any(child.state is EvidenceState.QUARANTINED for child in archive_result.children):
+                          state = EvidenceState.PARTIAL
+                          warnings.append("ARCHIVE_MEMBER_QUARANTINED")
+                      parent.state = state
+                      job.state = JobState.SUCCEEDED
+                      job.finished_at = datetime.now(UTC)
+                      append_audit_event(
+                          session,
+                          actor_user_id=parent.collector_user_id,
+                          event_type="EVIDENCE_PROCESSING_COMPLETED",
+                          resource_type="evidence",
+                          resource_id=str(parent.id),
+                          case_id=parent.case_id,
+                          request_id=request_id,
+                          metadata={
+                              "pipeline_version": pipeline_version,
+                              "state": state.value,
+                              "derivative_count": len(child_ids),
+                              "warnings": warnings,
+                          },
+                      )
+                      await session.flush()
+                      return PipelineOutcome(
+                          evidence_id=parent.id,
+                          pipeline_version=pipeline_version,
+                          state=state,
+                          derivative_ids=child_ids,
+                          warnings=tuple(warnings),
+                      )
+                  elif media_type in {"application/warc", "application/gzip"}:
+                      parsed = parse_warc(data)
+                      warnings.extend(parsed.warnings)
+                      for record in parsed.records:
+                          declared = record.media_type or "application/octet-stream"
+                          payloads.append(
+                              DerivativePayload(
+                                  transformation="warc_response_body",
+                                  transformer_version=pipeline_version,
+                                  media_type=declared,
+                                  data=record.payload or b"\n",
+                                  source_type="derivative.warc_response",
+                                  parameters={
+                                      "record_index": record.index,
+                                      "record_id": record.record_id,
+                                      "captured_at": record.captured_at,
+                                      "declared_media_type": declared,
+                                  },
+                              )
+                          )
+                  else:
+                      parent.state = EvidenceState.QUARANTINED
+                      parent.quarantine_reason = "UNSUPPORTED_PARSER"
+                      job.state = JobState.FAILED
+                      job.error_code = "UNSUPPORTED_PARSER"
+                      job.error_message = "No approved parser is registered for the preserved media type"
+                      job.finished_at = datetime.now(UTC)
+                      await session.flush()
+                      return PipelineOutcome(
+                          evidence_id=parent.id,
+                          pipeline_version=pipeline_version,
+                          state=parent.state,
+                          derivative_ids=(),
+                          warnings=("UNSUPPORTED_PARSER",),
+                      )
+
+                  child_ids = await _create_payloads(
+                      session=session,
+                      parent=parent,
+                      payloads=payloads,
+                      object_store=object_store,
+                      request_id=request_id,
+                  )
+                  if warnings and state is EvidenceState.READY:
+                      state = EvidenceState.PARTIAL
+                  if not child_ids and state is EvidenceState.READY:
+                      state = EvidenceState.PARTIAL
+                      warnings.append("NO_DERIVATIVE_OUTPUT")
+                  parent.state = state
+                  job.state = JobState.SUCCEEDED
+                  job.finished_at = datetime.now(UTC)
+                  append_audit_event(
+                      session,
+                      actor_user_id=parent.collector_user_id,
+                      event_type="EVIDENCE_PROCESSING_COMPLETED",
+                      resource_type="evidence",
+                      resource_id=str(parent.id),
+                      case_id=parent.case_id,
+                      request_id=request_id,
+                      metadata={
+                          "pipeline_version": pipeline_version,
+                          "state": state.value,
+                          "derivative_count": len(child_ids),
+                          "warnings": warnings,
+                      },
+                  )
+                  await session.flush()
+                  return PipelineOutcome(
+                      evidence_id=parent.id,
+                      pipeline_version=pipeline_version,
+                      state=state,
+                      derivative_ids=child_ids,
+                      warnings=tuple(dict.fromkeys(warnings)),
+                  )
+              except PipelineError:
+                  raise
+              except Exception as exc:
+                  parent.state = EvidenceState.PRESERVED
+                  job.state = JobState.RETRYING
+                  job.error_code = "PARSER_FAILURE"
+                  job.error_message = "Approved parser failed; retry is allowed"
+                  job.finished_at = None
+                  await session.flush()
+                  raise RetryablePipelineError("approved parser failed") from exc
+
+
+          async def mark_retry_exhausted(
+              *,
+              session: AsyncSession,
+              evidence_id: UUID,
+              pipeline_version: str,
+              error_code: str,
+              error_message: str,
+          ) -> None:
+              parent = await session.get(EvidenceArtifact, evidence_id)
+              if parent is None:
+                  raise PipelineError("evidence was not found")
+              job = await _job_for(
+                  session,
+                  artifact=parent,
+                  pipeline_version=pipeline_version,
+              )
+              parent.state = EvidenceState.FAILED
+              job.state = JobState.FAILED
+              job.error_code = error_code[:120]
+              job.error_message = error_message[:1000]
+              job.finished_at = datetime.now(UTC)
+              await session.flush()
+          PY
+
+      - name: Patch archive service actor lookup to fail closed when missing
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("apps/api/darknetra_api/services/ingestion_pipeline.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''                      archive_result = await create_archive_member_evidence(
+                          session=session,
+                          parent_evidence_id=parent.id,
+                          actor=await session.get(__import__("darknetra_api.models.user", fromlist=["User"]).User, parent.collector_user_id),
+'''
+          new = '''                      from darknetra_api.models.user import User
+
+                      actor = await session.get(User, parent.collector_user_id)
+                      if actor is None:
+                          raise PipelineError("evidence collector was not found")
+                      archive_result = await create_archive_member_evidence(
+                          session=session,
+                          parent_evidence_id=parent.id,
+                          actor=actor,
+'''
+          if old not in text:
+              raise SystemExit("archive actor lookup marker was not found")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+
+      - name: Verify GREEN and complete regression
+        run: |
+          uv run ruff check .
+          uv run pytest -q apps/api/tests/integration/test_ingestion_pipeline.py
+          uv run pytest -q
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml build api worker
+
+      - name: Record Task 8 pipeline checkpoint
+        run: |
+          mkdir -p docs/verification
+          cat > docs/verification/plan03-task8-pipeline.md <<EOF
+          # Plan 03 Task 8 — idempotent ingestion pipeline TDD checkpoint
+
+          - **Source before implementation:** \`$(git rev-parse HEAD)\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          ## RED
+
+          Pipeline dispatch, duplicate-delivery, versioned reprocessing, retry and state contracts were authored first and failed with \`idempotent ingestion pipeline is not implemented\`.
+
+          ## GREEN
+
+          | Gate | Outcome |
+          |---|---|
+          | Ruff | success |
+          | Duplicate task delivery idempotency | success |
+          | Pipeline-version reprocessing | success |
+          | Retryable failure and retry-exhaustion state tests | success |
+          | Image-only PDF PARTIAL/no-OCR semantics | success |
+          | Unsupported parser quarantine semantics | success |
+          | ZIP child lineage and partial quarantine semantics | success |
+          | Complete Python suite | success |
+          | Compose validation and API/worker image build | success |
+
+          The preserved original is verified before parsing and its expected digest is never rewritten. PostgreSQL jobs are authoritative. Parser errors move the durable job to `RETRYING` while restoring the original to `PRESERVED`; explicit retry exhaustion moves both job and processing state to `FAILED`. A new pipeline version creates a new, separately traceable derivative set.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/api/darknetra_api/services/ingestion_pipeline.py apps/api/tests/integration/test_ingestion_pipeline.py docs/verification/plan03-task8-pipeline.md
+          git rm .github/workflows/plan03-task8-pipeline.yml
+          git commit -m 'feat: orchestrate idempotent evidence processing'
+          git push origin HEAD:testing-codex
