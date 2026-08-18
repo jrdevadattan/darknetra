@@ -220,8 +220,11 @@ def main() -> int:
     except FixtureSafetyError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    except Exception as exc:  # pragma: no cover - exercised by workflow diagnostics
-        print(f"fixture creation failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+    except sa.exc.SQLAlchemyError:
+        print("fixture creation failed: database operation failed", file=sys.stderr)
+        return 1
+    except OSError:
+        print("fixture creation failed: operating-system error", file=sys.stderr)
         return 1
 
     print(json.dumps(payload, sort_keys=True))
