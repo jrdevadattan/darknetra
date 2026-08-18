@@ -1,0 +1,635 @@
+name: Plan 03 Task 12 deterministic offline evidence corpus TDD
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task12-demo-corpus.yml
+
+permissions:
+  contents: write
+
+jobs:
+  red-green:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task12-demo@127.0.0.1:5432/darknetra_plan03_task12_demo
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-task12-demo
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task12_demo
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task12-demo
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task12_demo"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Require investigator UI checkpoint
+        run: test -f docs/verification/plan03-task11-evidence-ui.md
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f"::add-mask::{value}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n")
+              out.write(f"DARKNETRA_FIELD_KEY_V1_B64={field}\n")
+              out.write("DARKNETRA_FIELD_KEYRING_B64_JSON=" + json.dumps({"v1": field}, separators=(",", ":")) + "\n")
+              out.write("DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n")
+              out.write(f"DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n")
+          PY
+
+      - name: Install and migrate
+        run: |
+          uv sync --all-packages --dev --frozen
+          uv run alembic -c apps/api/alembic.ini upgrade head
+
+      - name: Write deterministic corpus contracts first
+        run: |
+          mkdir -p apps/api/tests/unit apps/api/tests/integration
+          cat > apps/api/tests/unit/test_synthetic_evidence_corpus.py <<'PY'
+          from __future__ import annotations
+
+          import importlib
+          import importlib.util
+          import json
+          from pathlib import Path
+
+
+          def module():
+              spec = importlib.util.find_spec("darknetra_api.demo.synthetic_evidence")
+              assert spec is not None, "deterministic synthetic evidence corpus is not implemented"
+              return importlib.import_module("darknetra_api.demo.synthetic_evidence")
+
+
+          def test_corpus_is_deterministic_complete_and_manifest_verified(tmp_path: Path) -> None:
+              generator = module()
+              first = tmp_path / "first"
+              second = tmp_path / "second"
+              first_manifest = generator.generate_synthetic_evidence_corpus(first)
+              second_manifest = generator.generate_synthetic_evidence_corpus(second)
+              assert first_manifest == second_manifest
+              assert {entry["parser_family"] for entry in first_manifest["artifacts"]} == {
+                  "text", "html", "json", "csv", "archive", "image", "pdf", "warc"
+              }
+              for entry in first_manifest["artifacts"]:
+                  first_bytes = (first / entry["relative_path"]).read_bytes()
+                  second_bytes = (second / entry["relative_path"]).read_bytes()
+                  assert first_bytes == second_bytes
+                  assert generator.sha256_hex(first_bytes) == entry["sha256"]
+                  assert len(entry["sha256"]) == 64
+                  assert entry["source_class"] == "SYNTHETIC"
+                  assert entry["authority"] == "OFFLINE_SYNTHETIC_DEMO_ONLY"
+              assert json.loads((first / "manifest.json").read_text(encoding="utf-8")) == first_manifest
+
+
+          def test_corpus_has_no_live_illicit_endpoint_credentials_or_purchase_instructions(tmp_path: Path) -> None:
+              generator = module()
+              generator.generate_synthetic_evidence_corpus(tmp_path)
+              combined = b"\n".join(
+                  path.read_bytes()
+                  for path in sorted(tmp_path.rglob("*"))
+                  if path.is_file()
+              ).lower()
+              assert b".onion" not in combined
+              assert b"t.me/" not in combined
+              assert b"api_key" not in combined
+              assert b"password" not in combined
+              assert b"send payment" not in combined
+              assert b"place an order" not in combined
+              assert b"contact the vendor" not in combined
+              assert b"example.invalid" in combined
+              assert b"fictional" in combined
+
+
+          def test_generator_refuses_nonempty_destination_without_explicit_overwrite(tmp_path: Path) -> None:
+              generator = module()
+              destination = tmp_path / "corpus"
+              destination.mkdir()
+              (destination / "unrelated.txt").write_text("do not replace", encoding="utf-8")
+              try:
+                  generator.generate_synthetic_evidence_corpus(destination)
+              except generator.CorpusGenerationError:
+                  pass
+              else:
+                  raise AssertionError("generator accepted a nonempty destination")
+              assert (destination / "unrelated.txt").read_text(encoding="utf-8") == "do not replace"
+          PY
+
+          cat > apps/api/tests/integration/test_synthetic_evidence_demo_flow.py <<'PY'
+          from __future__ import annotations
+
+          import io
+          from datetime import UTC, datetime
+          from pathlib import Path
+          from uuid import uuid4
+
+          import pytest
+          import sqlalchemy as sa
+          from darknetra_api.db.session import async_session_factory
+          from darknetra_api.demo.synthetic_evidence import generate_synthetic_evidence_corpus
+          from darknetra_api.models.audit import AuditEvent
+          from darknetra_api.models.auth_session import AuthSession
+          from darknetra_api.models.case import Case
+          from darknetra_api.models.case_membership import CaseMembership, CaseMembershipRole
+          from darknetra_api.models.custody import CustodyEvent
+          from darknetra_api.models.enums import CaseSensitivity
+          from darknetra_api.models.evidence import EvidenceArtifact, EvidenceDerivation, EvidenceSourceClass, EvidenceState
+          from darknetra_api.models.job import Job, JobState
+          from darknetra_api.models.user import User
+          from darknetra_api.security.encryption import SensitiveFieldCrypto
+          from darknetra_api.services.evidence import preserve_evidence_manifest
+          from darknetra_api.services.ingestion_pipeline import process_evidence_once
+          from darknetra_api.storage.local import LocalObjectStore
+
+
+          async def clean_database() -> None:
+              async with async_session_factory() as session:
+                  await session.execute(sa.delete(CustodyEvent))
+                  await session.execute(sa.delete(EvidenceDerivation))
+                  await session.execute(sa.delete(EvidenceArtifact))
+                  await session.execute(sa.delete(Job))
+                  await session.execute(sa.delete(CaseMembershipRole))
+                  await session.execute(sa.delete(CaseMembership))
+                  await session.execute(sa.delete(AuditEvent))
+                  await session.execute(sa.delete(Case))
+                  await session.execute(sa.delete(AuthSession))
+                  await session.execute(sa.delete(User))
+                  await session.commit()
+
+
+          @pytest.fixture(autouse=True)
+          async def clean() -> None:
+              await clean_database()
+              yield
+              await clean_database()
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_full_offline_corpus_preserves_processes_and_links_every_supported_family(tmp_path: Path) -> None:
+              corpus_dir = tmp_path / "corpus"
+              manifest = generate_synthetic_evidence_corpus(corpus_dir)
+              store = LocalObjectStore(tmp_path / "vault")
+              crypto = SensitiveFieldCrypto(
+                  field_keys={"v1": b"M" * 32},
+                  active_key_version="v1",
+                  blind_index_key=b"N" * 32,
+              )
+              async with async_session_factory() as session:
+                  suffix = uuid4().hex[:10]
+                  owner = User(
+                      username=f"demo-owner-{suffix}",
+                      username_normalized=f"demo-owner-{suffix}",
+                      display_name="Offline Demo Owner",
+                      password_hash="unused",
+                      global_roles=[],
+                      is_active=True,
+                      must_change_password=False,
+                  )
+                  session.add(owner)
+                  await session.flush()
+                  case = Case(
+                      case_code=f"DEM-{suffix.upper()}",
+                      title="Offline Evidence Vault demonstration",
+                      sensitivity=CaseSensitivity.RESTRICTED,
+                      owner_user_id=owner.id,
+                      source_authority_summary="Offline synthetic demonstration only",
+                  )
+                  session.add(case)
+                  await session.flush()
+                  artifact_ids = {}
+                  for entry in manifest["artifacts"]:
+                      data = (corpus_dir / entry["relative_path"]).read_bytes()
+                      stored = store.put_verified(io.BytesIO(data))
+                      artifact = EvidenceArtifact(
+                          case_id=case.id,
+                          source_class=EvidenceSourceClass.SYNTHETIC,
+                          source_type=f"synthetic.demo.{entry['parser_family']}",
+                          acquisition_method="offline_synthetic_generation",
+                          collector_user_id=owner.id,
+                          captured_at=datetime.now(UTC),
+                          original_timezone="UTC",
+                          state=EvidenceState.STAGING,
+                          tool_name="darknetra.synthetic-demo",
+                          tool_version=manifest["corpus_version"],
+                      )
+                      preserve_evidence_manifest(
+                          artifact,
+                          media_type=entry["media_type"],
+                          size_bytes=stored.size_bytes,
+                          sha256=stored.sha256,
+                          sha512=None,
+                          object_key=stored.object_key,
+                      )
+                      session.add(artifact)
+                      await session.flush()
+                      session.add(
+                          Job(
+                              case_id=case.id,
+                              resource_type="evidence",
+                              resource_id=str(artifact.id),
+                              task_name="darknetra.ingestion.process_evidence",
+                              queue="ingest",
+                              idempotency_key=f"ingest:{artifact.id}:v1",
+                              state=JobState.PENDING,
+                          )
+                      )
+                      artifact_ids[entry["parser_family"]] = artifact.id
+                  await session.commit()
+
+              outcomes = {}
+              for family, artifact_id in artifact_ids.items():
+                  async with async_session_factory() as session:
+                      outcome = await process_evidence_once(
+                          session=session,
+                          evidence_id=artifact_id,
+                          pipeline_version="v1",
+                          object_store=store,
+                          crypto=crypto,
+                          request_id=f"offline-demo-{family}",
+                      )
+                      await session.commit()
+                      outcomes[family] = outcome
+
+              assert set(outcomes) == {"text", "html", "json", "csv", "archive", "image", "pdf", "warc"}
+              assert all(outcome.state in {EvidenceState.READY, EvidenceState.PARTIAL} for outcome in outcomes.values())
+              assert outcomes["text"].state is EvidenceState.READY
+              assert outcomes["image"].state is EvidenceState.READY
+              assert outcomes["pdf"].state is EvidenceState.READY
+              assert len(outcomes["archive"].derivative_ids) >= 2
+              assert len(outcomes["warc"].derivative_ids) == 1
+
+              async with async_session_factory() as session:
+                  jobs = (await session.execute(sa.select(Job))).scalars().all()
+                  derivations = (await session.execute(sa.select(EvidenceDerivation))).scalars().all()
+                  custody = (await session.execute(sa.select(CustodyEvent))).scalars().all()
+                  originals = (
+                      await session.execute(
+                          sa.select(EvidenceArtifact).where(
+                              EvidenceArtifact.source_type.like("synthetic.demo.%")
+                          )
+                      )
+                  ).scalars().all()
+                  assert all(job.state is JobState.SUCCEEDED for job in jobs)
+                  assert len(derivations) >= 9
+                  assert len(custody) >= len(derivations)
+                  assert len(originals) == 8
+                  assert all(artifact.sha256 for artifact in originals)
+                  assert all(artifact.object_key and artifact.object_key.startswith("sha256/") for artifact in originals)
+          PY
+
+      - name: Prove RED before implementation
+        run: |
+          set +e
+          uv run pytest -q \
+            apps/api/tests/unit/test_synthetic_evidence_corpus.py \
+            apps/api/tests/integration/test_synthetic_evidence_demo_flow.py \
+            >/tmp/task12-demo-red.log 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          grep -q 'deterministic synthetic evidence corpus is not implemented' /tmp/task12-demo-red.log
+
+      - name: Implement deterministic offline corpus generator
+        run: |
+          mkdir -p apps/api/darknetra_api/demo scripts datasets/synthetic/evidence-vault
+          cat > apps/api/darknetra_api/demo/__init__.py <<'PY'
+          """Offline-only deterministic demonstration data."""
+          PY
+          cat > apps/api/darknetra_api/demo/synthetic_evidence.py <<'PY'
+          from __future__ import annotations
+
+          import csv
+          import gzip
+          import hashlib
+          import io
+          import json
+          import zipfile
+          from dataclasses import dataclass
+          from pathlib import Path
+          from typing import Final
+
+          from PIL import Image, ImageDraw
+          from pypdf import PdfWriter
+          from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+          CORPUS_VERSION: Final = "1.0.0"
+          AUTHORITY: Final = "OFFLINE_SYNTHETIC_DEMO_ONLY"
+
+
+          class CorpusGenerationError(ValueError):
+              pass
+
+
+          @dataclass(frozen=True, slots=True)
+          class Artifact:
+              relative_path: str
+              media_type: str
+              parser_family: str
+              source_type: str
+              bytes_value: bytes
+              description: str
+
+
+          def sha256_hex(value: bytes) -> str:
+              return hashlib.sha256(value).hexdigest()
+
+
+          def _zip_bytes(entries: list[tuple[str, bytes]]) -> bytes:
+              output = io.BytesIO()
+              with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+                  for name, data in entries:
+                      info = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
+                      info.compress_type = zipfile.ZIP_DEFLATED
+                      info.external_attr = 0o100644 << 16
+                      archive.writestr(info, data)
+              return output.getvalue()
+
+
+          def _png_bytes() -> bytes:
+              image = Image.new("RGB", (480, 280), "white")
+              draw = ImageDraw.Draw(image)
+              draw.rectangle((24, 24, 456, 256), outline="black", width=3)
+              draw.text((48, 54), "DARKNETRA OFFLINE SYNTHETIC FIXTURE", fill="black")
+              draw.text((48, 104), "Fictional listing image — no real seller", fill="black")
+              draw.text((48, 144), "Indicator: restricted-substance-alpha", fill="black")
+              draw.text((48, 184), "Locator: example.invalid (reserved domain)", fill="black")
+              output = io.BytesIO()
+              image.save(output, format="PNG", optimize=False, compress_level=9)
+              return output.getvalue()
+
+
+          def _pdf_bytes() -> bytes:
+              writer = PdfWriter()
+              page = writer.add_blank_page(width=612, height=792)
+              font = DictionaryObject(
+                  {
+                      NameObject("/Type"): NameObject("/Font"),
+                      NameObject("/Subtype"): NameObject("/Type1"),
+                      NameObject("/BaseFont"): NameObject("/Helvetica"),
+                  }
+              )
+              font_ref = writer._add_object(font)
+              page[NameObject("/Resources")] = DictionaryObject(
+                  {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font_ref})}
+              )
+              text = "DARKNETRA offline fictional evidence report - restricted substance alpha indicator"
+              stream = DecodedStreamObject()
+              stream.set_data(
+                  f"BT /F1 12 Tf 50 700 Td <{text.encode('latin-1').hex().upper()}> Tj ET".encode("ascii")
+              )
+              page[NameObject("/Contents")] = writer._add_object(stream)
+              writer.add_metadata({"/Title": "DARKNETRA Offline Synthetic Fixture", "/Producer": "DARKNETRA"})
+              output = io.BytesIO()
+              writer.write(output)
+              return output.getvalue()
+
+
+          def _warc_bytes() -> bytes:
+              body = json.dumps(
+                  {
+                      "notice": "fictional offline observation",
+                      "indicator": "restricted-substance-alpha",
+                      "seller": "FictionalAlias01",
+                      "source": "https://evidence.example.invalid/listing/alpha",
+                  },
+                  sort_keys=True,
+                  separators=(",", ":"),
+              ).encode("utf-8")
+              http = (
+                  b"HTTP/1.1 200 OK\r\n"
+                  b"Content-Type: application/json\r\n"
+                  + f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
+                  + body
+              )
+              return (
+                  b"WARC/1.0\r\n"
+                  b"WARC-Type: response\r\n"
+                  b"WARC-Target-URI: https://evidence.example.invalid/listing/alpha\r\n"
+                  b"WARC-Date: 2026-01-01T00:00:00Z\r\n"
+                  b"WARC-Record-ID: <urn:uuid:11111111-1111-4111-8111-111111111111>\r\n"
+                  b"Content-Type: application/http; msgtype=response\r\n"
+                  + f"Content-Length: {len(http)}\r\n\r\n".encode("ascii")
+                  + http
+                  + b"\r\n\r\n"
+              )
+
+
+          def _artifacts() -> list[Artifact]:
+              text = (
+                  "OFFLINE SYNTHETIC FIXTURE\n"
+                  "FictionalAlias01 advertises restricted-substance-alpha on evidence.example.invalid.\n"
+                  "This is defensive test data only and contains no purchase or contact instructions.\n"
+              ).encode("utf-8")
+              html = b'''<!doctype html><html><head><title>Fictional evidence</title><script>throw new Error("must never execute")</script></head><body><h1>Offline fictional listing</h1><p>Indicator: restricted-substance-alpha</p><a href="https://evidence.example.invalid/listing/alpha">reserved example locator</a></body></html>'''
+              json_bytes = json.dumps(
+                  {
+                      "messages": [
+                          {
+                              "id": "fictional-1",
+                              "from": "FictionalAlias01",
+                              "date": "2026-01-01T00:00:00Z",
+                              "text": "Offline synthetic indicator: restricted-substance-alpha",
+                          },
+                          {
+                              "id": "fictional-2",
+                              "from": "FictionalAlias02",
+                              "date": "2026-01-01T00:01:00Z",
+                              "text": "Reference only: https://evidence.example.invalid/archive/1",
+                          },
+                      ]
+                  },
+                  sort_keys=True,
+                  separators=(",", ":"),
+              ).encode("utf-8")
+              csv_output = io.StringIO(newline="")
+              writer = csv.writer(csv_output, lineterminator="\n")
+              writer.writerow(["alias", "indicator", "locator", "classification"])
+              writer.writerow([
+                  "FictionalAlias01",
+                  "restricted-substance-alpha",
+                  "https://evidence.example.invalid/listing/alpha",
+                  "fictional synthetic",
+              ])
+              csv_bytes = csv_output.getvalue().encode("utf-8")
+              archive = _zip_bytes(
+                  [
+                      ("chat/export.json", json_bytes),
+                      ("notes/readme.txt", text),
+                  ]
+              )
+              return [
+                  Artifact("01-listing.txt", "text/plain", "text", "synthetic.offline.text", text, "Plain-text fictional listing indicator"),
+                  Artifact("02-listing.html", "text/html", "html", "synthetic.offline.html", html, "HTML with inert active-content test"),
+                  Artifact("03-chat.json", "application/json", "json", "synthetic.offline.json", json_bytes, "Generic fictional chat export"),
+                  Artifact("04-indicators.csv", "text/csv", "csv", "synthetic.offline.csv", csv_bytes, "Bounded tabular indicators"),
+                  Artifact("05-authorized-export.zip", "application/zip", "archive", "synthetic.offline.archive", archive, "Authorized fictional archive export"),
+                  Artifact("06-listing.png", "image/png", "image", "synthetic.offline.image", _png_bytes(), "Generated fictional listing image"),
+                  Artifact("07-report.pdf", "application/pdf", "pdf", "synthetic.offline.pdf", _pdf_bytes(), "Generated text-bearing fictional PDF"),
+                  Artifact("08-capture.warc", "application/warc", "warc", "synthetic.offline.warc", _warc_bytes(), "Generated fictional WARC response"),
+              ]
+
+
+          def generate_synthetic_evidence_corpus(
+              destination: Path,
+              *,
+              overwrite: bool = False,
+          ) -> dict[str, object]:
+              destination = Path(destination)
+              if destination.exists() and any(destination.iterdir()) and not overwrite:
+                  raise CorpusGenerationError("destination is not empty; explicit overwrite is required")
+              destination.mkdir(parents=True, exist_ok=True)
+              artifacts = _artifacts()
+              manifest_entries = []
+              for artifact in artifacts:
+                  path = destination / artifact.relative_path
+                  path.parent.mkdir(parents=True, exist_ok=True)
+                  path.write_bytes(artifact.bytes_value)
+                  manifest_entries.append(
+                      {
+                          "relative_path": artifact.relative_path,
+                          "media_type": artifact.media_type,
+                          "parser_family": artifact.parser_family,
+                          "source_type": artifact.source_type,
+                          "source_class": "SYNTHETIC",
+                          "authority": AUTHORITY,
+                          "description": artifact.description,
+                          "size_bytes": len(artifact.bytes_value),
+                          "sha256": sha256_hex(artifact.bytes_value),
+                      }
+                  )
+              manifest: dict[str, object] = {
+                  "name": "DARKNETRA Offline Synthetic Evidence Corpus",
+                  "corpus_version": CORPUS_VERSION,
+                  "authority": AUTHORITY,
+                  "network_required": False,
+                  "contains_real_illicit_content": False,
+                  "artifacts": manifest_entries,
+              }
+              (destination / "manifest.json").write_text(
+                  json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                  encoding="utf-8",
+              )
+              return manifest
+          PY
+
+          cat > scripts/generate_synthetic_evidence_demo.py <<'PY'
+          from __future__ import annotations
+
+          import argparse
+          import json
+          from pathlib import Path
+
+          from darknetra_api.demo.synthetic_evidence import generate_synthetic_evidence_corpus
+
+
+          def main() -> int:
+              parser = argparse.ArgumentParser(description="Generate the offline DARKNETRA synthetic Evidence Vault corpus.")
+              parser.add_argument("destination", type=Path)
+              parser.add_argument("--overwrite", action="store_true")
+              args = parser.parse_args()
+              manifest = generate_synthetic_evidence_corpus(args.destination, overwrite=args.overwrite)
+              print(json.dumps(manifest, indent=2, sort_keys=True))
+              return 0
+
+
+          if __name__ == "__main__":
+              raise SystemExit(main())
+          PY
+
+          cat > datasets/synthetic/evidence-vault/README.md <<'MD'
+          # Offline synthetic Evidence Vault corpus
+
+          This directory intentionally contains no generated binary corpus in Git. Generate a deterministic, entirely fictional set with:
+
+          ```bash
+          uv run python scripts/generate_synthetic_evidence_demo.py /tmp/darknetra-demo-evidence
+          ```
+
+          The corpus covers TXT, HTML, JSON, CSV, ZIP, PNG, text-bearing PDF and WARC. It uses only reserved `.invalid` locators, fictional aliases and a fictional restricted-substance indicator. It contains no real seller, live darknet address, private-platform content, credentials, purchase instructions or operational collection steps.
+          MD
+
+      - name: Verify GREEN deterministic and full offline flow
+        run: |
+          uv run ruff check .
+          uv run pytest -q \
+            apps/api/tests/unit/test_synthetic_evidence_corpus.py \
+            apps/api/tests/integration/test_synthetic_evidence_demo_flow.py
+          uv run pytest -q
+          rm -rf /tmp/darknetra-demo-a /tmp/darknetra-demo-b
+          uv run python scripts/generate_synthetic_evidence_demo.py /tmp/darknetra-demo-a >/tmp/demo-manifest-a.json
+          uv run python scripts/generate_synthetic_evidence_demo.py /tmp/darknetra-demo-b >/tmp/demo-manifest-b.json
+          diff -u /tmp/demo-manifest-a.json /tmp/demo-manifest-b.json
+          diff -ru /tmp/darknetra-demo-a /tmp/darknetra-demo-b
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml build api worker
+
+      - name: Record Task 12 corpus checkpoint
+        run: |
+          mkdir -p docs/verification
+          cat > docs/verification/plan03-task12-demo-corpus.md <<EOF
+          # Plan 03 Task 12 — deterministic offline evidence corpus TDD checkpoint
+
+          - **Source before implementation:** \`$(git rev-parse HEAD)\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          ## RED
+
+          Determinism, safety and complete supported-family pipeline contracts were written before the corpus generator existed.
+
+          ## GREEN
+
+          | Gate | Outcome |
+          |---|---|
+          | Ruff | success |
+          | Two-run byte-for-byte determinism | success |
+          | Manifest digest verification | success |
+          | No-live-endpoint/no-credential/no-purchase-instruction scan | success |
+          | TXT/HTML/JSON/CSV/ZIP/PNG/PDF/WARC processing flow | success |
+          | PostgreSQL job/derivation/custody assertions | success |
+          | Complete Python suite | success |
+          | CLI generation and recursive diff | success |
+          | Compose validation and API/worker image build | success |
+
+          The corpus is offline-only, fictional and reserved-domain based. It demonstrates every supported Evidence Vault parser and provenance path without contacting a seller, joining a private service, bypassing encryption or embedding real illicit-market content.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/api/darknetra_api/demo apps/api/tests/unit/test_synthetic_evidence_corpus.py apps/api/tests/integration/test_synthetic_evidence_demo_flow.py scripts/generate_synthetic_evidence_demo.py datasets/synthetic/evidence-vault/README.md docs/verification/plan03-task12-demo-corpus.md
+          git rm .github/workflows/plan03-task12-demo-corpus.yml
+          git commit -m 'feat: add deterministic offline evidence demo corpus'
+          git push origin HEAD:testing-codex
