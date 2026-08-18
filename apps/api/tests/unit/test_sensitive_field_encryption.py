@@ -1,6 +1,7 @@
 import base64
 
 import pytest
+from hypothesis import given, strategies as st
 
 from darknetra_api.security.encryption import (
     EncryptedValue,
@@ -39,6 +40,22 @@ def test_utf8_round_trip_and_redacted_repr() -> None:
         encrypted,
         purpose="evidence.source_locator",
         resource_id="evidence-001",
+    ) == plaintext
+
+
+@given(st.text(max_size=2_000))
+def test_arbitrary_unicode_round_trip(plaintext: str) -> None:
+    service = crypto()
+    encrypted = service.encrypt(
+        plaintext,
+        purpose="evidence.notes",
+        resource_id="property-test",
+    )
+
+    assert service.decrypt(
+        encrypted,
+        purpose="evidence.notes",
+        resource_id="property-test",
     ) == plaintext
 
 
