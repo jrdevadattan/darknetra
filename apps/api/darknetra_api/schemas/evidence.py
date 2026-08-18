@@ -4,9 +4,8 @@ import re
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
-
 from darknetra_api.models.evidence import EvidenceSourceClass, EvidenceState
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SHA512 = re.compile(r"^[0-9a-f]{128}$")
