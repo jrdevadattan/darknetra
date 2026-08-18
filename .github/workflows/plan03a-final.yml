@@ -1,0 +1,358 @@
+name: Plan 03a final sensitive-field encryption verification
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03a-final.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-plan03a@127.0.0.1:55432/darknetra_plan03a_test
+      DARKNETRA_E2E_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-plan03a@127.0.0.1:55432/darknetra_plan03a_test
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_FIELD_ACTIVE_KEY_VERSION: v2
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03a_test
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-plan03a
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03a_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - id: keys
+        name: Generate runtime-only versioned keys
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          import base64
+          import json
+          import os
+          import secrets
+          from pathlib import Path
+
+          def make_key():
+              return base64.b64encode(secrets.token_bytes(32)).decode('ascii')
+
+          jwt_key = make_key()
+          v1 = make_key()
+          v2 = make_key()
+          blind = make_key()
+          keyring = json.dumps({'v1': v1, 'v2': v2}, separators=(',', ':'))
+          for value in (jwt_key, v1, v2, blind, keyring):
+              print(f'::add-mask::{value}')
+          with Path(os.environ['GITHUB_ENV']).open('a', encoding='utf-8') as output:
+              output.write(f'DARKNETRA_JWT_SIGNING_KEY_B64={jwt_key}\n')
+              output.write(f'DARKNETRA_FIELD_KEY_V1_B64={v1}\n')
+              output.write(f'DARKNETRA_FIELD_KEYRING_B64_JSON={keyring}\n')
+              output.write(f'DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n')
+          PY
+
+      - id: docs
+        name: Update and validate Plan 03a documentation
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          readme = Path('README.md')
+          text = readme.read_text(encoding='utf-8')
+          old_status = (
+              '**Current implementation status:** Plan 02 — PostgreSQL, authentication, global/case RBAC, '
+              'auditable case lifecycle, live case queries, administration reads, and authenticated frontend '
+              'session UX — is implemented on `testing-codex`. Evidence ingestion and analytic features remain '
+              'later-plan work.'
+          )
+          new_status = (
+              '**Current implementation status:** Plans 01–02 and mandatory Plan 03a are implemented on '
+              '`testing-codex`: the authenticated case foundation now includes versioned AES-256-GCM '
+              'sensitive-field encryption, purpose-scoped blind indexes, explicit redaction, audited reveal, '
+              'and key-rotation primitives. Evidence Vault ingestion begins in Plan 03.'
+          )
+          if old_status not in text and new_status not in text:
+              raise SystemExit('README status paragraph no longer matches the expected contract')
+          text = text.replace(old_status, new_status)
+
+          anchor = '| Transactional audit | ✅ Implemented | Business mutation and append-only audit event commit together |\n'
+          addition = (
+              '| Sensitive-field encryption | ✅ Plan 03a | AES-256-GCM envelopes, resource/purpose AAD and separate HMAC blind indexes |\n'
+              '| Audited sensitive reveal | ✅ Plan 03a | Case permission, bounded reason, no-store endpoint contract and plaintext-free audit metadata |\n'
+              '| Versioned key rotation | ✅ Plan 03a | Old-version decrypt, active-version re-encryption and fail-closed unknown versions |\n'
+          )
+          if addition not in text:
+              if anchor not in text:
+                  raise SystemExit('README capability-table anchor was not found')
+              text = text.replace(anchor, anchor + addition)
+
+          old_boundary = (
+              'Plan 02 does not ingest evidence or produce analytic findings. It establishes the authenticated, '
+              'case-scoped, auditable foundation later plans must reuse.'
+          )
+          new_boundary = (
+              'Plan 03a does not ingest evidence or produce analytic findings. It extends the Plan 02 '
+              'authenticated case foundation with the mandatory encryption and audited-reveal boundary that '
+              'Evidence Vault metadata must reuse.'
+          )
+          text = text.replace(old_boundary, new_boundary)
+
+          backend_anchor = '- PyJWT/HS256\n'
+          backend_addition = '- `cryptography` AES-256-GCM and HMAC-SHA-256 blind indexes\n'
+          if backend_addition not in text:
+              text = text.replace(backend_anchor, backend_anchor + backend_addition)
+
+          env_anchor = '| `DARKNETRA_JWT_SIGNING_KEY_B64` | Auth required | Secret base64 value decoding to exactly 32 random bytes |\n'
+          env_addition = (
+              '| `DARKNETRA_FIELD_KEY_V1_B64` | Protected metadata | Initial 32-byte envelope-encryption key; runtime secret only |\n'
+              '| `DARKNETRA_FIELD_KEYRING_B64_JSON` | Rotation | Optional secret JSON version-to-key map; replaces single-v1 input |\n'
+              '| `DARKNETRA_FIELD_ACTIVE_KEY_VERSION` | Protected metadata | Key version used for new/rotated ciphertext |\n'
+              '| `DARKNETRA_FIELD_BLIND_INDEX_KEY_B64` | Protected metadata | Independent 32-byte HMAC key for purpose-scoped equality indexes |\n'
+          )
+          if env_addition not in text:
+              if env_anchor not in text:
+                  raise SystemExit('README environment-table anchor was not found')
+              text = text.replace(env_anchor, env_anchor + env_addition)
+
+          architecture_link = (
+              '- [Sensitive-field encryption and audited reveal]'
+              '(docs/architecture/sensitive-field-encryption.md)\n'
+          )
+          decision_anchor = '### Architecture decisions\n\n'
+          if architecture_link not in text:
+              text = text.replace(decision_anchor, decision_anchor + architecture_link)
+
+          readme.write_text(text, encoding='utf-8')
+
+          architecture = Path('docs/architecture/sensitive-field-encryption.md')
+          if not architecture.is_file() or architecture.stat().st_size < 5000:
+              raise SystemExit('sensitive-field architecture document is missing or incomplete')
+          PY
+
+      - id: prepare
+        name: Install locked workspace
+        if: steps.keys.outcome == 'success'
+        continue-on-error: true
+        run: uv sync --all-packages --dev --frozen
+
+      - id: migrate
+        name: Migrate disposable PostgreSQL
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: uv run alembic -c apps/api/alembic.ini upgrade head
+
+      - id: runtime_probe
+        name: Exercise v2 runtime-keyring construction
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: |
+          uv run python - <<'PY'
+          from darknetra_api.config import Settings
+          from darknetra_api.security.encryption import crypto_from_settings
+          service = crypto_from_settings(Settings())
+          envelope = service.encrypt('runtime probe', purpose='evidence.notes', resource_id='probe-1')
+          assert envelope.key_version == 'v2'
+          assert service.decrypt(envelope, purpose='evidence.notes', resource_id='probe-1') == 'runtime probe'
+          PY
+
+      - id: ruff
+        name: Complete Ruff verification
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run ruff check . 2>&1 | tee /tmp/plan03a-ruff.log
+
+      - id: pytest
+        name: Complete Python verification
+        if: steps.migrate.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run pytest -q 2>&1 | tee /tmp/plan03a-pytest.log
+
+      - id: auth_case
+        name: Authentication and case regression
+        if: steps.migrate.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run pytest -q \
+            apps/api/tests/integration/test_auth_flow.py \
+            apps/api/tests/integration/test_case_lifecycle.py \
+            apps/api/tests/integration/test_cross_case_authorization.py \
+            apps/api/tests/integration/test_sensitive_value_reveal.py \
+            2>&1 | tee /tmp/plan03a-auth-case.log
+
+      - id: secret_scan
+        name: Scan tracked files for committed field-key material
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python - <<'PY' 2>&1 | tee /tmp/plan03a-secret-scan.log
+          import re
+          import subprocess
+          from pathlib import Path
+
+          suspicious = re.compile(
+              r'DARKNETRA_FIELD_(?:KEY(?:RING)?|BLIND_INDEX_KEY)[A-Z0-9_]*'
+              r'\s*[:=]\s*["\']?[A-Za-z0-9+/]{40,}={0,2}'
+          )
+          findings = []
+          for name in subprocess.check_output(['git', 'ls-files'], text=True).splitlines():
+              path = Path(name)
+              try:
+                  text = path.read_text(encoding='utf-8')
+              except (UnicodeDecodeError, OSError):
+                  continue
+              for match in suspicious.finditer(text):
+                  findings.append(f'{name}:{text.count(chr(10), 0, match.start()) + 1}')
+          if findings:
+              raise SystemExit('possible committed field key material: ' + ', '.join(findings))
+          env_example = Path('.env.example').read_text(encoding='utf-8')
+          required_blank = (
+              'DARKNETRA_FIELD_KEY_V1_B64=\n',
+              'DARKNETRA_FIELD_KEYRING_B64_JSON=\n',
+              'DARKNETRA_FIELD_BLIND_INDEX_KEY_B64=\n',
+          )
+          if not all(line in env_example for line in required_blank):
+              raise SystemExit('.env.example must keep every sensitive-field key value blank')
+          print('No committed sensitive-field key literal detected.')
+          PY
+
+      - id: compose
+        name: Validate Compose secret wiring
+        continue-on-error: true
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+
+      - id: smoke
+        name: Docker API/web smoke
+        if: steps.compose.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          bash scripts/smoke.sh 2>&1 | tee /tmp/plan03a-smoke.log
+
+      - name: Record observed Plan 03a verification
+        if: always()
+        env:
+          KEYS: ${{ steps.keys.outcome }}
+          DOCS: ${{ steps.docs.outcome }}
+          PREPARE: ${{ steps.prepare.outcome }}
+          MIGRATE: ${{ steps.migrate.outcome }}
+          RUNTIME_PROBE: ${{ steps.runtime_probe.outcome }}
+          RUFF: ${{ steps.ruff.outcome }}
+          PYTEST: ${{ steps.pytest.outcome }}
+          AUTH_CASE: ${{ steps.auth_case.outcome }}
+          SECRET_SCAN: ${{ steps.secret_scan.outcome }}
+          COMPOSE: ${{ steps.compose.outcome }}
+          SMOKE: ${{ steps.smoke.outcome }}
+        run: |
+          mkdir -p docs/verification
+          VERIFIED_COMMIT="$(git rev-parse HEAD)"
+          VERIFIED_UTC="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          {
+            echo '# Plan 03a — sensitive-field encryption verification'
+            echo
+            echo '- **Verified commit:** `'$VERIFIED_COMMIT'`'
+            echo '- **Observed at (UTC):** `'$VERIFIED_UTC'`'
+            echo '- **Runner:** GitHub Actions `ubuntu-latest`'
+            echo
+            echo '| Gate | Outcome |'
+            echo '|---|---|'
+            echo "| Runtime-only v1/v2/JWT/blind keys | ${KEYS} |"
+            echo "| README + architecture preflight | ${DOCS} |"
+            echo "| Locked workspace installation | ${PREPARE} |"
+            echo "| Disposable PostgreSQL migration | ${MIGRATE} |"
+            echo "| Active-v2 runtime probe | ${RUNTIME_PROBE} |"
+            echo "| \`uv run ruff check .\` | ${RUFF} |"
+            echo "| \`uv run pytest -q\` | ${PYTEST} |"
+            echo "| Authentication/case regression | ${AUTH_CASE} |"
+            echo "| Tracked-secret scan | ${SECRET_SCAN} |"
+            echo "| Docker Compose configuration | ${COMPOSE} |"
+            echo "| Docker API/web smoke | ${SMOKE} |"
+            echo
+            echo '## Python suite'
+            echo '```text'
+            tail -n 45 /tmp/plan03a-pytest.log 2>/dev/null || true
+            echo '```'
+            echo
+            echo '## Authentication and case regression'
+            echo '```text'
+            tail -n 45 /tmp/plan03a-auth-case.log 2>/dev/null || true
+            echo '```'
+            echo
+            echo '## Secret scan'
+            echo '```text'
+            cat /tmp/plan03a-secret-scan.log 2>/dev/null || true
+            echo '```'
+            echo
+            echo '## Docker smoke'
+            echo '```text'
+            tail -n 35 /tmp/plan03a-smoke.log 2>/dev/null || true
+            echo '```'
+            echo
+            echo '## Plan 03 handoff'
+            echo
+            echo 'Evidence Vault must use the versioned envelope, purpose-scoped blind index, explicit redaction and audited reveal boundaries for source locators, authority references and sensitive notes. It must not add auto-decrypting ORM properties or persist runtime keys.'
+          } > docs/verification/plan-03a-sensitive-field-encryption.md
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add README.md docs/architecture/sensitive-field-encryption.md docs/verification/plan-03a-sensitive-field-encryption.md
+          if ! git diff --cached --quiet; then
+            git commit -m 'docs: verify sensitive field encryption [skip ci]'
+            git push origin HEAD:testing-codex
+          fi
+
+      - name: Enforce complete Plan 03a gate
+        if: always()
+        env:
+          KEYS: ${{ steps.keys.outcome }}
+          DOCS: ${{ steps.docs.outcome }}
+          PREPARE: ${{ steps.prepare.outcome }}
+          MIGRATE: ${{ steps.migrate.outcome }}
+          RUNTIME_PROBE: ${{ steps.runtime_probe.outcome }}
+          RUFF: ${{ steps.ruff.outcome }}
+          PYTEST: ${{ steps.pytest.outcome }}
+          AUTH_CASE: ${{ steps.auth_case.outcome }}
+          SECRET_SCAN: ${{ steps.secret_scan.outcome }}
+          COMPOSE: ${{ steps.compose.outcome }}
+          SMOKE: ${{ steps.smoke.outcome }}
+        run: |
+          test "$KEYS" = success
+          test "$DOCS" = success
+          test "$PREPARE" = success
+          test "$MIGRATE" = success
+          test "$RUNTIME_PROBE" = success
+          test "$RUFF" = success
+          test "$PYTEST" = success
+          test "$AUTH_CASE" = success
+          test "$SECRET_SCAN" = success
+          test "$COMPOSE" = success
+          test "$SMOKE" = success
