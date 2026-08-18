@@ -12,11 +12,8 @@ from darknetra_api.authz.permissions import Permission
 from darknetra_api.authz.policy import CaseNotFound, authorize_case
 from darknetra_api.config import get_settings
 from darknetra_api.models.user import User
-from darknetra_api.security.encryption import (
-    EncryptedValue,
-    SensitiveFieldCrypto,
-    crypto_from_settings,
-)
+from darknetra_api.security.encryption import EncryptedValue, SensitiveFieldCrypto
+from darknetra_api.security.keyring import SensitiveFieldKeyring
 from darknetra_api.services.audit import append_audit_event
 
 
@@ -157,7 +154,9 @@ async def reveal_sensitive_value(
     if encrypted is None:
         raise CaseNotFound("resource not found")
 
-    cryptographic_boundary = crypto or crypto_from_settings(get_settings())
+    cryptographic_boundary = crypto or SensitiveFieldKeyring.from_settings(
+        get_settings()
+    ).crypto()
     plaintext = cryptographic_boundary.decrypt(
         encrypted,
         purpose=purpose,
