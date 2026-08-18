@@ -1,6 +1,6 @@
 name: Plan 02 Task 13 real auth E2E
 
-# Fixture GREEN rerun after import, async-subprocess, and exception-scope Ruff fixes.
+# Browser RED gate: the real stack is migrated but intentionally unseeded.
 on:
   push:
     branches: [testing-codex]
@@ -11,118 +11,158 @@ permissions:
   contents: write
 
 jobs:
-  verify-fixture:
+  verify-browser-red:
     runs-on: ubuntu-latest
     env:
-      DARKNETRA_E2E_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-e2e@127.0.0.1:5432/darknetra_e2e_test
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_DB: darknetra_e2e_test
-          POSTGRES_USER: darknetra
-          POSTGRES_PASSWORD: darknetra-e2e
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U darknetra -d darknetra_e2e_test"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
+      NEXT_TELEMETRY_DISABLED: '1'
+      DARKNETRA_E2E_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-e2e@127.0.0.1:55432/darknetra_e2e_test
+      DARKNETRA_E2E_ANALYST_A_PASSWORD: Synthetic-A-Password-42!
+      DARKNETRA_E2E_ANALYST_B_PASSWORD: Synthetic-B-Password-42!
+      DARKNETRA_E2E_BOOTSTRAP_PASSWORD: Synthetic-Bootstrap-42!
+      DARKNETRA_E2E_BOOTSTRAP_NEW_PASSWORD: Synthetic-Bootstrap-Replaced-42!
     steps:
       - uses: actions/checkout@v4
         with:
           ref: testing-codex
           fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - uses: astral-sh/setup-uv@v10.0.1
         with:
           version: '0.12.4'
+
       - id: prepare
-        name: Prepare Python workspace
+        name: Prepare workspaces
         continue-on-error: true
-        run: uv sync --all-packages --dev --frozen
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.15.0 --activate
+          pnpm install --frozen-lockfile
+          uv sync --all-packages --dev --frozen
+
+      - id: compose_config
+        name: Validate isolated Compose profile
+        continue-on-error: true
+        run: |
+          docker compose -p darknetra-plan02-task13-red \
+            -f docker-compose.yml -f docker-compose.e2e.yml config >/dev/null
+
+      - id: database
+        name: Start disposable PostgreSQL volume
+        if: steps.compose_config.outcome == 'success'
+        continue-on-error: true
+        run: |
+          docker compose -p darknetra-plan02-task13-red \
+            -f docker-compose.yml -f docker-compose.e2e.yml up -d postgres
+          for attempt in $(seq 1 30); do
+            if docker compose -p darknetra-plan02-task13-red \
+              -f docker-compose.yml -f docker-compose.e2e.yml \
+              exec -T postgres pg_isready -U darknetra -d darknetra_e2e_test; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
       - id: migrate
-        name: Migrate disposable E2E database
-        if: steps.prepare.outcome == 'success'
+        name: Migrate empty disposable database
+        if: steps.prepare.outcome == 'success' && steps.database.outcome == 'success'
         continue-on-error: true
         env:
           DARKNETRA_DATABASE_URL: ${{ env.DARKNETRA_E2E_DATABASE_URL }}
         run: uv run alembic -c apps/api/alembic.ini upgrade head
-      - id: ruff
-        name: Ruff fixture code
-        if: steps.prepare.outcome == 'success'
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -o pipefail
-          uv run ruff check scripts/create_e2e_fixture.py apps/api/tests/unit/test_e2e_fixture_cli.py apps/api/tests/integration/test_e2e_fixture_creation.py 2>&1 | tee /tmp/task13-ruff.log
-      - id: safety_tests
-        name: Fixture safety tests
-        if: steps.prepare.outcome == 'success'
-        continue-on-error: true
-        run: uv run pytest apps/api/tests/unit/test_e2e_fixture_cli.py -v
-      - id: fixture_test
-        name: Deterministic fixture integration test
+
+      - id: stack
+        name: Build and start real API and web containers
         if: steps.migrate.outcome == 'success'
         continue-on-error: true
+        run: |
+          docker compose -p darknetra-plan02-task13-red \
+            -f docker-compose.yml -f docker-compose.e2e.yml up -d --build api web
+          curl --fail --retry 40 --retry-all-errors --retry-delay 2 \
+            http://127.0.0.1:8000/api/v1/health/live
+          curl --fail --retry 40 --retry-all-errors --retry-delay 2 \
+            http://127.0.0.1:3000/auth/v2/login >/dev/null
+
+      - id: playwright
+        name: Install Chromium
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: pnpm --filter @darknetra/web exec playwright install --with-deps chromium
+
+      - id: browser_tests
+        name: Task 13 RED real browser tests
+        if: steps.stack.outcome == 'success' && steps.playwright.outcome == 'success'
+        continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
-          uv run pytest apps/api/tests/integration/test_e2e_fixture_creation.py -v 2>&1 | tee /tmp/task13-fixture.log
-      - name: Record Task 13 fixture outcome
+          pnpm --filter @darknetra/web test:e2e:real 2>&1 | tee /tmp/task13-browser.log
+
+      - name: Tear down isolated stack and volume
+        if: always()
+        run: |
+          docker compose -p darknetra-plan02-task13-red \
+            -f docker-compose.yml -f docker-compose.e2e.yml down -v --remove-orphans || true
+
+      - name: Record Task 13 browser RED outcome
         if: always()
         env:
           PREPARE: ${{ steps.prepare.outcome }}
+          COMPOSE_CONFIG: ${{ steps.compose_config.outcome }}
+          DATABASE: ${{ steps.database.outcome }}
           MIGRATE: ${{ steps.migrate.outcome }}
-          RUFF: ${{ steps.ruff.outcome }}
-          SAFETY_TESTS: ${{ steps.safety_tests.outcome }}
-          FIXTURE_TEST: ${{ steps.fixture_test.outcome }}
+          STACK: ${{ steps.stack.outcome }}
+          PLAYWRIGHT: ${{ steps.playwright.outcome }}
+          BROWSER_TESTS: ${{ steps.browser_tests.outcome }}
         run: |
           mkdir -p docs/verification
           {
             echo '# Plan 02 Task 13 verification'
             echo
-            echo 'Deterministic fixture phase outcomes:'
+            echo 'Real browser RED phase outcomes:'
             echo
             echo "- prepare: ${PREPARE}"
-            echo "- disposable DB migration: ${MIGRATE}"
-            echo "- Ruff fixture code: ${RUFF}"
-            echo "- fixture safety tests: ${SAFETY_TESTS}"
-            echo "- fixture integration test: ${FIXTURE_TEST}"
+            echo "- Compose profile: ${COMPOSE_CONFIG}"
+            echo "- disposable PostgreSQL: ${DATABASE}"
+            echo "- migration: ${MIGRATE}"
+            echo "- real API/web stack: ${STACK}"
+            echo "- Chromium install: ${PLAYWRIGHT}"
+            echo "- real auth/authorization browser tests: ${BROWSER_TESTS}"
             echo
-            echo '## Ruff output'
-            echo
-            echo '```text'
-            tail -n 120 /tmp/task13-ruff.log 2>/dev/null || true
-            echo '```'
-            echo
-            echo '## Fixture integration output'
+            echo '## Browser test tail'
             echo
             echo '```text'
-            tail -n 120 /tmp/task13-fixture.log 2>/dev/null || true
+            tail -n 180 /tmp/task13-browser.log 2>/dev/null || true
             echo '```'
           } > docs/verification/plan02-task13-real-e2e.md
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add docs/verification/plan02-task13-real-e2e.md
           if ! git diff --cached --quiet; then
-            git commit -m 'docs: record Plan 02 Task 13 fixture outcome [skip ci]'
+            git commit -m 'docs: record Plan 02 Task 13 browser RED outcome [skip ci]'
             git push origin HEAD:testing-codex
           fi
-      - name: Enforce deterministic fixture gate
+
+      - name: Require browser RED before fixture wiring
         if: always()
         env:
           PREPARE: ${{ steps.prepare.outcome }}
+          COMPOSE_CONFIG: ${{ steps.compose_config.outcome }}
+          DATABASE: ${{ steps.database.outcome }}
           MIGRATE: ${{ steps.migrate.outcome }}
-          RUFF: ${{ steps.ruff.outcome }}
-          SAFETY_TESTS: ${{ steps.safety_tests.outcome }}
-          FIXTURE_TEST: ${{ steps.fixture_test.outcome }}
+          STACK: ${{ steps.stack.outcome }}
+          PLAYWRIGHT: ${{ steps.playwright.outcome }}
+          BROWSER_TESTS: ${{ steps.browser_tests.outcome }}
         run: |
           test "$PREPARE" = success
+          test "$COMPOSE_CONFIG" = success
+          test "$DATABASE" = success
           test "$MIGRATE" = success
-          test "$RUFF" = success
-          test "$SAFETY_TESTS" = success
-          test "$FIXTURE_TEST" = success
+          test "$STACK" = success
+          test "$PLAYWRIGHT" = success
+          test "$BROWSER_TESTS" = failure
