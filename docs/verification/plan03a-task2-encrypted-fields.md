@@ -4,11 +4,10 @@
 - locked installation: success
 - disposable DB migration: success
 - focused helper tests: success
-- Ruff: failure
+- Ruff: success
 - complete Python regression: success
 
 ## Focused test tail
-
 ```text
 ============================= test session starts ==============================
 platform linux -- Python 3.12.13, pytest-8.4.2, pluggy-1.6.0 -- /home/runner/work/darknetra/darknetra/.venv/bin/python
@@ -33,48 +32,15 @@ apps/api/tests/unit/test_encrypted_fields.py::test_redaction_is_kind_specific[ge
 apps/api/tests/unit/test_encrypted_fields.py::test_empty_sensitive_value_redacts_to_empty_string PASSED [ 91%]
 apps/api/tests/unit/test_encrypted_fields.py::test_ordinary_pydantic_serialization_omits_envelope_internals PASSED [100%]
 
-============================== 12 passed in 0.85s ==============================
+============================== 12 passed in 0.78s ==============================
 ```
 
 ## Ruff output
-
 ```text
-I001 [*] Import block is un-sorted or un-formatted
-  --> apps/api/tests/unit/test_encrypted_fields.py:1:1
-   |
- 1 | / import base64
- 2 | | from dataclasses import dataclass
- 3 | |
- 4 | | import pytest
- 5 | | from pydantic import BaseModel, ConfigDict
- 6 | |
- 7 | | from darknetra_api.security.encrypted_fields import (
- 8 | |     RedactionKind,
- 9 | |     SensitiveEnvelopeError,
-10 | |     pack_envelope,
-11 | |     redact_sensitive_value,
-12 | |     unpack_envelope,
-13 | | )
-14 | | from darknetra_api.security.encryption import EncryptedValue
-   | |____________________________________________________________^
-help: Organize imports
-   |
-4  | import pytest
-   - from pydantic import BaseModel, ConfigDict
-   -
-5  | from darknetra_api.security.encrypted_fields import (
---------------------------------------------------------------------------------
-12 | from darknetra_api.security.encryption import EncryptedValue
-13 + from pydantic import BaseModel, ConfigDict
-14 |
-   |
-
-Found 1 error.
-[*] 1 fixable with the `--fix` option.
+All checks passed!
 ```
 
 ## Regression tail
-
 ```text
 ........................................................................ [ 93%]
 .....                                                                    [100%]
@@ -84,5 +50,5 @@ Found 1 error.
     from starlette.testclient import TestClient as TestClient  # noqa
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-77 passed, 1 warning in 8.80s
+77 passed, 1 warning in 8.40s
 ```
