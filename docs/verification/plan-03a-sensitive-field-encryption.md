@@ -1,7 +1,7 @@
 # Plan 03a — sensitive-field encryption verification
 
-- **Verified commit:** `00efa2e39dd0d5e6e1e8ed3fe13cda334d8e000c`
-- **Observed at (UTC):** `2026-08-18T09:06:08Z`
+- **Verified commit:** `481af753ec43d22be075886abd8037907669f92c`
+- **Observed at (UTC):** `2026-08-18T09:16:24Z`
 - **Runner:** GitHub Actions `ubuntu-latest`
 
 | Gate | Outcome |
@@ -12,7 +12,7 @@
 | Disposable PostgreSQL migration | success |
 | Active-v2 runtime probe | failure |
 | `uv run ruff check .` | success |
-| `uv run pytest -q` | failure |
+| `uv run pytest -q` | success |
 | Authentication/case regression | success |
 | Tracked-secret scan | success |
 | Docker Compose configuration | success |
@@ -21,50 +21,20 @@
 ## Python suite
 ```text
 ........................................................................ [ 80%]
-...........F.....                                                        [100%]
-=================================== FAILURES ===================================
-___ test_default_crypto_boundary_uses_active_versioned_keyring_from_settings ___
-
-    def test_default_crypto_boundary_uses_active_versioned_keyring_from_settings() -> None:
-        settings = Settings(
-            field_keyring_b64_json=json.dumps(
-                {
-                    "v1": base64.b64encode(key(0x11)).decode("ascii"),
-                    "v2": base64.b64encode(key(0x22)).decode("ascii"),
-                }
-            ),
-            field_active_key_version="v2",
-            field_blind_index_key_b64=base64.b64encode(key(0x33)).decode("ascii"),
-        )
-    
-        boundary = crypto_from_settings(settings)
-        encrypted = boundary.encrypt(
-            "versioned setting",
-            purpose="evidence.source_locator",
-            resource_id="evidence-settings",
-        )
-    
-        assert encrypted.key_version == "v2"
->       assert boundary.key_versions == frozenset({"v1", "v2"})
-               ^^^^^^^^^^^^^^^^^^^^^
-E       AttributeError: 'SensitiveFieldCrypto' object has no attribute 'key_versions'
-
-apps/api/tests/unit/test_sensitive_field_keyring.py:150: AttributeError
+.................                                                        [100%]
 =============================== warnings summary ===============================
 .venv/lib/python3.12/site-packages/fastapi/testclient.py:1
   /home/runner/work/darknetra/darknetra/.venv/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
     from starlette.testclient import TestClient as TestClient  # noqa
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-=========================== short test summary info ============================
-FAILED apps/api/tests/unit/test_sensitive_field_keyring.py::test_default_crypto_boundary_uses_active_versioned_keyring_from_settings - AttributeError: 'SensitiveFieldCrypto' object has no attribute 'key_versions'
-1 failed, 88 passed, 1 warning in 9.70s
+89 passed, 1 warning in 9.25s
 ```
 
 ## Authentication and case regression
 ```text
 ................                                                         [100%]
-16 passed in 2.91s
+16 passed in 3.02s
 ```
 
 ## Secret scan
@@ -99,11 +69,11 @@ No committed sensitive-field key literal detected.
  Container darknetra-api-1  Healthy
  Container darknetra-web-1  Starting
  Container darknetra-web-1  Started
+ Container darknetra-api-1  Waiting
  Container darknetra-web-1  Waiting
  Container darknetra-postgres-1  Waiting
- Container darknetra-api-1  Waiting
- Container darknetra-postgres-1  Healthy
  Container darknetra-api-1  Healthy
+ Container darknetra-postgres-1  Healthy
  Container darknetra-web-1  Healthy
 NAME                   IMAGE           COMMAND                  SERVICE    CREATED          STATUS                    PORTS
 darknetra-api-1        darknetra-api   "uv run --no-sync uv…"   api        12 seconds ago   Up 6 seconds (healthy)    127.0.0.1:8000->8000/tcp
