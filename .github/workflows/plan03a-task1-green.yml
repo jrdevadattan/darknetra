@@ -1,6 +1,6 @@
 name: Plan 03a Task 1 encryption GREEN gate
 
-# Rerun after lint fixes with a disposable PostgreSQL service for the complete regression suite.
+# Final rerun after lint fixes with a disposable PostgreSQL service for the complete regression suite.
 on:
   push:
     branches: [testing-codex]
