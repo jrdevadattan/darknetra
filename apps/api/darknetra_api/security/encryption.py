@@ -5,8 +5,9 @@ import binascii
 import hashlib
 import hmac
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -124,7 +125,7 @@ class SensitiveFieldCrypto:
         _validate_context_component(purpose, name="purpose", allow_colon=False)
         _validate_context_component(resource_id, name="resource_id", allow_colon=True)
         _validate_context_component(key_version, name="key_version", allow_colon=False)
-        return f"darknetra:{purpose}:{resource_id}:{key_version}".encode("utf-8")
+        return f"darknetra:{purpose}:{resource_id}:{key_version}".encode()
 
     def encrypt(self, plaintext: str, *, purpose: str, resource_id: str) -> EncryptedValue:
         if not isinstance(plaintext, str):
@@ -134,7 +135,7 @@ class SensitiveFieldCrypto:
         aad = self._aad(purpose=purpose, resource_id=resource_id, key_version=version)
         ciphertext = AESGCM(self._field_keys[version]).encrypt(
             nonce,
-            plaintext.encode("utf-8"),
+            plaintext.encode(),
             aad,
         )
         return EncryptedValue(
@@ -163,7 +164,7 @@ class SensitiveFieldCrypto:
         )
         try:
             plaintext = AESGCM(key).decrypt(nonce, ciphertext, aad)
-            return plaintext.decode("utf-8")
+            return plaintext.decode()
         except (InvalidTag, UnicodeDecodeError) as exc:
             raise SensitiveFieldDecryptionError(
                 "encrypted value failed authentication for the requested context"
@@ -173,7 +174,7 @@ class SensitiveFieldCrypto:
         if not isinstance(plaintext, str):
             raise TypeError("plaintext must be a string")
         _validate_context_component(purpose, name="purpose", allow_colon=False)
-        message = purpose.encode("utf-8") + b"\x00" + plaintext.encode("utf-8")
+        message = purpose.encode() + b"\x00" + plaintext.encode()
         return hmac.new(self._blind_index_key, message, hashlib.sha256).hexdigest()
 
 
