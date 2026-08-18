@@ -1,6 +1,6 @@
 name: Plan 03 Task 1 durable job boundary
 
-# Repair the two-byte staging insertion by matching the reviewed payload hash, then run all gates.
+# Apply the reviewed payload plus the two evidence-driven corrections, then execute all release gates.
 on:
   push:
     branches: [testing-codex]
@@ -101,5 +101,60 @@ jobs:
           Path('/tmp/plan03-task1-run.b64').write_text(candidate, encoding='ascii')
           PY
           base64 --decode /tmp/plan03-task1-run.b64 | gzip --decompress > /tmp/plan03-task1-run.sh
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('/tmp/plan03-task1-run.sh')
+          text = path.read_text(encoding='utf-8')
+
+          start = text.index('record_failure() {')
+          end = text.index("\n}\ntrap 'record_failure", start) + 2
+          safe_handler = '''record_failure() {
+            local exit_code="$1"
+            trap - EXIT
+            cleanup_worker
+            if [[ "$SUCCESS" -eq 0 ]]; then
+              git reset --hard "$ORIGINAL_SHA" >/dev/null
+              mkdir -p docs/verification
+              {
+                echo '# Plan 03 Task 1 diagnostic'
+                echo
+                printf -- '- **Failed stage:** `%s`\\n' "$STAGE"
+                printf -- '- **Source commit:** `%s`\\n' "$ORIGINAL_SHA"
+                printf -- '- **Exit code:** `%s`\\n' "$exit_code"
+                printf -- '- **Observed at (UTC):** `%s`\\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+                echo
+                echo 'The implementation patch remains staged under `.automation` for a subsequent, evidence-driven retry. No unverified production code was committed.'
+              } > docs/verification/plan03-task1-diagnostic.md
+              git config user.name 'github-actions[bot]'
+              git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+              git add docs/verification/plan03-task1-diagnostic.md
+              git commit -m 'docs: record Plan 03 Task 1 diagnostic [skip ci]' >/dev/null
+              git push origin HEAD:testing-codex
+            fi
+            exit "$exit_code"
+          }'''
+          text = text[:start] + safe_handler + text[end:]
+
+          old_apply = '''git apply /tmp/plan03-task1.patch
+git diff --check'''
+          fixed_apply = '''git apply /tmp/plan03-task1.patch
+          python - <<'PY_MIGRATION_FIX'
+          from pathlib import Path
+
+          migration = Path('apps/api/alembic/versions/3f21c6d4a901_create_durable_jobs.py')
+          content = migration.read_text(encoding='utf-8')
+          duplicate = '    job_state.create(op.get_bind(), checkfirst=True)\\n'
+          if content.count(duplicate) != 1:
+              raise SystemExit('expected duplicate job_state creation line was not found exactly once')
+          migration.write_text(content.replace(duplicate, ''), encoding='utf-8')
+          PY_MIGRATION_FIX
+          git diff --check'''
+          if old_apply not in text:
+              raise SystemExit('runner patch-application boundary was not found')
+          text = text.replace(old_apply, fixed_apply, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+          bash -n /tmp/plan03-task1-run.sh
           chmod 700 /tmp/plan03-task1-run.sh
           /tmp/plan03-task1-run.sh
