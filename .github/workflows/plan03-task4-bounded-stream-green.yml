@@ -1,0 +1,276 @@
+name: Plan 03 Task 4 bounded upload stream GREEN gate
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task4-bounded-stream-green.yml
+
+permissions:
+  contents: write
+
+jobs:
+  green:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-bounded-green@127.0.0.1:5432/darknetra_bounded_green
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_bounded_green
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-bounded-green
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_bounded_green"
+          --health-interval 5s --health-timeout 3s --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode('ascii')
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f'::add-mask::{value}')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              output.write(f'DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n')
+              output.write(f'DARKNETRA_FIELD_KEY_V1_B64={field}\n')
+              output.write('DARKNETRA_FIELD_KEYRING_B64_JSON=' + json.dumps({'v1': field}, separators=(',', ':')) + '\n')
+              output.write('DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n')
+              output.write(f'DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n')
+          PY
+      - name: Require RED contract and preservation service
+        run: |
+          test -f docs/verification/plan03-task4-bounded-stream-red.md
+          test -f apps/api/tests/unit/test_bounded_evidence_stream.py
+          test -f apps/api/darknetra_api/services/evidence_ingest.py
+      - name: Install and migrate
+        run: |
+          uv sync --all-packages --dev --frozen
+          uv run alembic -c apps/api/alembic.ini upgrade head
+      - name: Add service-integration test before production change
+        run: |
+          cat >> apps/api/tests/integration/test_evidence_ingest_service.py <<'PYTEST'
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_preservation_enforces_declared_and_configured_stream_limits(tmp_path: Path) -> None:
+              from darknetra_api.policy.ingestion import EvidenceUploadPolicy
+
+              owner, case = await _seed_case()
+              store = LocalObjectStore(tmp_path)
+
+              with pytest.raises(Exception):
+                  request = EvidenceIngestRequest(
+                      **_request().model_dump(),
+                      declared_size_bytes=5,
+                  )
+                  async with async_session_factory() as session:
+                      await preserve_uploaded_evidence(
+                          actor=owner,
+                          case_id=case.id,
+                          request=request,
+                          stream=io.BytesIO(b'123456'),
+                          object_store=store,
+                          crypto=_crypto(),
+                          session=session,
+                          request_id='task4-understated-length',
+                          upload_policy=EvidenceUploadPolicy(max_upload_bytes=8),
+                      )
+
+              async with async_session_factory() as session:
+                  assert (await session.scalar(sa.select(sa.func.count()).select_from(EvidenceArtifact))) == 0
+                  assert (await session.scalar(sa.select(sa.func.count()).select_from(Job))) == 0
+          PYTEST
+          set +e
+          uv run pytest -q apps/api/tests/integration/test_evidence_ingest_service.py::test_preservation_enforces_declared_and_configured_stream_limits > /tmp/integration-red.txt 2>&1
+          code=$?
+          set -e
+          cat /tmp/integration-red.txt
+          test "$code" -ne 0
+      - name: Implement bounded stream and integrate it
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          policy_path = Path('apps/api/darknetra_api/policy/ingestion.py')
+          text = policy_path.read_text(encoding='utf-8')
+          marker = '@dataclass(frozen=True, slots=True)\nclass EvidenceUploadPolicy:'
+          bounded = '''class BoundedEvidenceStream:
+              """Binary stream wrapper that fails closed on declared or configured overflow."""
+
+              def __init__(
+                  self,
+                  stream: BinaryIO,
+                  *,
+                  max_bytes: int,
+                  declared_size_bytes: int | None = None,
+              ) -> None:
+                  if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
+                      raise ValueError("max_bytes must be a positive integer")
+                  if declared_size_bytes is not None:
+                      if (
+                          isinstance(declared_size_bytes, bool)
+                          or not isinstance(declared_size_bytes, int)
+                          or declared_size_bytes <= 0
+                      ):
+                          raise IngestionPolicyError("declared size must be a positive integer")
+                      if declared_size_bytes > max_bytes:
+                          raise IngestionPolicyError("evidence exceeds the configured maximum")
+                  self._stream = stream
+                  self._max_bytes = max_bytes
+                  self._declared_size_bytes = declared_size_bytes
+                  self._limit = declared_size_bytes if declared_size_bytes is not None else max_bytes
+                  self._bytes_read = 0
+                  self._eof = False
+
+              @property
+              def bytes_read(self) -> int:
+                  return self._bytes_read
+
+              def read(self, size: int = -1) -> bytes:
+                  if self._eof:
+                      return b""
+                  if isinstance(size, bool) or not isinstance(size, int):
+                      raise TypeError("size must be an integer")
+                  remaining = self._limit - self._bytes_read
+                  requested = remaining + 1 if size < 0 else min(size, remaining + 1)
+                  if requested <= 0:
+                      requested = 1
+                  chunk = self._stream.read(requested)
+                  if not isinstance(chunk, bytes):
+                      raise TypeError("evidence stream must yield bytes")
+                  if not chunk:
+                      self._eof = True
+                      return b""
+                  if len(chunk) > remaining:
+                      if self._declared_size_bytes is not None:
+                          raise IngestionPolicyError("evidence exceeds the declared size")
+                      raise IngestionPolicyError("evidence exceeds the configured maximum")
+                  self._bytes_read += len(chunk)
+                  return chunk
+
+              def validate_complete(self) -> None:
+                  if self._bytes_read == 0:
+                      raise IngestionPolicyError("empty evidence is not accepted")
+                  if (
+                      self._declared_size_bytes is not None
+                      and self._bytes_read != self._declared_size_bytes
+                  ):
+                      raise IngestionPolicyError("evidence does not match the declared size")
+
+
+          @dataclass(frozen=True, slots=True)
+          class EvidenceUploadPolicy:'''
+          if 'class BoundedEvidenceStream:' not in text:
+              if marker not in text:
+                  raise SystemExit('EvidenceUploadPolicy marker missing')
+              text = text.replace(marker, bounded, 1)
+
+          method_marker = '    def iter_bounded(\n'
+          method = '''    def wrap_stream(
+                  self,
+                  stream: BinaryIO,
+                  *,
+                  declared_size_bytes: int | None = None,
+              ) -> BoundedEvidenceStream:
+                  self.validate_declared_size(declared_size_bytes)
+                  return BoundedEvidenceStream(
+                      stream,
+                      max_bytes=self.max_upload_bytes,
+                      declared_size_bytes=declared_size_bytes,
+                  )
+
+          '''
+          if '    def wrap_stream(' not in text:
+              if method_marker not in text:
+                  raise SystemExit('iter_bounded marker missing')
+              text = text.replace(method_marker, method + method_marker, 1)
+          policy_path.write_text(text, encoding='utf-8')
+
+          service_path = Path('apps/api/darknetra_api/services/evidence_ingest.py')
+          service = service_path.read_text(encoding='utf-8')
+          service = service.replace(
+              '    EvidenceSourceMetadata,\n    IngestionPolicyError,\n',
+              '    EvidenceSourceMetadata,\n    EvidenceUploadPolicy,\n    IngestionPolicyError,\n',
+              1,
+          )
+          request_marker = '    expected_sha256: str | None = None\n'
+          if '    declared_size_bytes: int | None' not in service:
+              service = service.replace(
+                  request_marker,
+                  request_marker + '    declared_size_bytes: int | None = Field(default=None, ge=0)\n',
+                  1,
+              )
+          signature_marker = '    publish_job: JobPublisher | None = None,\n) -> EvidenceIngestResult:'
+          if '    upload_policy: EvidenceUploadPolicy | None = None,' not in service:
+              service = service.replace(
+                  signature_marker,
+                  '    publish_job: JobPublisher | None = None,\n    upload_policy: EvidenceUploadPolicy | None = None,\n) -> EvidenceIngestResult:',
+                  1,
+              )
+          put_marker = '    stored = object_store.put_verified(stream, request.expected_sha256)\n'
+          replacement = '''    policy = upload_policy or EvidenceUploadPolicy()
+              bounded_stream = policy.wrap_stream(
+                  stream,
+                  declared_size_bytes=request.declared_size_bytes,
+              )
+              stored = object_store.put_verified(bounded_stream, request.expected_sha256)
+              bounded_stream.validate_complete()
+          '''
+          if 'bounded_stream = policy.wrap_stream' not in service:
+              if put_marker not in service:
+                  raise SystemExit('object-store write marker missing')
+              service = service.replace(put_marker, replacement, 1)
+          service_path.write_text(service, encoding='utf-8')
+          PY
+      - name: Run focused GREEN tests
+        run: |
+          uv run pytest -q apps/api/tests/unit/test_bounded_evidence_stream.py
+          uv run pytest -q apps/api/tests/integration/test_evidence_ingest_service.py
+      - name: Run Ruff and complete suite
+        run: |
+          uv run ruff check .
+          uv run pytest -q
+      - name: Commit verified implementation
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/api/darknetra_api/policy/ingestion.py apps/api/darknetra_api/services/evidence_ingest.py apps/api/tests/integration/test_evidence_ingest_service.py
+          git commit -m 'feat: enforce bounded evidence upload streams'
+          sha="$(git rev-parse HEAD)"
+          cat > docs/verification/plan03-task4-bounded-stream-green.md <<EOF
+          # Plan 03 Task 4 — bounded upload stream GREEN verification
+
+          - **Verified code commit:** \`$sha\`
+          - Configured and declared limits are enforced while the object store reads incrementally.
+          - Understated, oversized, truncated, and empty bodies fail closed.
+          - Preservation creates no authoritative rows when stream admission fails.
+          - Focused and complete Python suites and Ruff passed.
+          EOF
+          git add docs/verification/plan03-task4-bounded-stream-green.md
+          git rm .github/workflows/plan03-task4-bounded-stream-green.yml
+          git commit -m 'docs: verify bounded upload stream [skip ci]'
+          git push origin HEAD:testing-codex
