@@ -2,7 +2,6 @@ import base64
 from dataclasses import dataclass
 
 import pytest
-
 from darknetra_api.security.encrypted_fields import (
     RedactionKind,
     SensitiveEnvelopeError,
