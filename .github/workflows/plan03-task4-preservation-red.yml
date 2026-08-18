@@ -1,0 +1,369 @@
+name: Plan 03 Task 4 preservation transaction RED gate
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task4-preservation-red.yml
+
+permissions:
+  contents: write
+  statuses: write
+
+jobs:
+  red:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task4-pres-red@127.0.0.1:5432/darknetra_plan03_task4_pres_red
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task4_pres_red
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task4-pres-red
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task4_pres_red"
+          --health-interval 5s --health-timeout 3s --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode('ascii')
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f'::add-mask::{value}')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              output.write(f'DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n')
+              output.write(f'DARKNETRA_FIELD_KEY_V1_B64={field}\n')
+              output.write('DARKNETRA_FIELD_KEYRING_B64_JSON=' + json.dumps({'v1': field}, separators=(',', ':')) + '\n')
+              output.write('DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n')
+              output.write(f'DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n')
+          PY
+
+      - name: Require the verified policy and storage boundaries
+        run: |
+          set -euo pipefail
+          test -f docs/verification/plan03-task3-content-addressed-storage.md
+          test -f docs/verification/plan03-task4-upload-policy-green.md
+          test -f apps/api/darknetra_api/policy/ingestion.py
+          test -f apps/api/darknetra_api/storage/local.py
+
+      - name: Install locked workspace and migrate
+        run: |
+          uv sync --all-packages --dev --frozen
+          uv run alembic -c apps/api/alembic.ini upgrade head
+
+      - name: Define the transactional preservation contract
+        run: |
+          cat > apps/api/tests/integration/test_evidence_ingest_service.py <<'PYTEST'
+          from __future__ import annotations
+
+          import hashlib
+          import io
+          from datetime import UTC, datetime
+          from pathlib import Path
+          from uuid import UUID, uuid4
+
+          import pytest
+          import sqlalchemy as sa
+          from darknetra_api.db.session import async_session_factory
+          from darknetra_api.models.audit import AuditEvent
+          from darknetra_api.models.auth_session import AuthSession
+          from darknetra_api.models.case import Case
+          from darknetra_api.models.case_membership import CaseMembership, CaseMembershipRole
+          from darknetra_api.models.custody import CustodyEvent
+          from darknetra_api.models.enums import CaseSensitivity
+          from darknetra_api.models.evidence import EvidenceArtifact, EvidenceDerivation, EvidenceSourceClass, EvidenceState
+          from darknetra_api.models.job import Job, JobState
+          from darknetra_api.models.user import User
+          from darknetra_api.policy.ingestion import EvidenceSourceMetadata, IngestionPolicyError
+          from darknetra_api.security.encryption import SensitiveFieldCrypto
+          from darknetra_api.services.evidence_ingest import (
+              EvidenceDispatchState,
+              EvidenceIngestRequest,
+              preserve_uploaded_evidence,
+          )
+          from darknetra_api.storage.local import LocalObjectStore
+
+
+          async def _clean() -> None:
+              async with async_session_factory() as session:
+                  await session.execute(sa.delete(CustodyEvent))
+                  await session.execute(sa.delete(EvidenceDerivation))
+                  await session.execute(sa.delete(EvidenceArtifact))
+                  await session.execute(sa.delete(Job))
+                  await session.execute(sa.delete(CaseMembershipRole))
+                  await session.execute(sa.delete(CaseMembership))
+                  await session.execute(sa.delete(AuditEvent))
+                  await session.execute(sa.delete(Case))
+                  await session.execute(sa.delete(AuthSession))
+                  await session.execute(sa.delete(User))
+                  await session.commit()
+
+
+          @pytest.fixture(autouse=True)
+          async def clean_database() -> None:
+              await _clean()
+              yield
+              await _clean()
+
+
+          async def _seed_case() -> tuple[User, Case]:
+              async with async_session_factory() as session:
+                  username = f'ingest-owner-{uuid4().hex[:10]}'
+                  owner = User(
+                      username=username,
+                      username_normalized=username.casefold(),
+                      display_name='Synthetic Ingestion Owner',
+                      password_hash='unused',
+                      global_roles=[],
+                      is_active=True,
+                      must_change_password=False,
+                  )
+                  session.add(owner)
+                  await session.flush()
+                  case = Case(
+                      case_code=f'ING-{uuid4().hex[:10].upper()}',
+                      title='Synthetic preservation transaction',
+                      sensitivity=CaseSensitivity.RESTRICTED,
+                      owner_user_id=owner.id,
+                      source_authority_summary='Authorized synthetic ingestion test',
+                  )
+                  session.add(case)
+                  await session.commit()
+                  await session.refresh(owner)
+                  await session.refresh(case)
+                  return owner, case
+
+
+          def _crypto() -> SensitiveFieldCrypto:
+              return SensitiveFieldCrypto(
+                  field_keys={'v1': b'1' * 32},
+                  active_key_version='v1',
+                  blind_index_key=b'2' * 32,
+              )
+
+
+          def _request(*, declared_media_type: str | None = 'text/plain') -> EvidenceIngestRequest:
+              return EvidenceIngestRequest(
+                  source=EvidenceSourceMetadata(
+                      source_class=EvidenceSourceClass.SYNTHETIC,
+                      source_type='synthetic.fixture',
+                      acquisition_method='authorized_test_generation',
+                  ),
+                  captured_at=datetime.now(UTC),
+                  original_timezone='UTC',
+                  source_locator='synthetic://task4/preservation-fixture',
+                  notes='Restricted synthetic transaction note',
+                  tool_name='darknetra-tests',
+                  tool_version='1.0.0',
+                  declared_media_type=declared_media_type,
+              )
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_preservation_commits_manifest_custody_audit_and_job_before_publish(tmp_path: Path) -> None:
+              owner, case = await _seed_case()
+              store = LocalObjectStore(tmp_path)
+              payload = b'authorized synthetic evidence text\n'
+              observed: dict[str, UUID] = {}
+
+              async def publish(job_id: UUID) -> None:
+                  async with async_session_factory() as verifier:
+                      job = await verifier.get(Job, job_id)
+                      assert job is not None
+                      artifact = await verifier.get(EvidenceArtifact, UUID(job.resource_id))
+                      assert artifact is not None
+                      assert artifact.state is EvidenceState.PRESERVED
+                      observed['job_id'] = job_id
+
+              async with async_session_factory() as session:
+                  result = await preserve_uploaded_evidence(
+                      actor=owner,
+                      case_id=case.id,
+                      request=_request(),
+                      stream=io.BytesIO(payload),
+                      object_store=store,
+                      crypto=_crypto(),
+                      session=session,
+                      request_id='task4-preservation-success',
+                      publish_job=publish,
+                  )
+
+              assert result.dispatch_state is EvidenceDispatchState.PUBLISHED
+              assert observed['job_id'] == result.job_id
+
+              async with async_session_factory() as session:
+                  artifact = await session.get(EvidenceArtifact, result.evidence_id)
+                  job = await session.get(Job, result.job_id)
+                  assert artifact is not None
+                  assert job is not None
+                  assert artifact.state is EvidenceState.PRESERVED
+                  assert artifact.sha256 == hashlib.sha256(payload).hexdigest()
+                  assert artifact.size_bytes == len(payload)
+                  assert artifact.media_type == 'text/plain'
+                  assert artifact.source_locator_ciphertext is not None
+                  assert artifact.notes_ciphertext is not None
+                  assert artifact.source_locator_hash is not None
+                  assert job.case_id == case.id
+                  assert job.resource_type == 'evidence'
+                  assert job.resource_id == str(artifact.id)
+                  assert job.idempotency_key == f'ingest:{artifact.id}:v1'
+                  assert job.state is JobState.PENDING
+
+                  custody = (
+                      await session.execute(
+                          sa.select(CustodyEvent).where(CustodyEvent.evidence_id == artifact.id)
+                      )
+                  ).scalars().all()
+                  audits = (
+                      await session.execute(
+                          sa.select(AuditEvent).where(
+                              AuditEvent.case_id == case.id,
+                              AuditEvent.resource_id == str(artifact.id),
+                          )
+                      )
+                  ).scalars().all()
+                  assert [event.event_type for event in custody] == ['CUSTODY_CREATED']
+                  assert [event.event_type for event in audits] == ['EVIDENCE_INGESTED']
+                  assert store.verify(artifact.object_key, artifact.sha256)
+
+                  crypto = _crypto()
+                  assert crypto.decrypt(
+                      artifact.source_locator_ciphertext,
+                      purpose='evidence.source_locator',
+                      resource_id=str(artifact.id),
+                  ) == 'synthetic://task4/preservation-fixture'
+                  assert crypto.decrypt(
+                      artifact.notes_ciphertext,
+                      purpose='evidence.notes',
+                      resource_id=str(artifact.id),
+                  ) == 'Restricted synthetic transaction note'
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_unsupported_or_mismatched_content_creates_no_authoritative_rows(tmp_path: Path) -> None:
+              owner, case = await _seed_case()
+              store = LocalObjectStore(tmp_path)
+
+              async with async_session_factory() as session:
+                  with pytest.raises(IngestionPolicyError, match='unsupported'):
+                      await preserve_uploaded_evidence(
+                          actor=owner,
+                          case_id=case.id,
+                          request=_request(declared_media_type='application/octet-stream'),
+                          stream=io.BytesIO(b'MZ' + b'\x00' * 64),
+                          object_store=store,
+                          crypto=_crypto(),
+                          session=session,
+                          request_id='task4-reject-executable',
+                      )
+
+              async with async_session_factory() as session:
+                  with pytest.raises(IngestionPolicyError, match='does not match'):
+                      await preserve_uploaded_evidence(
+                          actor=owner,
+                          case_id=case.id,
+                          request=_request(declared_media_type='application/pdf'),
+                          stream=io.BytesIO(b'authorized text, not a PDF'),
+                          object_store=store,
+                          crypto=_crypto(),
+                          session=session,
+                          request_id='task4-reject-mime-mismatch',
+                      )
+
+              async with async_session_factory() as session:
+                  assert (await session.scalar(sa.select(sa.func.count()).select_from(EvidenceArtifact))) == 0
+                  assert (await session.scalar(sa.select(sa.func.count()).select_from(Job))) == 0
+                  assert (await session.scalar(sa.select(sa.func.count()).select_from(CustodyEvent))) == 0
+                  assert (await session.scalar(sa.select(sa.func.count()).select_from(AuditEvent))) == 0
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_broker_failure_leaves_a_durable_pending_job_without_rolling_back_evidence(tmp_path: Path) -> None:
+              owner, case = await _seed_case()
+              store = LocalObjectStore(tmp_path)
+
+              async def unavailable(_: UUID) -> None:
+                  raise ConnectionError('synthetic broker outage')
+
+              async with async_session_factory() as session:
+                  result = await preserve_uploaded_evidence(
+                      actor=owner,
+                      case_id=case.id,
+                      request=_request(),
+                      stream=io.BytesIO(b'preserved despite broker outage'),
+                      object_store=store,
+                      crypto=_crypto(),
+                      session=session,
+                      request_id='task4-broker-outage',
+                      publish_job=unavailable,
+                  )
+
+              assert result.dispatch_state is EvidenceDispatchState.PENDING
+              assert result.dispatch_error_code == 'BROKER_PUBLISH_FAILED'
+              async with async_session_factory() as session:
+                  artifact = await session.get(EvidenceArtifact, result.evidence_id)
+                  job = await session.get(Job, result.job_id)
+                  assert artifact is not None
+                  assert artifact.state is EvidenceState.PRESERVED
+                  assert job is not None
+                  assert job.state is JobState.PENDING
+                  assert job.error_message is None
+          PYTEST
+
+      - name: Prove the preservation contract is RED
+        run: |
+          set +e
+          uv run pytest -q apps/api/tests/integration/test_evidence_ingest_service.py > /tmp/task4-pres-red.txt 2>&1
+          EXIT_CODE=$?
+          set -e
+          cat /tmp/task4-pres-red.txt
+          test "$EXIT_CODE" -ne 0
+          grep -Eq 'services\.evidence_ingest|ModuleNotFoundError|ImportError' /tmp/task4-pres-red.txt
+
+      - name: Commit the RED contract
+        if: success()
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          cat > docs/verification/plan03-task4-preservation-red.md <<EOF
+          # Plan 03 Task 4 — preservation transaction RED verification
+
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          The integration contract fails because \`darknetra_api.services.evidence_ingest\` does not yet exist. It defines the intended transaction boundary: preserve verified bytes, commit encrypted provenance/custody/audit/job records, and only then publish transient delivery. Unsupported content and MIME conflicts must create no authoritative rows; broker failure must not roll back preserved evidence.
+          EOF
+          git add apps/api/tests/integration/test_evidence_ingest_service.py docs/verification/plan03-task4-preservation-red.md
+          git rm .github/workflows/plan03-task4-preservation-red.yml
+          git commit -m 'test: define evidence preservation transaction contract [skip ci]'
+          git push origin HEAD:testing-codex
