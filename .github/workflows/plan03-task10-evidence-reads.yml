@@ -1,0 +1,986 @@
+name: Plan 03 Task 10 safe evidence read APIs TDD
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task10-evidence-reads.yml
+
+permissions:
+  contents: write
+
+jobs:
+  red-green:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task10-read@127.0.0.1:5432/darknetra_plan03_task10_read
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-task10-read
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task10_read
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task10-read
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task10_read"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Require completed integrity boundary
+        run: test -f docs/verification/plan03-task9-final.md
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f"::add-mask::{value}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n")
+              out.write(f"DARKNETRA_FIELD_KEY_V1_B64={field}\n")
+              out.write("DARKNETRA_FIELD_KEYRING_B64_JSON=" + json.dumps({"v1": field}, separators=(",", ":")) + "\n")
+              out.write("DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n")
+              out.write(f"DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n")
+          PY
+
+      - name: Install and migrate
+        run: |
+          uv sync --all-packages --dev --frozen
+          uv run alembic -c apps/api/alembic.ini upgrade head
+
+      - name: Write safe read API contracts before implementation
+        run: |
+          cat > apps/api/tests/integration/test_evidence_read_routes.py <<'PY'
+          from __future__ import annotations
+
+          import io
+          from datetime import UTC, datetime, timedelta
+          from pathlib import Path
+          from uuid import uuid4
+
+          import httpx
+          import pytest
+          import sqlalchemy as sa
+          from darknetra_api.db.session import async_session_factory
+          from darknetra_api.main import app
+          from darknetra_api.models.audit import AuditEvent
+          from darknetra_api.models.auth_session import AuthSession
+          from darknetra_api.models.case import Case
+          from darknetra_api.models.case_membership import CaseMembership, CaseMembershipRole
+          from darknetra_api.models.custody import CustodyEvent
+          from darknetra_api.models.enums import CaseSensitivity
+          from darknetra_api.models.evidence import EvidenceArtifact, EvidenceDerivation, EvidenceSourceClass, EvidenceState
+          from darknetra_api.models.job import Job
+          from darknetra_api.models.user import User
+          from darknetra_api.routes import evidence as route
+          from darknetra_api.security.encryption import SensitiveFieldCrypto
+          from darknetra_api.services.evidence import preserve_evidence_manifest
+          from darknetra_api.storage.local import LocalObjectStore
+
+
+          async def clean_database() -> None:
+              async with async_session_factory() as session:
+                  await session.execute(sa.delete(CustodyEvent))
+                  await session.execute(sa.delete(EvidenceDerivation))
+                  await session.execute(sa.delete(EvidenceArtifact))
+                  await session.execute(sa.delete(Job))
+                  await session.execute(sa.delete(CaseMembershipRole))
+                  await session.execute(sa.delete(CaseMembership))
+                  await session.execute(sa.delete(AuditEvent))
+                  await session.execute(sa.delete(Case))
+                  await session.execute(sa.delete(AuthSession))
+                  await session.execute(sa.delete(User))
+                  await session.commit()
+
+
+          @pytest.fixture(autouse=True)
+          async def clean() -> None:
+              app.dependency_overrides.clear()
+              await clean_database()
+              yield
+              app.dependency_overrides.clear()
+              await clean_database()
+
+
+          async def seed(store: LocalObjectStore):
+              boundary = SensitiveFieldCrypto(
+                  field_keys={"v1": b"K" * 32},
+                  active_key_version="v1",
+                  blind_index_key=b"L" * 32,
+              )
+              async with async_session_factory() as session:
+                  suffix = uuid4().hex[:10]
+                  owner = User(
+                      username=f"read-owner-{suffix}",
+                      username_normalized=f"read-owner-{suffix}",
+                      display_name="Read Owner",
+                      password_hash="unused",
+                      global_roles=[],
+                      is_active=True,
+                      must_change_password=False,
+                  )
+                  session.add(owner)
+                  await session.flush()
+                  case = Case(
+                      case_code=f"RED-{suffix.upper()}",
+                      title="Authorized evidence read fixture",
+                      sensitivity=CaseSensitivity.RESTRICTED,
+                      owner_user_id=owner.id,
+                      source_authority_summary="Authorized synthetic fixture",
+                  )
+                  other_case = Case(
+                      case_code=f"OTH-{suffix.upper()}",
+                      title="Other inaccessible fixture",
+                      sensitivity=CaseSensitivity.RESTRICTED,
+                      owner_user_id=owner.id,
+                      source_authority_summary="Authorized synthetic fixture",
+                  )
+                  session.add_all([case, other_case])
+                  await session.flush()
+
+                  artifacts = []
+                  base = datetime.now(UTC) - timedelta(minutes=10)
+                  for index, (data, media_type, state) in enumerate(
+                      [
+                          (b"first original", "text/plain", EvidenceState.READY),
+                          (b"second original", "text/plain", EvidenceState.PARTIAL),
+                          (b"third original", "text/plain", EvidenceState.QUARANTINED),
+                      ]
+                  ):
+                      stored = store.put_verified(io.BytesIO(data))
+                      artifact = EvidenceArtifact(
+                          case_id=case.id,
+                          source_class=EvidenceSourceClass.SYNTHETIC,
+                          source_type=f"synthetic.read.{index}",
+                          acquisition_method="authorized_test_generation",
+                          collector_user_id=owner.id,
+                          captured_at=base + timedelta(minutes=index),
+                          original_timezone="UTC",
+                          state=EvidenceState.STAGING,
+                      )
+                      preserve_evidence_manifest(
+                          artifact,
+                          media_type=media_type,
+                          size_bytes=stored.size_bytes,
+                          sha256=stored.sha256,
+                          sha512=None,
+                          object_key=stored.object_key,
+                          ingested_at=base + timedelta(minutes=index),
+                      )
+                      artifact.state = state
+                      artifact.source_locator_ciphertext = boundary.encrypt(
+                          f"https://example.invalid/private-{index}",
+                          purpose="evidence.source_locator",
+                          resource_id=str(artifact.id),
+                      )
+                      artifact.source_locator_hash = boundary.blind_index(
+                          f"https://example.invalid/private-{index}",
+                          purpose="evidence.source_locator",
+                      )
+                      session.add(artifact)
+                      artifacts.append(artifact)
+                  other_stored = store.put_verified(io.BytesIO(b"other case bytes"))
+                  other = EvidenceArtifact(
+                      case_id=other_case.id,
+                      source_class=EvidenceSourceClass.SYNTHETIC,
+                      source_type="synthetic.other",
+                      acquisition_method="authorized_test_generation",
+                      collector_user_id=owner.id,
+                      captured_at=datetime.now(UTC),
+                      original_timezone="UTC",
+                      state=EvidenceState.STAGING,
+                  )
+                  preserve_evidence_manifest(
+                      other,
+                      media_type="text/plain",
+                      size_bytes=other_stored.size_bytes,
+                      sha256=other_stored.sha256,
+                      sha512=None,
+                      object_key=other_stored.object_key,
+                  )
+                  session.add(other)
+                  await session.flush()
+                  child_stored = store.put_verified(io.BytesIO(b"safe child preview"))
+                  child = EvidenceArtifact(
+                      case_id=case.id,
+                      source_class=EvidenceSourceClass.SYNTHETIC,
+                      source_type="derivative.normalized_text",
+                      acquisition_method="derived_processing",
+                      collector_user_id=owner.id,
+                      captured_at=artifacts[0].captured_at,
+                      original_timezone="UTC",
+                      state=EvidenceState.STAGING,
+                  )
+                  preserve_evidence_manifest(
+                      child,
+                      media_type="text/plain",
+                      size_bytes=child_stored.size_bytes,
+                      sha256=child_stored.sha256,
+                      sha512=None,
+                      object_key=child_stored.object_key,
+                  )
+                  session.add(child)
+                  await session.flush()
+                  session.add(
+                      EvidenceDerivation(
+                          parent_evidence_id=artifacts[0].id,
+                          child_evidence_id=child.id,
+                          transformation="normalized_text",
+                          transformer_version="v1",
+                          parameters_json={"parser": "text"},
+                      )
+                  )
+                  session.add(
+                      CustodyEvent(
+                          evidence_id=artifacts[0].id,
+                          case_id=case.id,
+                          actor_user_id=owner.id,
+                          event_type="CUSTODY_CREATED",
+                          request_id="read-route-custody",
+                          reason="Authorized fixture custody",
+                          metadata_json={"safe": True},
+                      )
+                  )
+                  await session.commit()
+                  for value in [owner, case, other_case, *artifacts, other, child]:
+                      await session.refresh(value)
+                  return owner, case, other_case, artifacts, other, child
+
+
+          def install_overrides(actor: User, store: LocalObjectStore) -> None:
+              async def actor_override(): return actor
+              async def session_override():
+                  async with async_session_factory() as session:
+                      yield session
+              app.dependency_overrides[route.AUTH_DEPENDENCY] = actor_override
+              app.dependency_overrides[route.SESSION_DEPENDENCY] = session_override
+              app.dependency_overrides[route.OBJECT_STORE_DEPENDENCY] = lambda: store
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_case_list_is_cursor_paginated_filterable_and_safe(tmp_path: Path) -> None:
+              store = LocalObjectStore(tmp_path / "vault")
+              owner, case, _other_case, artifacts, _other, _child = await seed(store)
+              install_overrides(owner, store)
+              transport = httpx.ASGITransport(app=app)
+              async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+                  first = await client.get(f"/api/v1/cases/{case.id}/evidence?limit=2")
+                  assert first.status_code == 200, first.text
+                  first_body = first.json()
+                  assert len(first_body["items"]) == 2
+                  assert first_body["next_cursor"]
+                  assert first_body["items"][0]["id"] == str(artifacts[2].id)
+                  second = await client.get(
+                      f"/api/v1/cases/{case.id}/evidence",
+                      params={"limit": 2, "cursor": first_body["next_cursor"]},
+                  )
+                  assert second.status_code == 200
+                  assert [item["id"] for item in second.json()["items"]] == [str(artifacts[1].id), str(artifacts[0].id)]
+                  filtered = await client.get(
+                      f"/api/v1/cases/{case.id}/evidence",
+                      params={"state": "PARTIAL"},
+                  )
+                  assert [item["id"] for item in filtered.json()["items"]] == [str(artifacts[1].id)]
+              serialized = (first.text + second.text + filtered.text).lower()
+              for forbidden in ("ciphertext", "object_key", "private-", str(tmp_path).lower()):
+                  assert forbidden not in serialized
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_detail_contains_safe_lineage_and_custody_without_storage_internals(tmp_path: Path) -> None:
+              store = LocalObjectStore(tmp_path / "vault")
+              owner, case, _other_case, artifacts, _other, child = await seed(store)
+              install_overrides(owner, store)
+              transport = httpx.ASGITransport(app=app)
+              async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+                  response = await client.get(
+                      f"/api/v1/cases/{case.id}/evidence/{artifacts[0].id}"
+                  )
+              assert response.status_code == 200, response.text
+              body = response.json()
+              assert body["evidence"]["id"] == str(artifacts[0].id)
+              assert body["children"][0]["evidence"]["id"] == str(child.id)
+              assert body["children"][0]["transformation"] == "normalized_text"
+              assert body["custody"][0]["event_type"] == "CUSTODY_CREATED"
+              serialized = response.text.lower()
+              for forbidden in ("ciphertext", "object_key", "private-", str(tmp_path).lower()):
+                  assert forbidden not in serialized
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_wrong_case_and_unknown_evidence_have_identical_not_found_responses(tmp_path: Path) -> None:
+              store = LocalObjectStore(tmp_path / "vault")
+              owner, case, other_case, artifacts, _other, _child = await seed(store)
+              install_overrides(owner, store)
+              transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+              async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+                  wrong_case = await client.get(
+                      f"/api/v1/cases/{other_case.id}/evidence/{artifacts[0].id}"
+                  )
+                  unknown = await client.get(
+                      f"/api/v1/cases/{case.id}/evidence/{uuid4()}"
+                  )
+              assert wrong_case.status_code == 404
+              assert unknown.status_code == 404
+              assert wrong_case.json() == unknown.json()
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_original_download_is_attachment_nosniff_no_store_and_digest_verified(tmp_path: Path) -> None:
+              store = LocalObjectStore(tmp_path / "vault")
+              owner, case, _other_case, artifacts, _other, _child = await seed(store)
+              install_overrides(owner, store)
+              transport = httpx.ASGITransport(app=app)
+              async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+                  response = await client.get(
+                      f"/api/v1/cases/{case.id}/evidence/{artifacts[0].id}/content"
+                  )
+              assert response.status_code == 200, response.text
+              assert response.content == b"first original"
+              assert response.headers["content-type"].startswith("application/octet-stream")
+              assert response.headers["content-disposition"].startswith("attachment;")
+              assert response.headers["cache-control"] == "no-store"
+              assert response.headers["x-content-type-options"] == "nosniff"
+              assert response.headers["content-security-policy"] == "sandbox"
+              assert "object_key" not in response.headers
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_tampered_or_mismatch_state_original_is_never_downloaded(tmp_path: Path) -> None:
+              store = LocalObjectStore(tmp_path / "vault")
+              owner, case, _other_case, artifacts, _other, _child = await seed(store)
+              install_overrides(owner, store)
+              artifact = artifacts[0]
+              object_path = store.root / artifact.object_key
+              object_path.chmod(0o600)
+              object_path.write_bytes(b"tampered")
+              object_path.chmod(0o400)
+              transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+              async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+                  response = await client.get(
+                      f"/api/v1/cases/{case.id}/evidence/{artifact.id}/content"
+                  )
+              assert response.status_code == 409
+              assert b"tampered" not in response.content
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_safe_derivative_preview_is_inline_with_restrictive_headers(tmp_path: Path) -> None:
+              store = LocalObjectStore(tmp_path / "vault")
+              owner, case, _other_case, artifacts, _other, child = await seed(store)
+              install_overrides(owner, store)
+              transport = httpx.ASGITransport(app=app)
+              async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+                  response = await client.get(
+                      f"/api/v1/cases/{case.id}/evidence/{artifacts[0].id}/derivatives/{child.id}/preview"
+                  )
+              assert response.status_code == 200, response.text
+              assert response.content == b"safe child preview"
+              assert response.headers["content-type"].startswith("text/plain")
+              assert response.headers["content-disposition"].startswith("inline;")
+              assert response.headers["cache-control"] == "no-store"
+              assert response.headers["x-content-type-options"] == "nosniff"
+              assert "default-src 'none'" in response.headers["content-security-policy"]
+          PY
+
+      - name: Prove RED before implementation
+        run: |
+          set +e
+          uv run pytest -q apps/api/tests/integration/test_evidence_read_routes.py >/tmp/task10-read-red.log 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          grep -Eq '404|405|items|content|preview|assert' /tmp/task10-read-red.log
+
+      - name: Add safe evidence read schemas
+        run: |
+          cat >> apps/api/darknetra_api/schemas/evidence.py <<'PY'
+
+
+          class EvidenceListRead(BaseModel):
+              items: list[EvidenceArtifactRead]
+              next_cursor: str | None = None
+
+
+          class EvidenceDerivationRead(BaseModel):
+              id: UUID
+              transformation: str
+              transformer_version: str
+              parameters_digest: str
+              created_at: datetime
+              evidence: EvidenceArtifactRead
+
+
+          class CustodyEventRead(BaseModel):
+              id: UUID
+              event_type: str
+              actor_user_id: UUID | None
+              request_id: str
+              reason: str
+              metadata: dict[str, object]
+              created_at: datetime
+
+
+          class EvidenceDetailRead(BaseModel):
+              evidence: EvidenceArtifactRead
+              parents: list[EvidenceDerivationRead]
+              children: list[EvidenceDerivationRead]
+              custody: list[CustodyEventRead]
+          PY
+
+      - name: Implement cursor, safe metadata and guarded streaming helpers
+        run: |
+          cat > apps/api/darknetra_api/services/evidence_reads.py <<'PY'
+          from __future__ import annotations
+
+          import base64
+          import json
+          from dataclasses import dataclass
+          from datetime import UTC, datetime
+          from typing import BinaryIO, Literal
+          from uuid import UUID
+
+          import sqlalchemy as sa
+          from pydantic import BaseModel, ValidationError
+          from sqlalchemy.ext.asyncio import AsyncSession
+          from starlette.concurrency import run_in_threadpool
+
+          from darknetra_api.authz.permissions import Permission
+          from darknetra_api.authz.policy import CaseNotFound, authorize_case
+          from darknetra_api.models.custody import CustodyEvent
+          from darknetra_api.models.evidence import EvidenceArtifact, EvidenceDerivation, EvidenceSourceClass, EvidenceState
+          from darknetra_api.models.user import User
+          from darknetra_api.schemas.evidence import (
+              CustodyEventRead,
+              EvidenceArtifactRead,
+              EvidenceDerivationRead,
+              EvidenceDetailRead,
+              EvidenceListRead,
+          )
+          from darknetra_api.storage.base import ObjectStore
+
+
+          class EvidenceReadError(ValueError):
+              pass
+
+
+          class InvalidEvidenceCursor(EvidenceReadError):
+              pass
+
+
+          class EvidenceIntegrityBlocked(EvidenceReadError):
+              pass
+
+
+          class _Cursor(BaseModel):
+              ingested_at: datetime
+              evidence_id: UUID
+
+
+          @dataclass(frozen=True, slots=True)
+          class GuardedContent:
+              evidence_id: UUID
+              media_type: str
+              size_bytes: int
+              source: BinaryIO
+
+
+          def encode_cursor(artifact: EvidenceArtifact) -> str:
+              if artifact.ingested_at is None:
+                  raise EvidenceReadError("preserved evidence is missing an ingest timestamp")
+              payload = json.dumps(
+                  {
+                      "ingested_at": artifact.ingested_at.astimezone(UTC).isoformat(),
+                      "evidence_id": str(artifact.id),
+                  },
+                  separators=(",", ":"),
+              ).encode("utf-8")
+              return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+          def decode_cursor(value: str) -> _Cursor:
+              try:
+                  padding = "=" * (-len(value) % 4)
+                  payload = base64.urlsafe_b64decode(value + padding)
+                  return _Cursor.model_validate_json(payload)
+              except (ValueError, TypeError, ValidationError) as exc:
+                  raise InvalidEvidenceCursor("evidence cursor is invalid") from exc
+
+
+          async def list_case_evidence(
+              *,
+              session: AsyncSession,
+              actor: User,
+              case_id: UUID,
+              limit: int,
+              cursor: str | None = None,
+              state: EvidenceState | None = None,
+              source_class: EvidenceSourceClass | None = None,
+          ) -> EvidenceListRead:
+              if not 1 <= limit <= 100:
+                  raise EvidenceReadError("evidence list limit must be between 1 and 100")
+              await authorize_case(actor, case_id, Permission.CASE_READ, session)
+              query = sa.select(EvidenceArtifact).where(EvidenceArtifact.case_id == case_id)
+              if state is not None:
+                  query = query.where(EvidenceArtifact.state == state)
+              if source_class is not None:
+                  query = query.where(EvidenceArtifact.source_class == source_class)
+              if cursor:
+                  parsed = decode_cursor(cursor)
+                  query = query.where(
+                      sa.tuple_(EvidenceArtifact.ingested_at, EvidenceArtifact.id)
+                      < sa.tuple_(parsed.ingested_at, parsed.evidence_id)
+                  )
+              rows = (
+                  await session.execute(
+                      query.order_by(
+                          EvidenceArtifact.ingested_at.desc(),
+                          EvidenceArtifact.id.desc(),
+                      ).limit(limit + 1)
+                  )
+              ).scalars().all()
+              has_more = len(rows) > limit
+              items = rows[:limit]
+              next_cursor = encode_cursor(items[-1]) if has_more and items else None
+              return EvidenceListRead(
+                  items=[EvidenceArtifactRead.model_validate(item) for item in items],
+                  next_cursor=next_cursor,
+              )
+
+
+          def _derivation_read(
+              derivation: EvidenceDerivation,
+              artifact: EvidenceArtifact,
+          ) -> EvidenceDerivationRead:
+              return EvidenceDerivationRead(
+                  id=derivation.id,
+                  transformation=derivation.transformation,
+                  transformer_version=derivation.transformer_version,
+                  parameters_digest=derivation.parameters_digest,
+                  created_at=derivation.created_at,
+                  evidence=EvidenceArtifactRead.model_validate(artifact),
+              )
+
+
+          async def get_evidence_detail(
+              *,
+              session: AsyncSession,
+              actor: User,
+              case_id: UUID,
+              evidence_id: UUID,
+          ) -> EvidenceDetailRead:
+              await authorize_case(actor, case_id, Permission.CASE_READ, session)
+              artifact = (
+                  await session.execute(
+                      sa.select(EvidenceArtifact).where(
+                          EvidenceArtifact.id == evidence_id,
+                          EvidenceArtifact.case_id == case_id,
+                      )
+                  )
+              ).scalar_one_or_none()
+              if artifact is None:
+                  raise CaseNotFound("resource not found")
+              child_rows = (
+                  await session.execute(
+                      sa.select(EvidenceDerivation, EvidenceArtifact)
+                      .join(EvidenceArtifact, EvidenceArtifact.id == EvidenceDerivation.child_evidence_id)
+                      .where(
+                          EvidenceDerivation.parent_evidence_id == evidence_id,
+                          EvidenceArtifact.case_id == case_id,
+                      )
+                      .order_by(EvidenceDerivation.created_at, EvidenceDerivation.id)
+                  )
+              ).all()
+              parent_rows = (
+                  await session.execute(
+                      sa.select(EvidenceDerivation, EvidenceArtifact)
+                      .join(EvidenceArtifact, EvidenceArtifact.id == EvidenceDerivation.parent_evidence_id)
+                      .where(
+                          EvidenceDerivation.child_evidence_id == evidence_id,
+                          EvidenceArtifact.case_id == case_id,
+                      )
+                      .order_by(EvidenceDerivation.created_at, EvidenceDerivation.id)
+                  )
+              ).all()
+              custody = (
+                  await session.execute(
+                      sa.select(CustodyEvent)
+                      .where(
+                          CustodyEvent.evidence_id == evidence_id,
+                          CustodyEvent.case_id == case_id,
+                      )
+                      .order_by(CustodyEvent.created_at, CustodyEvent.id)
+                  )
+              ).scalars().all()
+              return EvidenceDetailRead(
+                  evidence=EvidenceArtifactRead.model_validate(artifact),
+                  parents=[_derivation_read(edge, linked) for edge, linked in parent_rows],
+                  children=[_derivation_read(edge, linked) for edge, linked in child_rows],
+                  custody=[
+                      CustodyEventRead(
+                          id=event.id,
+                          event_type=event.event_type,
+                          actor_user_id=event.actor_user_id,
+                          request_id=event.request_id,
+                          reason=event.reason,
+                          metadata=event.metadata_json,
+                          created_at=event.created_at,
+                      )
+                      for event in custody
+                  ],
+              )
+
+
+          async def open_guarded_content(
+              *,
+              session: AsyncSession,
+              actor: User,
+              case_id: UUID,
+              evidence_id: UUID,
+              object_store: ObjectStore,
+              child_of: UUID | None = None,
+              preview: bool = False,
+          ) -> GuardedContent:
+              await authorize_case(actor, case_id, Permission.CASE_READ, session)
+              artifact = (
+                  await session.execute(
+                      sa.select(EvidenceArtifact).where(
+                          EvidenceArtifact.id == evidence_id,
+                          EvidenceArtifact.case_id == case_id,
+                      )
+                  )
+              ).scalar_one_or_none()
+              if artifact is None:
+                  raise CaseNotFound("resource not found")
+              if child_of is not None:
+                  edge = (
+                      await session.execute(
+                          sa.select(EvidenceDerivation).where(
+                              EvidenceDerivation.parent_evidence_id == child_of,
+                              EvidenceDerivation.child_evidence_id == evidence_id,
+                          )
+                      )
+                  ).scalar_one_or_none()
+                  if edge is None:
+                      raise CaseNotFound("resource not found")
+              if artifact.state is EvidenceState.INTEGRITY_MISMATCH:
+                  raise EvidenceIntegrityBlocked("evidence is blocked by an integrity mismatch")
+              if not artifact.object_key or not artifact.sha256 or artifact.size_bytes is None:
+                  raise EvidenceIntegrityBlocked("evidence manifest is incomplete")
+              verified = await run_in_threadpool(
+                  object_store.verify,
+                  artifact.object_key,
+                  artifact.sha256,
+              )
+              if not verified:
+                  raise EvidenceIntegrityBlocked("evidence failed integrity verification")
+              media_type = artifact.media_type or "application/octet-stream"
+              if preview:
+                  allowlisted = {"text/plain", "text/html", "image/png"}
+                  if media_type not in allowlisted or not artifact.source_type.startswith("derivative."):
+                      raise CaseNotFound("resource not found")
+              try:
+                  source = object_store.open(artifact.object_key)
+              except FileNotFoundError as exc:
+                  raise EvidenceIntegrityBlocked("evidence object is unavailable") from exc
+              return GuardedContent(
+                  evidence_id=artifact.id,
+                  media_type=media_type,
+                  size_bytes=artifact.size_bytes,
+                  source=source,
+              )
+          PY
+
+      - name: Expose list detail download and safe preview endpoints
+        run: |
+          cat >> apps/api/darknetra_api/routes/evidence.py <<'PY'
+
+
+          @router.get(
+              "/cases/{case_id}/evidence",
+              response_model=EvidenceListRead,
+          )
+          async def list_evidence(
+              case_id: UUID,
+              actor: Annotated[User, Depends(AUTH_DEPENDENCY)],
+              session: Annotated[AsyncSession, Depends(SESSION_DEPENDENCY)],
+              limit: Annotated[int, Query(ge=1, le=100)] = 50,
+              cursor: str | None = None,
+              state: EvidenceState | None = None,
+              source_class: EvidenceSourceClass | None = None,
+          ) -> EvidenceListRead:
+              try:
+                  return await list_case_evidence(
+                      session=session,
+                      actor=actor,
+                      case_id=case_id,
+                      limit=limit,
+                      cursor=cursor,
+                      state=state,
+                      source_class=source_class,
+                  )
+              except InvalidEvidenceCursor as exc:
+                  raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+          @router.get(
+              "/cases/{case_id}/evidence/{evidence_id}",
+              response_model=EvidenceDetailRead,
+          )
+          async def evidence_detail(
+              case_id: UUID,
+              evidence_id: UUID,
+              actor: Annotated[User, Depends(AUTH_DEPENDENCY)],
+              session: Annotated[AsyncSession, Depends(SESSION_DEPENDENCY)],
+          ) -> EvidenceDetailRead:
+              return await get_evidence_detail(
+                  session=session,
+                  actor=actor,
+                  case_id=case_id,
+                  evidence_id=evidence_id,
+              )
+
+
+          def _content_headers(*, evidence_id: UUID, disposition: str, media_type: str) -> dict[str, str]:
+              extension = {
+                  "text/plain": ".txt",
+                  "text/html": ".html",
+                  "image/png": ".png",
+                  "image/jpeg": ".jpg",
+                  "image/webp": ".webp",
+                  "application/pdf": ".pdf",
+                  "application/json": ".json",
+                  "text/csv": ".csv",
+                  "application/zip": ".zip",
+              }.get(media_type, ".bin")
+              return {
+                  "Content-Disposition": f'{disposition}; filename="evidence-{evidence_id}{extension}"',
+                  "Cache-Control": "no-store",
+                  "Pragma": "no-cache",
+                  "X-Content-Type-Options": "nosniff",
+                  "Content-Security-Policy": "sandbox" if disposition == "attachment" else "default-src 'none'; img-src 'self' data:; style-src 'none'; script-src 'none'; frame-ancestors 'none'; sandbox",
+              }
+
+
+          @router.get("/cases/{case_id}/evidence/{evidence_id}/content")
+          async def download_evidence_content(
+              case_id: UUID,
+              evidence_id: UUID,
+              actor: Annotated[User, Depends(AUTH_DEPENDENCY)],
+              session: Annotated[AsyncSession, Depends(SESSION_DEPENDENCY)],
+              object_store: Annotated[LocalObjectStore, Depends(OBJECT_STORE_DEPENDENCY)],
+          ):
+              try:
+                  content = await open_guarded_content(
+                      session=session,
+                      actor=actor,
+                      case_id=case_id,
+                      evidence_id=evidence_id,
+                      object_store=object_store,
+                  )
+              except EvidenceIntegrityBlocked as exc:
+                  raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+              return StreamingResponse(
+                  content.source,
+                  media_type="application/octet-stream",
+                  headers=_content_headers(
+                      evidence_id=evidence_id,
+                      disposition="attachment",
+                      media_type=content.media_type,
+                  ),
+              )
+
+
+          @router.get(
+              "/cases/{case_id}/evidence/{parent_evidence_id}/derivatives/{evidence_id}/preview"
+          )
+          async def preview_safe_derivative(
+              case_id: UUID,
+              parent_evidence_id: UUID,
+              evidence_id: UUID,
+              actor: Annotated[User, Depends(AUTH_DEPENDENCY)],
+              session: Annotated[AsyncSession, Depends(SESSION_DEPENDENCY)],
+              object_store: Annotated[LocalObjectStore, Depends(OBJECT_STORE_DEPENDENCY)],
+          ):
+              try:
+                  content = await open_guarded_content(
+                      session=session,
+                      actor=actor,
+                      case_id=case_id,
+                      evidence_id=evidence_id,
+                      object_store=object_store,
+                      child_of=parent_evidence_id,
+                      preview=True,
+                  )
+              except EvidenceIntegrityBlocked as exc:
+                  raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+              return StreamingResponse(
+                  content.source,
+                  media_type=content.media_type,
+                  headers=_content_headers(
+                      evidence_id=evidence_id,
+                      disposition="inline",
+                      media_type=content.media_type,
+                  ),
+              )
+          PY
+
+      - name: Patch route and schema imports deterministically
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          route = Path("apps/api/darknetra_api/routes/evidence.py")
+          text = route.read_text(encoding="utf-8")
+          text = text.replace(
+              "from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, status\n",
+              "from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status\n",
+              1,
+          )
+          streaming = "from fastapi.responses import StreamingResponse\n"
+          if streaming not in text:
+              marker = "from fastapi import "
+              line_end = text.find("\n", text.find(marker)) + 1
+              text = text[:line_end] + streaming + text[line_end:]
+          old_schema = "from darknetra_api.schemas.evidence import EvidenceArtifactRead, EvidenceIntegrityRead\n"
+          new_schema = '''from darknetra_api.schemas.evidence import (
+              EvidenceArtifactRead,
+              EvidenceDetailRead,
+              EvidenceIntegrityRead,
+              EvidenceListRead,
+          )
+          '''
+          new_schema = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in new_schema.splitlines()
+          ) + "\n"
+          if old_schema in text:
+              text = text.replace(old_schema, new_schema, 1)
+          elif "EvidenceDetailRead" not in text:
+              raise SystemExit("evidence schema import marker missing")
+          model_import = "from darknetra_api.models.evidence import EvidenceSourceClass, EvidenceState\n"
+          if model_import not in text:
+              marker = "from darknetra_api.models.job import JobState\n"
+              if marker not in text:
+                  raise SystemExit("job state import marker missing")
+              text = text.replace(marker, marker + model_import, 1)
+          service_import = '''from darknetra_api.services.evidence_reads import (
+              EvidenceIntegrityBlocked,
+              InvalidEvidenceCursor,
+              get_evidence_detail,
+              list_case_evidence,
+              open_guarded_content,
+          )
+          '''
+          service_import = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in service_import.splitlines()
+          ) + "\n"
+          if service_import not in text:
+              marker = "from darknetra_api.services.integrity import verify_evidence_integrity\n"
+              if marker not in text:
+                  raise SystemExit("integrity service import marker missing")
+              text = text.replace(marker, marker + service_import, 1)
+          route.write_text(text, encoding="utf-8")
+
+          schema = Path("apps/api/darknetra_api/schemas/evidence.py")
+          schema_text = schema.read_text(encoding="utf-8")
+          if "from datetime import datetime" not in schema_text:
+              marker = "from __future__ import annotations\n"
+              schema_text = schema_text.replace(marker, marker + "\nfrom datetime import datetime\n", 1)
+          schema.write_text(schema_text, encoding="utf-8")
+          PY
+
+      - name: Verify GREEN and full regression
+        run: |
+          uv run ruff check .
+          uv run pytest -q apps/api/tests/integration/test_evidence_read_routes.py
+          uv run pytest -q
+          uv run python - <<'PY'
+          from darknetra_api.main import app
+          paths = app.openapi()["paths"]
+          for path in (
+              "/api/v1/cases/{case_id}/evidence",
+              "/api/v1/cases/{case_id}/evidence/{evidence_id}",
+              "/api/v1/cases/{case_id}/evidence/{evidence_id}/content",
+              "/api/v1/cases/{case_id}/evidence/{parent_evidence_id}/derivatives/{evidence_id}/preview",
+          ):
+              assert path in paths
+          serialized = str(paths).lower()
+          for forbidden in ("source_locator_ciphertext", "authority_reference_ciphertext", "notes_ciphertext", "object_key"):
+              assert forbidden not in serialized
+          PY
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml build api worker
+
+      - name: Record Task 10 read API checkpoint
+        run: |
+          mkdir -p docs/verification
+          cat > docs/verification/plan03-task10-evidence-reads.md <<EOF
+          # Plan 03 Task 10 — safe evidence read APIs TDD checkpoint
+
+          - **Source before implementation:** \`$(git rev-parse HEAD)\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          ## RED
+
+          List, detail, anti-enumeration, guarded download and safe-preview contracts were authored first and failed before the endpoints existed.
+
+          ## GREEN
+
+          | Gate | Outcome |
+          |---|---|
+          | Ruff | success |
+          | Cursor pagination and state filter | success |
+          | Safe lineage and custody detail | success |
+          | Wrong-case/unknown identical 404 | success |
+          | Attachment/no-store/nosniff original download | success |
+          | Tampered original download blocked | success |
+          | Allowlisted derivative inline preview | success |
+          | Complete Python suite | success |
+          | OpenAPI internal-field exclusion | success |
+          | Compose validation and image build | success |
+
+          The browser never receives an object key, filesystem path or storage credential. Originals always download as attachments with a sandbox and `application/octet-stream`; only verified child derivatives with allowlisted safe media types may render inline under a restrictive CSP.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/api/darknetra_api/schemas/evidence.py apps/api/darknetra_api/services/evidence_reads.py apps/api/darknetra_api/routes/evidence.py apps/api/tests/integration/test_evidence_read_routes.py docs/verification/plan03-task10-evidence-reads.md
+          git rm .github/workflows/plan03-task10-evidence-reads.yml
+          git commit -m 'feat: add case scoped safe evidence reads'
+          git push origin HEAD:testing-codex
