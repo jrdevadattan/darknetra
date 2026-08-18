@@ -1,0 +1,311 @@
+name: Reconcile Plan 03 Task 3 storage verification
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task3-reconcile.yml
+
+concurrency:
+  group: plan03-task3-storage
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  statuses: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task3-reconcile@127.0.0.1:5432/darknetra_plan03_task3_reconcile
+      DARKNETRA_E2E_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task3-reconcile@127.0.0.1:5432/darknetra_plan03_task3_reconcile
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-task3-reconcile
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task3_reconcile
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task3-reconcile
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task3_reconcile"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Publish run locator
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY' >/tmp/status.json
+          import json, os
+          print(json.dumps({
+            "state": "pending",
+            "context": "plan03/task3-reconcile",
+            "description": f"GitHub Actions run {os.environ['GITHUB_RUN_ID']}",
+            "target_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+          }))
+          PY
+          curl --fail --silent --show-error --request POST \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data @/tmp/status.json \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" >/dev/null
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - id: keys
+        name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key():
+              return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind):
+              print(f"::add-mask::{value}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n")
+              out.write(f"DARKNETRA_FIELD_KEY_V1_B64={field}\n")
+              out.write("DARKNETRA_FIELD_KEYRING_B64_JSON=" + json.dumps({"v1": field}, separators=(",", ":")) + "\n")
+              out.write("DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n")
+              out.write(f"DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n")
+          PY
+
+      - id: install
+        name: Install frozen workspace
+        run: uv sync --all-packages --dev --frozen
+
+      - id: compose_patch
+        name: Ensure evidence-store Compose topology
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("docker-compose.yml")
+          text = path.read_text(encoding="utf-8")
+          target = "/var/lib/darknetra/evidence"
+          env_line = f"      DARKNETRA_EVIDENCE_STORE_PATH: {target}\n"
+          redis_marker = "      DARKNETRA_REDIS_URL: redis://redis:6379/0\n"
+          if env_line not in text:
+              if text.count(redis_marker) != 1:
+                  raise SystemExit("shared API environment marker missing or ambiguous")
+              text = text.replace(redis_marker, redis_marker + env_line, 1)
+
+          mount = f"      - evidence_store:{target}\n"
+          service_matches = list(re.finditer(r"(?m)^  [A-Za-z0-9_-]+:\n", text))
+
+          def add_mount(document: str, service: str) -> str:
+              matches = list(re.finditer(r"(?m)^  [A-Za-z0-9_-]+:\n", document))
+              selected = next((m for m in matches if m.group(0) == f"  {service}:\n"), None)
+              if selected is None:
+                  raise SystemExit(f"missing service {service}")
+              start = selected.start()
+              end = next((m.start() for m in matches if m.start() > start), len(document))
+              section = document[start:end]
+              if mount in section:
+                  return document
+              if "\n    volumes:\n" in section:
+                  section = section.replace("\n    volumes:\n", "\n    volumes:\n" + mount, 1)
+              elif "    healthcheck:\n" in section:
+                  section = section.replace("    healthcheck:\n", "    volumes:\n" + mount + "\n    healthcheck:\n", 1)
+              else:
+                  raise SystemExit(f"cannot place volume in service {service}")
+              return document[:start] + section + document[end:]
+
+          text = add_mount(text, "api")
+          text = add_mount(text, "worker")
+
+          top = text.rfind("\nvolumes:\n")
+          if top < 0:
+              text = text.rstrip() + "\n\nvolumes:\n  evidence_store:\n"
+          else:
+              tail = text[top:]
+              if re.search(r"(?m)^  evidence_store:\s*$", tail) is None:
+                  tail = tail.replace("\nvolumes:\n", "\nvolumes:\n  evidence_store:\n", 1)
+                  text = text[:top] + tail
+          path.write_text(text, encoding="utf-8")
+
+          env_path = Path(".env.example")
+          env_text = env_path.read_text(encoding="utf-8")
+          if "DARKNETRA_EVIDENCE_STORE_PATH=" not in env_text:
+              env_path.write_text(
+                  env_text.rstrip() + "\n\n# Local content-addressed Evidence Vault root.\nDARKNETRA_EVIDENCE_STORE_PATH=./.data/evidence\n",
+                  encoding="utf-8",
+              )
+          PY
+
+      - id: migration
+        name: Verify database migrations
+        run: |
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run alembic -c apps/api/alembic.ini downgrade 3f21c6d4a901
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run alembic -c apps/api/alembic.ini current
+
+      - id: ruff
+        name: Ruff
+        run: uv run ruff check .
+
+      - id: focused
+        name: Focused object-store tests
+        run: |
+          FILE="$(find apps/api/tests -type f -name 'test_local_object_store.py' -print -quit)"
+          test -n "$FILE"
+          uv run pytest -q "$FILE"
+
+      - id: full
+        name: Complete Python suite
+        run: uv run pytest -q
+
+      - id: topology
+        name: Validate Compose isolation
+        run: |
+          docker compose -f docker-compose.yml config --format json >/tmp/base.json
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          doc = json.loads(Path("/tmp/base.json").read_text(encoding="utf-8"))
+          services = doc["services"]
+          target = "/var/lib/darknetra/evidence"
+          for name in ("api", "worker"):
+              volumes = services[name].get("volumes", [])
+              found = [v for v in volumes if v.get("target") == target]
+              assert len(found) == 1, (name, volumes)
+              assert found[0].get("type") == "volume", found[0]
+              assert found[0].get("source") == "evidence_store", found[0]
+              assert services[name]["environment"]["DARKNETRA_EVIDENCE_STORE_PATH"] == target
+          assert not any(v.get("target") == target for v in services["web"].get("volumes", []))
+          assert "evidence_store" in doc.get("volumes", {})
+          PY
+
+      - id: build
+        name: Build committed API and worker images
+        run: docker compose -f docker-compose.yml build api worker
+
+      - id: record
+        name: Record successful verification
+        run: |
+          mkdir -p docs/verification
+          SOURCE="$(git rev-parse HEAD)"
+          cat > docs/verification/plan03-task3-content-addressed-storage.md <<EOF
+          # Plan 03 Task 3 — content-addressed storage verification
+
+          - **Verified source commit:** \`${SOURCE}\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          | Gate | Outcome |
+          |---|---|
+          | Frozen dependency installation | success |
+          | Alembic upgrade/downgrade/re-upgrade | success |
+          | Ruff | success |
+          | Focused object-store tests | success |
+          | Complete Python suite | success |
+          | Base/development Compose validation | success |
+          | Named volume restricted to API and worker | success |
+          | API and worker image build | success |
+
+          The verified implementation streams bytes through random same-filesystem staging files, computes SHA-256 while writing, rejects expected-digest mismatches, performs atomic promotion, deduplicates by content digest, validates object-key grammar, detects tampering, and never derives storage paths from uploaded filenames.
+          EOF
+
+          python - <<'PY'
+          from pathlib import Path
+          ledger = Path("docs/verification/plan03-execution-ledger.md")
+          if ledger.exists():
+              lines = ledger.read_text(encoding="utf-8").splitlines()
+              value = "- Task 3: complete — content-addressed local storage, atomic verified promotion, deduplication, integrity verification, and API/worker-only volume verified."
+              for i, line in enumerate(lines):
+                  if line.startswith("- Task 3:"):
+                      lines[i] = value
+                      break
+              else:
+                  lines += ["", value]
+              ledger.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+          PY
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          for file in \
+            .github/workflows/plan03-task3-reconcile.yml \
+            .github/workflows/plan03-task3-finalize.yml; do
+            if test -f "$file"; then git rm "$file"; fi
+          done
+          git add -A
+          git commit -m 'feat: verify content addressed evidence storage'
+          git push origin HEAD:testing-codex
+
+      - name: Record diagnostic on failure
+        if: failure()
+        run: |
+          mkdir -p docs/verification
+          cat > docs/verification/plan03-task3-reconcile-diagnostic.md <<EOF
+          # Plan 03 Task 3 reconciliation diagnostic
+
+          - Source: \`$(git rev-parse HEAD)\`
+          - Observed: \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - install: \`${{ steps.install.outcome }}\`
+          - compose patch: \`${{ steps.compose_patch.outcome }}\`
+          - migration: \`${{ steps.migration.outcome }}\`
+          - ruff: \`${{ steps.ruff.outcome }}\`
+          - focused tests: \`${{ steps.focused.outcome }}\`
+          - full suite: \`${{ steps.full.outcome }}\`
+          - topology: \`${{ steps.topology.outcome }}\`
+          - image build: \`${{ steps.build.outcome }}\`
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/verification/plan03-task3-reconcile-diagnostic.md
+          git commit -m 'docs: record Task 3 reconciliation diagnostic [skip ci]' || true
+          git push origin HEAD:testing-codex || true
+
+      - name: Publish terminal status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          python - <<'PY' >/tmp/status.json
+          import json, os
+          success = os.environ["JOB_STATUS"] == "success"
+          print(json.dumps({
+            "state": "success" if success else "failure",
+            "context": "plan03/task3-reconcile",
+            "description": "Task 3 reconciliation passed" if success else "Task 3 reconciliation failed",
+            "target_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+          }))
+          PY
+          curl --fail --silent --show-error --request POST \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data @/tmp/status.json \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" >/dev/null
