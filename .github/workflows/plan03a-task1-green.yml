@@ -1,5 +1,6 @@
 name: Plan 03a Task 1 encryption GREEN gate
 
+# Rerun after lint fixes with a disposable PostgreSQL service for the complete regression suite.
 on:
   push:
     branches: [testing-codex]
@@ -12,6 +13,23 @@ permissions:
 jobs:
   verify-green:
     runs-on: ubuntu-latest
+    env:
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-plan03a@127.0.0.1:5432/darknetra_plan03a_test
+      DARKNETRA_E2E_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-plan03a@127.0.0.1:5432/darknetra_plan03a_test
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03a_test
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-plan03a
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03a_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,6 +50,11 @@ jobs:
         if: steps.lock.outcome == 'success'
         continue-on-error: true
         run: uv sync --all-packages --dev --frozen
+      - id: migrate
+        name: Migrate disposable regression database
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: uv run alembic -c apps/api/alembic.ini upgrade head
       - id: focused
         name: Sensitive-field encryption tests
         if: steps.prepare.outcome == 'success'
@@ -50,7 +73,7 @@ jobs:
           uv run ruff check apps/api/darknetra_api/security/encryption.py apps/api/darknetra_api/config.py apps/api/tests/unit/test_sensitive_field_encryption.py 2>&1 | tee /tmp/plan03a-task1-ruff.log
       - id: regression
         name: Complete Python regression suite
-        if: steps.prepare.outcome == 'success'
+        if: steps.migrate.outcome == 'success'
         continue-on-error: true
         shell: bash
         run: |
@@ -61,6 +84,7 @@ jobs:
         env:
           LOCK: ${{ steps.lock.outcome }}
           PREPARE: ${{ steps.prepare.outcome }}
+          MIGRATE: ${{ steps.migrate.outcome }}
           FOCUSED: ${{ steps.focused.outcome }}
           RUFF: ${{ steps.ruff.outcome }}
           REGRESSION: ${{ steps.regression.outcome }}
@@ -71,6 +95,7 @@ jobs:
             echo
             echo "- dependency lock: ${LOCK}"
             echo "- locked installation: ${PREPARE}"
+            echo "- disposable DB migration: ${MIGRATE}"
             echo "- focused encryption tests: ${FOCUSED}"
             echo "- Ruff: ${RUFF}"
             echo "- complete Python regression: ${REGRESSION}"
@@ -90,7 +115,7 @@ jobs:
             echo '## Regression tail'
             echo
             echo '```text'
-            tail -n 40 /tmp/plan03a-task1-regression.log 2>/dev/null || true
+            tail -n 50 /tmp/plan03a-task1-regression.log 2>/dev/null || true
             echo '```'
           } > docs/verification/plan03a-task1-encryption.md
           git config user.name 'github-actions[bot]'
@@ -105,12 +130,14 @@ jobs:
         env:
           LOCK: ${{ steps.lock.outcome }}
           PREPARE: ${{ steps.prepare.outcome }}
+          MIGRATE: ${{ steps.migrate.outcome }}
           FOCUSED: ${{ steps.focused.outcome }}
           RUFF: ${{ steps.ruff.outcome }}
           REGRESSION: ${{ steps.regression.outcome }}
         run: |
           test "$LOCK" = success
           test "$PREPARE" = success
+          test "$MIGRATE" = success
           test "$FOCUSED" = success
           test "$RUFF" = success
           test "$REGRESSION" = success
