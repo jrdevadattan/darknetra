@@ -1,7 +1,6 @@
 import base64
 
 import pytest
-
 from darknetra_api.security.encryption import (
     EncryptedValue,
     SensitiveFieldConfigurationError,
