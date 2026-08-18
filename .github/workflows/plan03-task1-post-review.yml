@@ -1,0 +1,181 @@
+name: Plan 03 Task 1 post-review verification
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task1-post-review.yml
+
+permissions:
+  contents: write
+  statuses: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-post-review@127.0.0.1:5432/darknetra_plan03_post_review_test
+      DARKNETRA_E2E_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-post-review@127.0.0.1:5432/darknetra_plan03_post_review_test
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_post_review_test
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-post-review
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_post_review_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - name: Publish run locator
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY' > /tmp/status.json
+          import json, os
+          print(json.dumps({
+              "state": "pending",
+              "context": "plan03/task1-post-review",
+              "description": f"GitHub Actions run {os.environ['GITHUB_RUN_ID']}",
+              "target_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+          }))
+          PY
+          curl --fail --silent --show-error --request POST \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data @/tmp/status.json \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" >/dev/null
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key():
+              return base64.b64encode(secrets.token_bytes(32)).decode('ascii')
+          jwt = key(); field = key(); blind = key()
+          for value in (jwt, field, blind):
+              print(f'::add-mask::{value}')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              output.write(f'DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n')
+              output.write(f'DARKNETRA_FIELD_KEY_V1_B64={field}\n')
+              output.write(f'DARKNETRA_FIELD_KEYRING_B64_JSON={json.dumps({"v1": field}, separators=(",", ":"))}\n')
+              output.write('DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n')
+              output.write(f'DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n')
+          PY
+      - id: prepare
+        name: Install locked workspace
+        run: uv sync --all-packages --dev --frozen
+      - id: migration
+        name: Verify migrations
+        run: |
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run alembic -c apps/api/alembic.ini downgrade 670002e45670
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run alembic -c apps/api/alembic.ini current
+      - id: ruff
+        name: Ruff
+        run: uv run ruff check .
+      - id: pytest
+        name: Complete Python suite
+        run: uv run pytest -q
+      - id: compose
+        name: Build and verify committed worker image
+        run: |
+          docker compose -p darknetra-task1-post-review \
+            -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -p darknetra-task1-post-review \
+            -f docker-compose.yml -f docker-compose.dev.yml build api worker
+          docker compose -p darknetra-task1-post-review \
+            -f docker-compose.yml -f docker-compose.dev.yml \
+            up -d --no-build --wait --wait-timeout 180 postgres redis worker
+          docker compose -p darknetra-task1-post-review \
+            -f docker-compose.yml -f docker-compose.dev.yml \
+            exec -T worker sh -lc \
+            'python -c "import darknetra_api; print(darknetra_api.__name__)" && uv run --no-sync celery -A darknetra_api.jobs.celery_app:celery_app inspect ping -d "ingest@$HOSTNAME" --timeout=10 | grep -q pong'
+      - name: Teardown worker stack
+        if: always()
+        run: |
+          docker compose -p darknetra-task1-post-review \
+            -f docker-compose.yml -f docker-compose.dev.yml down -v --remove-orphans
+      - name: Record verified outcome and clean one-shot workflows
+        if: success()
+        run: |
+          mkdir -p docs/verification
+          cat > docs/verification/plan03-task1-post-review.md <<EOF
+          # Plan 03 Task 1 — post-review runtime verification
+
+          - **Verified commit:** \`$(git rev-parse HEAD)\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          | Gate | Outcome |
+          |---|---|
+          | Frozen Python workspace | success |
+          | Alembic upgrade/downgrade/upgrade | success |
+          | Ruff | success |
+          | Complete Python suite | success |
+          | Compose configuration | success |
+          | API/worker image build | success |
+          | Worker can import \`darknetra_api\` | success |
+          | Real Celery worker inspect ping | success |
+          | Stack teardown | success |
+
+          The review-discovered container import gap is fixed by setting \`PYTHONPATH=/app/apps/api\` in the shared API image. Permanent CI now starts and pings the actual Celery worker rather than only building its image.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/verification/plan03-task1-post-review.md
+          git rm .github/workflows/plan03-task1-post-review.yml
+          if test -f .github/workflows/plan03-task1-redis-repair.yml; then
+            git rm .github/workflows/plan03-task1-redis-repair.yml
+          fi
+          git commit -m 'docs: verify Task 1 post-review worker runtime [skip ci]'
+          git push origin HEAD:testing-codex
+      - name: Publish terminal status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          python - <<'PY' > /tmp/status.json
+          import json, os
+          success = os.environ['JOB_STATUS'] == 'success'
+          print(json.dumps({
+              "state": "success" if success else "failure",
+              "context": "plan03/task1-post-review",
+              "description": "Post-review worker gate passed" if success else "Post-review worker gate failed",
+              "target_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+          }))
+          PY
+          curl --fail --silent --show-error --request POST \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data @/tmp/status.json \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" >/dev/null
