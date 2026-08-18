@@ -4,7 +4,7 @@
 - locked installation: success
 - disposable DB migration: success
 - focused keyring tests: success
-- Ruff: failure
+- Ruff: success
 - complete Python regression: success
 
 ## Focused tests
@@ -25,35 +25,12 @@ apps/api/tests/unit/test_sensitive_field_keyring.py::test_unknown_key_version_fa
 apps/api/tests/unit/test_sensitive_field_keyring.py::test_base64_mapping_builds_versioned_runtime_keyring PASSED [ 80%]
 apps/api/tests/unit/test_sensitive_field_keyring.py::test_empty_or_invalid_keyring_fails_closed PASSED [100%]
 
-============================== 5 passed in 0.83s ===============================
+============================== 5 passed in 0.75s ===============================
 ```
 
 ## Ruff
 ```text
-I001 [*] Import block is un-sorted or un-formatted
-  --> apps/api/tests/unit/test_sensitive_field_keyring.py:1:1
-   |
- 1 | / import base64
- 2 | |
- 3 | | import pytest
- 4 | |
- 5 | | from darknetra_api.security.encryption import (
- 6 | |     EncryptedValue,
- 7 | |     SensitiveFieldConfigurationError,
- 8 | |     SensitiveFieldCrypto,
- 9 | |     UnknownKeyVersionError,
-10 | | )
-11 | | from darknetra_api.security.keyring import SensitiveFieldKeyring
-   | |________________________________________________________________^
-help: Organize imports
-  |
-3 | import pytest
-  -
-4 | from darknetra_api.security.encryption import (
-  |
-
-Found 1 error.
-[*] 1 fixable with the `--fix` option.
+All checks passed!
 ```
 
 ## Full suite
@@ -66,5 +43,5 @@ Found 1 error.
     from starlette.testclient import TestClient as TestClient  # noqa
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-88 passed, 1 warning in 8.85s
+88 passed, 1 warning in 8.60s
 ```
