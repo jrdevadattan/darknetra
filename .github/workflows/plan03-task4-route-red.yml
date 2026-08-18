@@ -1,0 +1,277 @@
+name: Plan 03 Task 4 authenticated upload route RED gate
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task4-route-red.yml
+
+permissions:
+  contents: write
+
+jobs:
+  red:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-route-red@127.0.0.1:5432/darknetra_route_red
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_route_red
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-route-red
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_route_red"
+          --health-interval 5s --health-timeout 3s --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode('ascii')
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f'::add-mask::{value}')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              output.write(f'DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n')
+              output.write(f'DARKNETRA_FIELD_KEY_V1_B64={field}\n')
+              output.write('DARKNETRA_FIELD_KEYRING_B64_JSON=' + json.dumps({'v1': field}, separators=(',', ':')) + '\n')
+              output.write('DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n')
+              output.write(f'DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n')
+          PY
+      - name: Require bounded preservation boundary
+        run: |
+          test -f docs/verification/plan03-task4-bounded-stream-green.md
+          test -f apps/api/darknetra_api/services/evidence_ingest.py
+      - name: Install and migrate
+        run: |
+          uv sync --all-packages --dev --frozen
+          uv run alembic -c apps/api/alembic.ini upgrade head
+      - name: Define route contract
+        run: |
+          cat > apps/api/tests/integration/test_evidence_upload_route.py <<'PYTEST'
+          from __future__ import annotations
+
+          import io
+          import json
+          from datetime import UTC, datetime
+          from pathlib import Path
+          from uuid import uuid4
+
+          import httpx
+          import pytest
+          import sqlalchemy as sa
+          from fastapi import FastAPI
+
+          from darknetra_api.db.session import async_session_factory
+          from darknetra_api.models.audit import AuditEvent
+          from darknetra_api.models.auth_session import AuthSession
+          from darknetra_api.models.case import Case
+          from darknetra_api.models.case_membership import CaseMembership, CaseMembershipRole
+          from darknetra_api.models.custody import CustodyEvent
+          from darknetra_api.models.enums import CaseSensitivity
+          from darknetra_api.models.evidence import EvidenceArtifact, EvidenceDerivation, EvidenceSourceClass
+          from darknetra_api.models.job import Job
+          from darknetra_api.models.user import User
+          from darknetra_api.policy.ingestion import EvidenceUploadPolicy
+          from darknetra_api.routes.evidence import (
+              current_user_dependency,
+              csrf_dependency,
+              get_evidence_job_publisher,
+              get_evidence_object_store,
+              get_evidence_upload_policy,
+              router,
+              session_dependency,
+          )
+          from darknetra_api.security.encryption import SensitiveFieldCrypto
+          from darknetra_api.storage.local import LocalObjectStore
+
+
+          async def _clean() -> None:
+              async with async_session_factory() as session:
+                  await session.execute(sa.delete(CustodyEvent))
+                  await session.execute(sa.delete(EvidenceDerivation))
+                  await session.execute(sa.delete(EvidenceArtifact))
+                  await session.execute(sa.delete(Job))
+                  await session.execute(sa.delete(CaseMembershipRole))
+                  await session.execute(sa.delete(CaseMembership))
+                  await session.execute(sa.delete(AuditEvent))
+                  await session.execute(sa.delete(Case))
+                  await session.execute(sa.delete(AuthSession))
+                  await session.execute(sa.delete(User))
+                  await session.commit()
+
+
+          @pytest.fixture(autouse=True)
+          async def clean_database() -> None:
+              await _clean()
+              yield
+              await _clean()
+
+
+          async def _seed_case() -> tuple[User, Case]:
+              async with async_session_factory() as session:
+                  username = f'route-owner-{uuid4().hex[:10]}'
+                  owner = User(
+                      username=username,
+                      username_normalized=username.casefold(),
+                      display_name='Synthetic Route Owner',
+                      password_hash='unused',
+                      global_roles=[],
+                      is_active=True,
+                      must_change_password=False,
+                  )
+                  session.add(owner)
+                  await session.flush()
+                  case = Case(
+                      case_code=f'UPL-{uuid4().hex[:10].upper()}',
+                      title='Synthetic route case',
+                      sensitivity=CaseSensitivity.RESTRICTED,
+                      owner_user_id=owner.id,
+                      source_authority_summary='Authorized route test',
+                  )
+                  session.add(case)
+                  await session.commit()
+                  await session.refresh(owner)
+                  await session.refresh(case)
+                  return owner, case
+
+
+          def _metadata(*, declared_size_bytes: int, authority_reference: str | None = None) -> str:
+              return json.dumps(
+                  {
+                      'source': {
+                          'source_class': EvidenceSourceClass.SYNTHETIC.value,
+                          'source_type': 'synthetic.fixture',
+                          'acquisition_method': 'authorized_test_generation',
+                          'authority_reference': authority_reference,
+                      },
+                      'captured_at': datetime.now(UTC).isoformat(),
+                      'original_timezone': 'UTC',
+                      'source_locator': 'synthetic://route/evidence',
+                      'notes': 'Restricted synthetic route note',
+                      'tool_name': 'darknetra-route-tests',
+                      'tool_version': '1.0.0',
+                      'declared_size_bytes': declared_size_bytes,
+                  }
+              )
+
+
+          async def _app(owner: User, tmp_path: Path, *, max_bytes: int = 1024) -> FastAPI:
+              app = FastAPI()
+              app.include_router(router)
+
+              async def actor_override() -> User:
+                  return owner
+
+              async def csrf_override() -> None:
+                  return None
+
+              async def session_override():
+                  async with async_session_factory() as session:
+                      yield session
+
+              async def publisher_override():
+                  async def publish(_):
+                      return None
+                  return publish
+
+              app.dependency_overrides[current_user_dependency] = actor_override
+              app.dependency_overrides[csrf_dependency] = csrf_override
+              app.dependency_overrides[session_dependency] = session_override
+              app.dependency_overrides[get_evidence_object_store] = lambda: LocalObjectStore(tmp_path)
+              app.dependency_overrides[get_evidence_upload_policy] = lambda: EvidenceUploadPolicy(
+                  max_upload_bytes=max_bytes
+              )
+              app.dependency_overrides[get_evidence_job_publisher] = publisher_override
+              return app
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_authenticated_multipart_upload_returns_only_safe_identifiers(tmp_path: Path) -> None:
+              owner, case = await _seed_case()
+              app = await _app(owner, tmp_path)
+              payload = b'authorized route evidence'
+              transport = httpx.ASGITransport(app=app)
+              async with httpx.AsyncClient(transport=transport, base_url='http://api.test') as client:
+                  response = await client.post(
+                      f'/api/v1/cases/{case.id}/evidence',
+                      data={'metadata': _metadata(declared_size_bytes=len(payload))},
+                      files={'file': ('capture.txt', payload, 'text/plain')},
+                      headers={'X-Request-ID': 'task4-route-success'},
+                  )
+              assert response.status_code == 202
+              body = response.json()
+              assert set(body) == {'evidence_id', 'job_id', 'state', 'dispatch_state'}
+              assert body['state'] == 'PRESERVED'
+              assert 'object_key' not in body
+              assert 'ciphertext' not in json.dumps(body).casefold()
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_route_rejects_oversize_mime_mismatch_and_invalid_metadata(tmp_path: Path) -> None:
+              owner, case = await _seed_case()
+              app = await _app(owner, tmp_path, max_bytes=8)
+              transport = httpx.ASGITransport(app=app)
+              async with httpx.AsyncClient(transport=transport, base_url='http://api.test') as client:
+                  oversize = await client.post(
+                      f'/api/v1/cases/{case.id}/evidence',
+                      data={'metadata': _metadata(declared_size_bytes=9)},
+                      files={'file': ('large.txt', b'123456789', 'text/plain')},
+                  )
+                  mismatch = await client.post(
+                      f'/api/v1/cases/{case.id}/evidence',
+                      data={'metadata': _metadata(declared_size_bytes=5)},
+                      files={'file': ('fake.pdf', b'hello', 'application/pdf')},
+                  )
+                  invalid = await client.post(
+                      f'/api/v1/cases/{case.id}/evidence',
+                      data={'metadata': '{not-json'},
+                      files={'file': ('capture.txt', b'hello', 'text/plain')},
+                  )
+              assert oversize.status_code == 413
+              assert mismatch.status_code == 415
+              assert invalid.status_code == 422
+              async with async_session_factory() as session:
+                  assert (await session.scalar(sa.select(sa.func.count()).select_from(EvidenceArtifact))) == 0
+                  assert (await session.scalar(sa.select(sa.func.count()).select_from(Job))) == 0
+          PYTEST
+      - name: Prove RED
+        run: |
+          set +e
+          uv run pytest -q apps/api/tests/integration/test_evidence_upload_route.py > /tmp/red.txt 2>&1
+          code=$?
+          set -e
+          cat /tmp/red.txt
+          test "$code" -ne 0
+          grep -Eq 'routes\.evidence|ModuleNotFoundError|ImportError' /tmp/red.txt
+      - name: Commit RED contract
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          cat > docs/verification/plan03-task4-route-red.md <<EOF
+          # Plan 03 Task 4 — authenticated multipart route RED verification
+
+          The route contract was observed failing before \`darknetra_api.routes.evidence\` existed. It requires a case-scoped, CSRF-protected multipart endpoint, safe 202 response, and fail-closed 413/415/422 handling without creating authoritative rows.
+          EOF
+          git add apps/api/tests/integration/test_evidence_upload_route.py docs/verification/plan03-task4-route-red.md
+          git rm .github/workflows/plan03-task4-route-red.yml
+          git commit -m 'test: define authenticated evidence upload route [skip ci]'
+          git push origin HEAD:testing-codex
