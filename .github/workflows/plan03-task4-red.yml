@@ -1,0 +1,289 @@
+name: Plan 03 Task 4 upload policy RED gate
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task4-red.yml
+
+permissions:
+  contents: write
+  statuses: write
+
+jobs:
+  red:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task4-red@127.0.0.1:5432/darknetra_plan03_task4_red
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task4_red
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task4-red
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task4_red"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Publish run locator
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY' > /tmp/status.json
+          import json, os
+          print(json.dumps({
+              "state": "pending",
+              "context": "plan03/task4-red",
+              "description": f"GitHub Actions run {os.environ['GITHUB_RUN_ID']}",
+              "target_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+          }))
+          PY
+          curl --fail --silent --show-error --request POST \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data @/tmp/status.json \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" >/dev/null
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key() -> str:
+              return base64.b64encode(secrets.token_bytes(32)).decode('ascii')
+          jwt = key(); field = key(); blind = key()
+          for value in (jwt, field, blind):
+              print(f'::add-mask::{value}')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              output.write(f'DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n')
+              output.write(f'DARKNETRA_FIELD_KEY_V1_B64={field}\n')
+              output.write('DARKNETRA_FIELD_KEYRING_B64_JSON=' + json.dumps({'v1': field}, separators=(',', ':')) + '\n')
+              output.write('DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n')
+              output.write(f'DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n')
+          PY
+
+      - name: Require the verified Task 3 boundary
+        run: |
+          set -euo pipefail
+          test -f docs/verification/plan03-task3-content-addressed-storage.md
+          test -f apps/api/darknetra_api/storage/local.py
+          test -f apps/api/tests/unit/test_local_object_store.py
+          grep -q 'evidence_store:/var/lib/darknetra/evidence' docker-compose.yml
+          test "$(grep -c 'evidence_store:/var/lib/darknetra/evidence' docker-compose.yml)" -eq 2
+
+      - name: Install locked workspace and verify Task 3 remains green
+        run: |
+          uv sync --all-packages --dev --frozen
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run pytest -q apps/api/tests/unit/test_local_object_store.py
+
+      - name: Write the first Task 4 policy contract
+        run: |
+          mkdir -p apps/api/tests/unit
+          cat > apps/api/tests/unit/test_ingestion_policy.py <<'PYTEST'
+          from __future__ import annotations
+
+          import io
+
+          import pytest
+          from pydantic import ValidationError
+
+          from darknetra_api.models.evidence import EvidenceSourceClass
+          from darknetra_api.policy.ingestion import (
+              HARD_MAX_UPLOAD_BYTES,
+              DEFAULT_MAX_UPLOAD_BYTES,
+              EvidenceSourceMetadata,
+              EvidenceUploadPolicy,
+              IngestionPolicyError,
+              SupportedEvidenceType,
+              detect_evidence_type,
+          )
+
+
+          def test_upload_policy_uses_bounded_mvp_defaults() -> None:
+              policy = EvidenceUploadPolicy()
+              assert DEFAULT_MAX_UPLOAD_BYTES == 100 * 1024 * 1024
+              assert HARD_MAX_UPLOAD_BYTES == 500 * 1024 * 1024
+              assert policy.max_upload_bytes == DEFAULT_MAX_UPLOAD_BYTES
+
+              with pytest.raises(ValueError):
+                  EvidenceUploadPolicy(max_upload_bytes=0)
+              with pytest.raises(ValueError):
+                  EvidenceUploadPolicy(max_upload_bytes=HARD_MAX_UPLOAD_BYTES + 1)
+
+
+          def test_declared_and_streamed_size_limits_fail_closed() -> None:
+              policy = EvidenceUploadPolicy(max_upload_bytes=8)
+              policy.validate_declared_size(8)
+
+              with pytest.raises(IngestionPolicyError, match='empty'):
+                  policy.validate_declared_size(0)
+              with pytest.raises(IngestionPolicyError, match='maximum'):
+                  policy.validate_declared_size(9)
+              with pytest.raises(IngestionPolicyError, match='maximum'):
+                  policy.read_bounded(io.BytesIO(b'123456789'))
+
+              assert policy.read_bounded(io.BytesIO(b'12345678')) == b'12345678'
+
+
+          @pytest.mark.parametrize(
+              'source_class',
+              [EvidenceSourceClass.PUBLIC_OBSERVATION, EvidenceSourceClass.AUTHORIZED_IMPORT],
+          )
+          def test_authority_reference_is_required_for_external_sources(source_class: EvidenceSourceClass) -> None:
+              with pytest.raises(ValidationError):
+                  EvidenceSourceMetadata(
+                      source_class=source_class,
+                      source_type='authorized.web.capture',
+                      acquisition_method='authorized_read_only_import',
+                      authority_reference=None,
+                  )
+
+              metadata = EvidenceSourceMetadata(
+                  source_class=source_class,
+                  source_type='authorized.web.capture',
+                  acquisition_method='authorized_read_only_import',
+                  authority_reference='AUTH-REF-001',
+              )
+              assert metadata.authority_reference == 'AUTH-REF-001'
+
+
+          def test_synthetic_source_does_not_fabricate_an_authority_requirement() -> None:
+              metadata = EvidenceSourceMetadata(
+                  source_class=EvidenceSourceClass.SYNTHETIC,
+                  source_type='synthetic.fixture',
+                  acquisition_method='authorized_test_generation',
+              )
+              assert metadata.authority_reference is None
+
+
+          @pytest.mark.parametrize(
+              ('payload', 'declared_name', 'expected'),
+              [
+                  (b'\x89PNG\r\n\x1a\n' + b'x' * 20, 'misleading.txt', SupportedEvidenceType.PNG),
+                  (b'\xff\xd8\xff\xe0' + b'x' * 20, 'misleading.bin', SupportedEvidenceType.JPEG),
+                  (b'RIFF\x10\x00\x00\x00WEBPVP8 ' + b'x' * 16, 'misleading.jpg', SupportedEvidenceType.WEBP),
+                  (b'%PDF-1.7\n1 0 obj\n', 'misleading.txt', SupportedEvidenceType.PDF),
+                  (b'PK\x03\x04' + b'x' * 20, 'misleading.json', SupportedEvidenceType.ZIP),
+                  (b'<!doctype html><html><body>safe</body></html>', 'capture.txt', SupportedEvidenceType.HTML),
+                  (b'{"messages": []}', 'export.txt', SupportedEvidenceType.JSON),
+                  (b'column_a,column_b\n1,2\n', 'records.txt', SupportedEvidenceType.CSV),
+                  (b'plain authorized text\n', 'note.bin', SupportedEvidenceType.TEXT),
+              ],
+          )
+          def test_detection_uses_bytes_not_the_caller_filename(
+              payload: bytes,
+              declared_name: str,
+              expected: SupportedEvidenceType,
+          ) -> None:
+              detected = detect_evidence_type(payload, declared_filename=declared_name)
+              assert detected.evidence_type is expected
+              assert detected.media_type
+              assert detected.parser_family
+
+
+          def test_empty_binary_and_executable_payloads_are_rejected() -> None:
+              with pytest.raises(IngestionPolicyError, match='empty'):
+                  detect_evidence_type(b'', declared_filename='empty.txt')
+              with pytest.raises(IngestionPolicyError, match='unsupported'):
+                  detect_evidence_type(b'MZ' + b'\x00' * 64, declared_filename='report.pdf')
+              with pytest.raises(IngestionPolicyError, match='unsupported'):
+                  detect_evidence_type(b'\x7fELF' + b'\x00' * 64, declared_filename='image.png')
+          PYTEST
+
+      - name: Prove the new contract is RED for the missing Task 4 implementation
+        id: red
+        run: |
+          set +e
+          uv run pytest -q apps/api/tests/unit/test_ingestion_policy.py > /tmp/task4-red.txt 2>&1
+          EXIT_CODE=$?
+          set -e
+          cat /tmp/task4-red.txt
+          test "$EXIT_CODE" -ne 0
+          grep -Eq 'darknetra_api\.policy\.ingestion|ModuleNotFoundError|ImportError' /tmp/task4-red.txt
+
+      - name: Commit the verified RED contract
+        if: success()
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          mkdir -p docs/verification
+          cat > docs/verification/plan03-task4-upload-policy-red.md <<EOF
+          # Plan 03 Task 4 — upload policy RED verification
+
+          - **Parent Task 3 boundary:** verified before this test was introduced.
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          The new policy contract fails for the intended reason: \`darknetra_api.policy.ingestion\` does not yet exist. No Task 4 production implementation was present when the RED gate was recorded.
+
+          The contract defines bounded upload defaults, declared and streamed size enforcement, source-authority requirements, byte-first type detection, filename distrust, and executable/empty-input rejection.
+          EOF
+          python - <<'PY'
+          from pathlib import Path
+          ledger = Path('docs/verification/plan03-execution-ledger.md')
+          if ledger.exists():
+              text = ledger.read_text(encoding='utf-8')
+              text = text.replace('- Task 4: pending.', '- Task 4: in progress — upload-policy contract recorded RED.', 1)
+              ledger.write_text(text, encoding='utf-8')
+          PY
+          git add apps/api/tests/unit/test_ingestion_policy.py docs/verification/plan03-task4-upload-policy-red.md docs/verification/plan03-execution-ledger.md
+          git rm .github/workflows/plan03-task4-red.yml
+          git commit -m 'test: define safe evidence upload policy contract [skip ci]'
+          git push origin HEAD:testing-codex
+
+      - name: Publish terminal status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          python - <<'PY' > /tmp/status.json
+          import json, os
+          success = os.environ['JOB_STATUS'] == 'success'
+          print(json.dumps({
+              "state": "success" if success else "failure",
+              "context": "plan03/task4-red",
+              "description": "Task 4 RED gate recorded" if success else "Task 4 RED gate blocked",
+              "target_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+          }))
+          PY
+          curl --fail --silent --show-error --request POST \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data @/tmp/status.json \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" >/dev/null
