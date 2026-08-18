@@ -5,7 +5,7 @@ import binascii
 import hashlib
 import hmac
 import os
-from collections.abc import Mapping
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -15,13 +15,14 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 if TYPE_CHECKING:
     from darknetra_api.config import Settings
 
-_AES_256_KEY_BYTES = 32
-_AES_GCM_NONCE_BYTES = 12
-_AES_GCM_TAG_BYTES = 16
+_KEY_BYTES = 32
+_NONCE_BYTES = 12
+_MIN_GCM_PAYLOAD_BYTES = 16
+_VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
-class SensitiveFieldError(RuntimeError):
-    """Base error for the sensitive-field cryptographic boundary."""
+class SensitiveFieldError(ValueError):
+    """Base class for fail-closed sensitive-field failures."""
 
 
 class SensitiveFieldConfigurationError(SensitiveFieldError):
@@ -29,109 +30,109 @@ class SensitiveFieldConfigurationError(SensitiveFieldError):
 
 
 class SensitiveFieldDecryptionError(SensitiveFieldError):
-    """Ciphertext cannot be authenticated or decoded for the requested context."""
+    """Ciphertext could not be authenticated and decrypted."""
 
 
-class UnknownKeyVersionError(SensitiveFieldConfigurationError):
-    """An envelope refers to a key version unavailable in the runtime keyring."""
+class UnknownKeyVersionError(SensitiveFieldDecryptionError):
+    """The envelope references a key version unavailable to this process."""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, repr=False)
 class EncryptedValue:
     key_version: str
     nonce_b64: str
     ciphertext_b64: str
 
     def __repr__(self) -> str:
-        return f"EncryptedValue(key_version={self.key_version!r}, nonce=<redacted>, ciphertext=<redacted>)"
+        return (
+            "EncryptedValue("
+            f"key_version={self.key_version!r}, "
+            "nonce_b64='<redacted>', ciphertext_b64='<redacted>')"
+        )
 
 
 def decode_key_b64(value: str, *, variable: str) -> bytes:
-    """Decode one runtime secret and require exactly 256 bits of key material."""
+    """Decode one required base64 key and enforce an exact 256-bit length."""
 
     try:
         decoded = base64.b64decode(value, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise SensitiveFieldConfigurationError(f"{variable} must contain valid base64") from exc
-    if len(decoded) != _AES_256_KEY_BYTES:
+    except (binascii.Error, ValueError, TypeError) as exc:
         raise SensitiveFieldConfigurationError(
-            f"{variable} must decode to exactly {_AES_256_KEY_BYTES} bytes"
+            f"{variable} must contain valid base64 for exactly {_KEY_BYTES} bytes"
+        ) from exc
+    if len(decoded) != _KEY_BYTES:
+        raise SensitiveFieldConfigurationError(
+            f"{variable} must decode to exactly {_KEY_BYTES} bytes"
         )
     return decoded
 
 
 def _validate_context_component(value: str, *, name: str, allow_colon: bool) -> None:
-    if not value:
-        raise ValueError(f"{name} must not be empty")
-    if "\x00" in value:
-        raise ValueError(f"{name} must not contain NUL characters")
-    if not allow_colon and ":" in value:
-        raise ValueError(f"{name} must not contain ':'")
+    if not isinstance(value, str) or not value:
+        raise SensitiveFieldConfigurationError(f"{name} must be a non-empty string")
+    if "\x00" in value or (not allow_colon and ":" in value):
+        raise SensitiveFieldConfigurationError(f"{name} contains a reserved separator")
+
+
+def _validate_key_version(version: str) -> None:
+    if not isinstance(version, str) or not _VERSION_PATTERN.fullmatch(version):
+        raise SensitiveFieldConfigurationError("invalid sensitive-field key version")
+
+
+def _decode_component(value: str, *, name: str) -> bytes:
+    try:
+        return base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError, TypeError) as exc:
+        raise SensitiveFieldDecryptionError("encrypted value is invalid") from exc
 
 
 class SensitiveFieldCrypto:
-    """Explicit AES-256-GCM and keyed blind-index service.
-
-    Plaintext is accepted and returned only at this service boundary. The class keeps
-    no plaintext cache and its representation never exposes runtime key material.
-    """
+    """AES-256-GCM envelope encryption plus a separate HMAC blind index."""
 
     def __init__(
         self,
         *,
-        field_keys: Mapping[str, bytes],
+        field_keys: dict[str, bytes],
         active_key_version: str,
         blind_index_key: bytes,
     ) -> None:
-        _validate_context_component(active_key_version, name="active_key_version", allow_colon=False)
-        validated: dict[str, bytes] = {}
-        for version, key in field_keys.items():
-            _validate_context_component(version, name="key version", allow_colon=False)
-            if len(key) != _AES_256_KEY_BYTES:
-                raise SensitiveFieldConfigurationError(
-                    f"field key {version!r} must contain exactly {_AES_256_KEY_BYTES} bytes"
-                )
-            validated[version] = bytes(key)
-        if active_key_version not in validated:
-            raise UnknownKeyVersionError(
-                f"active sensitive-field key version {active_key_version!r} is not configured"
-            )
-        if len(blind_index_key) != _AES_256_KEY_BYTES:
+        _validate_key_version(active_key_version)
+        if active_key_version not in field_keys:
             raise SensitiveFieldConfigurationError(
-                f"blind-index key must contain exactly {_AES_256_KEY_BYTES} bytes"
+                "active sensitive-field key version is not available"
             )
-        self._field_keys = validated
-        self._active_key_version = active_key_version
-        self._blind_index_key = bytes(blind_index_key)
+        if not field_keys:
+            raise SensitiveFieldConfigurationError("at least one field key is required")
+        for version, key in field_keys.items():
+            _validate_key_version(version)
+            if not isinstance(key, bytes) or len(key) != _KEY_BYTES:
+                raise SensitiveFieldConfigurationError(
+                    f"field key {version!r} must be exactly {_KEY_BYTES} bytes"
+                )
+        if not isinstance(blind_index_key, bytes) or len(blind_index_key) != _KEY_BYTES:
+            raise SensitiveFieldConfigurationError(
+                f"blind-index key must be exactly {_KEY_BYTES} bytes"
+            )
 
-    def __repr__(self) -> str:
-        versions = ",".join(sorted(self._field_keys))
-        return (
-            "SensitiveFieldCrypto("
-            f"active_key_version={self._active_key_version!r}, key_versions={versions!r}, "
-            "key_material=<redacted>)"
-        )
+        self._field_keys = dict(field_keys)
+        self._active_key_version = active_key_version
+        self._blind_index_key = blind_index_key
 
     @property
     def active_key_version(self) -> str:
         return self._active_key_version
 
-    @property
-    def key_versions(self) -> frozenset[str]:
-        return frozenset(self._field_keys)
-
-    @staticmethod
-    def _aad(*, purpose: str, resource_id: str, key_version: str) -> bytes:
+    def _aad(self, *, purpose: str, resource_id: str, key_version: str) -> bytes:
         _validate_context_component(purpose, name="purpose", allow_colon=False)
-        _validate_context_component(resource_id, name="resource_id", allow_colon=True)
-        _validate_context_component(key_version, name="key_version", allow_colon=False)
+        _validate_context_component(resource_id, name="resource_id", allow_colon=False)
+        _validate_key_version(key_version)
         return f"darknetra:{purpose}:{resource_id}:{key_version}".encode()
 
     def encrypt(self, plaintext: str, *, purpose: str, resource_id: str) -> EncryptedValue:
         if not isinstance(plaintext, str):
             raise TypeError("plaintext must be a string")
         version = self._active_key_version
-        nonce = os.urandom(_AES_GCM_NONCE_BYTES)
+        nonce = os.urandom(_NONCE_BYTES)
         aad = self._aad(purpose=purpose, resource_id=resource_id, key_version=version)
         ciphertext = AESGCM(self._field_keys[version]).encrypt(
             nonce,
@@ -145,18 +146,17 @@ class SensitiveFieldCrypto:
         )
 
     def decrypt(self, value: EncryptedValue, *, purpose: str, resource_id: str) -> str:
+        if not isinstance(value, EncryptedValue):
+            raise SensitiveFieldDecryptionError("encrypted value is invalid")
         key = self._field_keys.get(value.key_version)
         if key is None:
             raise UnknownKeyVersionError(
-                f"sensitive-field key version {value.key_version!r} is not configured"
+                f"encrypted value references unavailable key version {value.key_version!r}"
             )
-        try:
-            nonce = base64.b64decode(value.nonce_b64, validate=True)
-            ciphertext = base64.b64decode(value.ciphertext_b64, validate=True)
-        except (binascii.Error, ValueError) as exc:
-            raise SensitiveFieldDecryptionError("encrypted value contains invalid base64") from exc
-        if len(nonce) != _AES_GCM_NONCE_BYTES or len(ciphertext) < _AES_GCM_TAG_BYTES:
-            raise SensitiveFieldDecryptionError("encrypted value has invalid AES-GCM lengths")
+        nonce = _decode_component(value.nonce_b64, name="nonce")
+        ciphertext = _decode_component(value.ciphertext_b64, name="ciphertext")
+        if len(nonce) != _NONCE_BYTES or len(ciphertext) < _MIN_GCM_PAYLOAD_BYTES:
+            raise SensitiveFieldDecryptionError("encrypted value is invalid")
         aad = self._aad(
             purpose=purpose,
             resource_id=resource_id,
@@ -165,9 +165,9 @@ class SensitiveFieldCrypto:
         try:
             plaintext = AESGCM(key).decrypt(nonce, ciphertext, aad)
             return plaintext.decode()
-        except (InvalidTag, UnicodeDecodeError) as exc:
+        except (InvalidTag, UnicodeDecodeError, ValueError) as exc:
             raise SensitiveFieldDecryptionError(
-                "encrypted value failed authentication for the requested context"
+                "encrypted value could not be authenticated"
             ) from exc
 
     def blind_index(self, plaintext: str, *, purpose: str) -> str:
@@ -179,18 +179,9 @@ class SensitiveFieldCrypto:
 
 
 def crypto_from_settings(settings: Settings) -> SensitiveFieldCrypto:
-    """Construct the service from runtime-only settings without retaining base64 strings."""
+    """Construct the service from the complete versioned runtime keyring."""
 
-    field_key = decode_key_b64(
-        settings.require_field_key_v1_b64(),
-        variable="DARKNETRA_FIELD_KEY_V1_B64",
-    )
-    blind_key = decode_key_b64(
-        settings.require_field_blind_index_key_b64(),
-        variable="DARKNETRA_FIELD_BLIND_INDEX_KEY_B64",
-    )
-    return SensitiveFieldCrypto(
-        field_keys={"v1": field_key},
-        active_key_version=settings.field_active_key_version,
-        blind_index_key=blind_key,
-    )
+    # Local import avoids a module cycle: the keyring reuses the primitives above.
+    from darknetra_api.security.keyring import SensitiveFieldKeyring
+
+    return SensitiveFieldKeyring.from_settings(settings).crypto()
