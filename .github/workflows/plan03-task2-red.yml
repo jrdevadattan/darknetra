@@ -1,11 +1,17 @@
 name: Plan 03 Task 2 GREEN gate
 
-# Rerun after PostgreSQL enum creation was made idempotent for Alembic table creation.
 on:
   push:
     branches: [testing-codex]
     paths:
       - .github/workflows/plan03-task2-red.yml
+      - apps/api/darknetra_api/models/evidence.py
+      - apps/api/darknetra_api/models/custody.py
+      - apps/api/darknetra_api/models/__init__.py
+      - apps/api/darknetra_api/schemas/evidence.py
+      - apps/api/darknetra_api/services/evidence.py
+      - apps/api/alembic/versions/8a7f2d91c402_create_evidence_provenance.py
+      - apps/api/tests/integration/test_evidence_provenance.py
 
 permissions:
   contents: read
