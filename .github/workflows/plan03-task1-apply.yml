@@ -104,15 +104,15 @@ jobs:
 
           runner = Path('/tmp/plan03-task1-run.sh')
           text = runner.read_text(encoding='utf-8')
-          apply_line = 'git apply /tmp/plan03-task1.patch\n'
+          apply_line = 'git apply /tmp/plan03-task1.patch' + chr(10)
           correction = '''git apply /tmp/plan03-task1.patch
           python - <<'PY_WORKER_IMPORT_FIX'
           from pathlib import Path
 
           dockerfile = Path('infrastructure/docker/api.Dockerfile')
           docker_text = dockerfile.read_text(encoding='utf-8')
-          anchor = '    UV_NO_PROGRESS=1\n'
-          addition = 'ENV PYTHONPATH=/app/apps/api\n'
+          anchor = '    UV_NO_PROGRESS=1' + chr(10)
+          addition = 'ENV PYTHONPATH=/app/apps/api' + chr(10)
           if addition not in docker_text:
               if docker_text.count(anchor) != 1:
                   raise SystemExit('API Dockerfile environment anchor was not found exactly once')
