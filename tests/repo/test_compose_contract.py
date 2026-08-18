@@ -19,6 +19,12 @@ def test_compose_api_receives_authentication_security_configuration() -> None:
     assert "${DARKNETRA_JWT_SIGNING_KEY_B64:-}" in compose
 
 
+def test_local_example_keeps_browser_and_api_on_the_same_site() -> None:
+    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "DARKNETRA_WEB_ORIGIN=http://localhost:3000" in example
+    assert "NEXT_PUBLIC_DARKNETRA_API_BASE_URL=http://localhost:8000" in example
+
+
 def test_runtime_images_drop_root_privileges() -> None:
     api = (ROOT / "infrastructure" / "docker" / "api.Dockerfile").read_text(encoding="utf-8")
     web = (ROOT / "infrastructure" / "docker" / "web.Dockerfile").read_text(encoding="utf-8")
