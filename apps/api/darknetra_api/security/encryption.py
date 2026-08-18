@@ -122,6 +122,12 @@ class SensitiveFieldCrypto:
     def active_key_version(self) -> str:
         return self._active_key_version
 
+    @property
+    def key_versions(self) -> frozenset[str]:
+        """Expose only the non-secret version identifiers loaded in this process."""
+
+        return frozenset(self._field_keys)
+
     def _aad(self, *, purpose: str, resource_id: str, key_version: str) -> bytes:
         _validate_context_component(purpose, name="purpose", allow_colon=False)
         _validate_context_component(resource_id, name="resource_id", allow_colon=False)
