@@ -1,5 +1,6 @@
 name: Plan 03 Task 2 GREEN gate
 
+# Rerun after PostgreSQL enum creation was made idempotent for Alembic table creation.
 on:
   push:
     branches: [testing-codex]
