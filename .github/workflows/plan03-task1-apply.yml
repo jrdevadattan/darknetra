@@ -1,6 +1,5 @@
 name: Plan 03 Task 1 durable job boundary
 
-# Apply the reviewed payload plus the two evidence-driven corrections, then execute all release gates.
 on:
   push:
     branches: [testing-codex]
@@ -27,7 +26,8 @@ jobs:
           POSTGRES_DB: darknetra_plan03_task1_test
           POSTGRES_USER: darknetra
           POSTGRES_PASSWORD: darknetra-task1
-        ports: ["5432:5432"]
+        ports:
+          - 5432:5432
         options: >-
           --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task1_test"
           --health-interval 5s
@@ -35,7 +35,8 @@ jobs:
           --health-retries 15
       redis:
         image: redis:7.4-alpine
-        ports: ["6379:6379"]
+        ports:
+          - 6379:6379
         options: >-
           --health-cmd "redis-cli ping"
           --health-interval 5s
@@ -53,11 +54,16 @@ jobs:
           python - <<'PY' > /tmp/plan03-task1-status.json
           import json
           import os
+
           print(json.dumps({
               "state": "pending",
               "context": "plan03/task1",
               "description": f"GitHub Actions run {os.environ['GITHUB_RUN_ID']}",
-              "target_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+              "target_url": (
+                  f"{os.environ['GITHUB_SERVER_URL']}/"
+                  f"{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
+                  f"{os.environ['GITHUB_RUN_ID']}"
+              ),
           }))
           PY
           curl --fail --silent --show-error \
@@ -73,88 +79,44 @@ jobs:
       - uses: astral-sh/setup-uv@v10.0.1
         with:
           version: '0.12.4'
-      - name: Execute reviewed Task 1 implementation and release gate
+      - id: task
+        name: Execute reviewed Task 1 implementation and release gate
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
-          import hashlib
-          from pathlib import Path
-
-          raw = Path('.automation/plan03-task1-run.sh.gz.b64').read_text(encoding='ascii')
-          expected = 'e4cf8f5bf83f2af00acf07fe1f3c4c99bc3c730d7d78646c45f09468b7b50935'
-          candidate = None
-          if hashlib.sha256(raw.encode('ascii')).hexdigest() == expected:
-              candidate = raw
-          else:
-              for index in range(len(raw) - 1):
-                  attempt = raw[:index] + raw[index + 2:]
-                  if hashlib.sha256(attempt.encode('ascii')).hexdigest() == expected:
-                      print(f'Removed verified adjacent staging bytes at offset {index}: {raw[index:index + 2]!r}')
-                      candidate = attempt
-                      break
-          if candidate is None:
-              raise SystemExit(
-                  f'runner payload could not be reconciled: length={len(raw)} '
-                  f'sha256={hashlib.sha256(raw.encode("ascii")).hexdigest()}'
-              )
-          Path('/tmp/plan03-task1-run.b64').write_text(candidate, encoding='ascii')
-          PY
-          base64 --decode /tmp/plan03-task1-run.b64 | gzip --decompress > /tmp/plan03-task1-run.sh
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path('/tmp/plan03-task1-run.sh')
-          text = path.read_text(encoding='utf-8')
-
-          start = text.index('record_failure() {')
-          end = text.index("\n}\ntrap 'record_failure", start) + 2
-          safe_handler = '''record_failure() {
-            local exit_code="$1"
-            trap - EXIT
-            cleanup_worker
-            if [[ "$SUCCESS" -eq 0 ]]; then
-              git reset --hard "$ORIGINAL_SHA" >/dev/null
-              mkdir -p docs/verification
-              {
-                echo '# Plan 03 Task 1 diagnostic'
-                echo
-                printf -- '- **Failed stage:** `%s`\\n' "$STAGE"
-                printf -- '- **Source commit:** `%s`\\n' "$ORIGINAL_SHA"
-                printf -- '- **Exit code:** `%s`\\n' "$exit_code"
-                printf -- '- **Observed at (UTC):** `%s`\\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-                echo
-                echo 'The implementation patch remains staged under `.automation` for a subsequent, evidence-driven retry. No unverified production code was committed.'
-              } > docs/verification/plan03-task1-diagnostic.md
-              git config user.name 'github-actions[bot]'
-              git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-              git add docs/verification/plan03-task1-diagnostic.md
-              git commit -m 'docs: record Plan 03 Task 1 diagnostic [skip ci]' >/dev/null
-              git push origin HEAD:testing-codex
-            fi
-            exit "$exit_code"
-          }'''
-          text = text[:start] + safe_handler + text[end:]
-
-          old_apply = '''git apply /tmp/plan03-task1.patch
-git diff --check'''
-          fixed_apply = '''git apply /tmp/plan03-task1.patch
-          python - <<'PY_MIGRATION_FIX'
-          from pathlib import Path
-
-          migration = Path('apps/api/alembic/versions/3f21c6d4a901_create_durable_jobs.py')
-          content = migration.read_text(encoding='utf-8')
-          duplicate = '    job_state.create(op.get_bind(), checkfirst=True)\\n'
-          if content.count(duplicate) != 1:
-              raise SystemExit('expected duplicate job_state creation line was not found exactly once')
-          migration.write_text(content.replace(duplicate, ''), encoding='utf-8')
-          PY_MIGRATION_FIX
-          git diff --check'''
-          if old_apply not in text:
-              raise SystemExit('runner patch-application boundary was not found')
-          text = text.replace(old_apply, fixed_apply, 1)
-          path.write_text(text, encoding='utf-8')
-          PY
+          echo '17511b8f90ac5971aea924109a381bbe9849d1e34bf945ce135749744e76b19b  .automation/plan03-task1-run.sh.gz' | sha256sum -c -
+          echo '3ad632bef88d519c815cd5951199eead92b62f3139b280272b35408bc764a6e2  .automation/plan03-task1.patch.gz' | sha256sum -c -
+          gzip -dc .automation/plan03-task1-run.sh.gz > /tmp/plan03-task1-run.sh
+          echo 'da542a8488d72f9687d0dd3563bb241b05ab972b304a8b9396332ef8698a42ab  /tmp/plan03-task1-run.sh' | sha256sum -c -
           bash -n /tmp/plan03-task1-run.sh
           chmod 700 /tmp/plan03-task1-run.sh
           /tmp/plan03-task1-run.sh
+      - name: Publish terminal workflow status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TASK_OUTCOME: ${{ steps.task.outcome }}
+        run: |
+          python - <<'PY' > /tmp/plan03-task1-terminal-status.json
+          import json
+          import os
+
+          success = os.environ.get('TASK_OUTCOME') == 'success'
+          print(json.dumps({
+              "state": "success" if success else "failure",
+              "context": "plan03/task1",
+              "description": "Task 1 release gate passed" if success else "Task 1 release gate failed",
+              "target_url": (
+                  f"{os.environ['GITHUB_SERVER_URL']}/"
+                  f"{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
+                  f"{os.environ['GITHUB_RUN_ID']}"
+              ),
+          }))
+          PY
+          curl --fail --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data @/tmp/plan03-task1-terminal-status.json \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" >/dev/null
