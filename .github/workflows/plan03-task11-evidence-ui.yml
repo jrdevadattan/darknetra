@@ -1,0 +1,1302 @@
+name: Plan 03 Task 11 investigator evidence workspace TDD
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task11-evidence-ui.yml
+
+permissions:
+  contents: write
+
+jobs:
+  red-green:
+    runs-on: ubuntu-latest
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Require safe evidence read checkpoint
+        run: test -f docs/verification/plan03-task10-evidence-reads.md
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install locked frontend workspace
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.15.0 --activate
+          pnpm install --frozen-lockfile
+
+      - name: Write API and investigator-workspace contracts first
+        run: |
+          mkdir -p apps/web/src/features/evidence
+          cat > apps/web/src/features/evidence/evidence-api.test.ts <<'TS'
+          import { afterEach, describe, expect, it, vi } from 'vitest'
+          import {
+            EvidenceApiError,
+            buildEvidenceContentUrl,
+            buildEvidencePreviewUrl,
+            fetchEvidenceDetail,
+            listEvidence,
+            uploadEvidence,
+            verifyEvidenceIntegrity,
+          } from './evidence-api'
+
+          afterEach(() => {
+            vi.unstubAllGlobals()
+          })
+
+          describe('evidence API client', () => {
+            it('encodes list filters and sends credentialed no-store GET', async () => {
+              const fetchMock = vi.fn().mockResolvedValue({
+                ok: true,
+                json: async () => ({ items: [], next_cursor: null }),
+              })
+              vi.stubGlobal('fetch', fetchMock)
+              await listEvidence('case id', {
+                state: 'READY',
+                sourceClass: 'SYNTHETIC',
+                cursor: 'cursor+/=',
+                limit: 25,
+              })
+              const [url, init] = fetchMock.mock.calls[0]
+              expect(String(url)).toContain('/api/v1/cases/case%20id/evidence?')
+              expect(String(url)).toContain('state=READY')
+              expect(String(url)).toContain('source_class=SYNTHETIC')
+              expect(String(url)).toContain('cursor=cursor%2B%2F%3D')
+              expect(init).toMatchObject({
+                method: 'GET',
+                credentials: 'include',
+                cache: 'no-store',
+              })
+            })
+
+            it('sends multipart without manually setting Content-Type and includes CSRF', async () => {
+              const fetchMock = vi.fn().mockResolvedValue({
+                ok: true,
+                json: async () => ({
+                  evidence: { id: 'e1' },
+                  job_id: 'j1',
+                  job_state: 'PENDING',
+                  delivery_state: 'QUEUED',
+                }),
+              })
+              vi.stubGlobal('fetch', fetchMock)
+              Object.defineProperty(document, 'cookie', {
+                configurable: true,
+                value: 'darknetra_csrf=csrf-value',
+              })
+              await uploadEvidence('case-1', new File(['safe'], 'safe.txt', { type: 'text/plain' }), {
+                sourceClass: 'SYNTHETIC',
+                sourceType: 'synthetic.fixture',
+                acquisitionMethod: 'authorized_test_generation',
+                capturedAt: '2026-01-01T00:00:00.000Z',
+                originalTimezone: 'UTC',
+              })
+              const [, init] = fetchMock.mock.calls[0]
+              expect(init.method).toBe('POST')
+              expect(init.body).toBeInstanceOf(FormData)
+              expect(new Headers(init.headers).get('content-type')).toBeNull()
+              expect(new Headers(init.headers).get('x-csrf-token')).toBe('csrf-value')
+              expect(init.credentials).toBe('include')
+            })
+
+            it('maps structured API failures without exposing raw HTML', async () => {
+              vi.stubGlobal(
+                'fetch',
+                vi.fn().mockResolvedValue({
+                  ok: false,
+                  status: 413,
+                  headers: new Headers({ 'content-type': 'application/json' }),
+                  json: async () => ({ detail: 'declared upload size exceeds policy' }),
+                }),
+              )
+              await expect(fetchEvidenceDetail('case', 'evidence')).rejects.toEqual(
+                expect.objectContaining<EvidenceApiError>({
+                  status: 413,
+                  message: 'declared upload size exceeds policy',
+                }),
+              )
+            })
+
+            it('builds encoded content and preview URLs', () => {
+              expect(buildEvidenceContentUrl('case/a', 'evidence+b')).toContain(
+                '/cases/case%2Fa/evidence/evidence%2Bb/content',
+              )
+              expect(buildEvidencePreviewUrl('case/a', 'parent', 'child')).toContain(
+                '/cases/case%2Fa/evidence/parent/derivatives/child/preview',
+              )
+            })
+
+            it('posts integrity verification with CSRF and credentials', async () => {
+              const fetchMock = vi.fn().mockResolvedValue({
+                ok: true,
+                json: async () => ({ outcome: 'VERIFIED', state: 'READY' }),
+              })
+              vi.stubGlobal('fetch', fetchMock)
+              Object.defineProperty(document, 'cookie', {
+                configurable: true,
+                value: 'darknetra_csrf=csrf-verify',
+              })
+              await verifyEvidenceIntegrity('case', 'evidence')
+              const [, init] = fetchMock.mock.calls[0]
+              expect(init.method).toBe('POST')
+              expect(new Headers(init.headers).get('x-csrf-token')).toBe('csrf-verify')
+              expect(init.credentials).toBe('include')
+            })
+          })
+TS
+
+          cat > apps/web/src/features/evidence/evidence-workspace.test.tsx <<'TSX'
+          import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+          import { afterEach, describe, expect, it, vi } from 'vitest'
+          import { EvidenceWorkspace } from './evidence-workspace'
+
+          const evidence = {
+            id: '11111111-1111-4111-8111-111111111111',
+            case_id: '22222222-2222-4222-8222-222222222222',
+            source_class: 'SYNTHETIC',
+            source_type: 'synthetic.fixture',
+            acquisition_method: 'authorized_test_generation',
+            collector_user_id: '33333333-3333-4333-8333-333333333333',
+            captured_at: '2026-01-01T00:00:00Z',
+            ingested_at: '2026-01-01T00:01:00Z',
+            original_timezone: 'UTC',
+            media_type: 'text/plain',
+            size_bytes: 42,
+            sha256: 'a'.repeat(64),
+            sha512: null,
+            state: 'READY',
+            quarantine_reason: null,
+            tool_name: 'fixture',
+            tool_version: '1',
+            created_at: '2026-01-01T00:01:00Z',
+            updated_at: '2026-01-01T00:01:00Z',
+          }
+
+          function response(body: unknown, status = 200) {
+            return Promise.resolve({
+              ok: status >= 200 && status < 300,
+              status,
+              headers: new Headers({ 'content-type': 'application/json' }),
+              json: async () => body,
+            })
+          }
+
+          afterEach(() => {
+            vi.unstubAllGlobals()
+          })
+
+          describe('EvidenceWorkspace', () => {
+            it('shows a meaningful loading state and then accessible evidence rows', async () => {
+              let resolveFetch: (value: unknown) => void = () => undefined
+              const fetchMock = vi.fn().mockReturnValue(
+                new Promise((resolve) => {
+                  resolveFetch = resolve
+                }),
+              )
+              vi.stubGlobal('fetch', fetchMock)
+              render(<EvidenceWorkspace caseId={evidence.case_id} />)
+              expect(screen.getByRole('status')).toHaveTextContent('Loading preserved evidence')
+              resolveFetch({
+                ok: true,
+                status: 200,
+                headers: new Headers({ 'content-type': 'application/json' }),
+                json: async () => ({ items: [evidence], next_cursor: null }),
+              })
+              expect(await screen.findByText('synthetic.fixture')).toBeInTheDocument()
+              const row = screen.getByRole('row', { name: /synthetic\.fixture/i })
+              expect(within(row).getByText('READY')).toBeInTheDocument()
+              expect(within(row).getByText('Verified processing complete')).toBeInTheDocument()
+            })
+
+            it('renders a useful empty state instead of blank cards', async () => {
+              vi.stubGlobal('fetch', vi.fn().mockResolvedValue(await response({ items: [], next_cursor: null })))
+              render(<EvidenceWorkspace caseId={evidence.case_id} />)
+              expect(await screen.findByText('No evidence matches this view')).toBeInTheDocument()
+              expect(screen.getByRole('button', { name: 'Preserve evidence' })).toBeInTheDocument()
+            })
+
+            it('requires governance reference for public observation before upload', async () => {
+              vi.stubGlobal('fetch', vi.fn().mockResolvedValue(await response({ items: [], next_cursor: null })))
+              render(<EvidenceWorkspace caseId={evidence.case_id} />)
+              await screen.findByText('No evidence matches this view')
+              fireEvent.click(screen.getByRole('button', { name: 'Preserve evidence' }))
+              fireEvent.change(screen.getByLabelText('Source class'), {
+                target: { value: 'PUBLIC_OBSERVATION' },
+              })
+              fireEvent.change(screen.getByLabelText('Source type'), {
+                target: { value: 'public.web.observation' },
+              })
+              fireEvent.change(screen.getByLabelText('Acquisition method'), {
+                target: { value: 'authorized_public_observation' },
+              })
+              fireEvent.change(screen.getByLabelText('Evidence file'), {
+                target: { files: [new File(['safe'], 'safe.txt', { type: 'text/plain' })] },
+              })
+              fireEvent.click(screen.getByRole('button', { name: 'Preserve original' }))
+              expect(await screen.findByText('Authority reference is required for this source class.')).toBeInTheDocument()
+            })
+
+            it('preserves an upload, reports delivery state, and refreshes the list', async () => {
+              const fetchMock = vi
+                .fn()
+                .mockImplementationOnce(() => response({ items: [], next_cursor: null }))
+                .mockImplementationOnce(() =>
+                  response(
+                    {
+                      evidence,
+                      job_id: 'job-1',
+                      job_state: 'PENDING',
+                      delivery_state: 'QUEUED',
+                    },
+                    202,
+                  ),
+                )
+                .mockImplementationOnce(() => response({ items: [evidence], next_cursor: null }))
+              vi.stubGlobal('fetch', fetchMock)
+              render(<EvidenceWorkspace caseId={evidence.case_id} />)
+              await screen.findByText('No evidence matches this view')
+              fireEvent.click(screen.getByRole('button', { name: 'Preserve evidence' }))
+              fireEvent.change(screen.getByLabelText('Source type'), {
+                target: { value: 'synthetic.fixture' },
+              })
+              fireEvent.change(screen.getByLabelText('Acquisition method'), {
+                target: { value: 'authorized_test_generation' },
+              })
+              fireEvent.change(screen.getByLabelText('Evidence file'), {
+                target: { files: [new File(['safe'], 'safe.txt', { type: 'text/plain' })] },
+              })
+              fireEvent.click(screen.getByRole('button', { name: 'Preserve original' }))
+              expect(await screen.findByText('Original preserved; processing delivery queued.')).toBeInTheDocument()
+              expect(await screen.findByText('synthetic.fixture')).toBeInTheDocument()
+              expect(fetchMock).toHaveBeenCalledTimes(3)
+            })
+
+            it('opens safe detail, custody and derivatives without auto-rendering content', async () => {
+              const child = { ...evidence, id: '44444444-4444-4444-8444-444444444444', source_type: 'derivative.normalized_text' }
+              vi.stubGlobal(
+                'fetch',
+                vi
+                  .fn()
+                  .mockImplementationOnce(() => response({ items: [evidence], next_cursor: null }))
+                  .mockImplementationOnce(() =>
+                    response({
+                      evidence,
+                      parents: [],
+                      children: [
+                        {
+                          id: 'edge-1',
+                          transformation: 'normalized_text',
+                          transformer_version: 'v1',
+                          parameters_digest: 'b'.repeat(64),
+                          created_at: '2026-01-01T00:02:00Z',
+                          evidence: child,
+                        },
+                      ],
+                      custody: [
+                        {
+                          id: 'custody-1',
+                          event_type: 'INTEGRITY_VERIFIED',
+                          actor_user_id: evidence.collector_user_id,
+                          request_id: 'request-1',
+                          reason: 'Evidence verified',
+                          metadata: {},
+                          created_at: '2026-01-01T00:03:00Z',
+                        },
+                      ],
+                    }),
+                  ),
+              )
+              render(<EvidenceWorkspace caseId={evidence.case_id} />)
+              await screen.findByText('synthetic.fixture')
+              fireEvent.click(screen.getByRole('button', { name: 'Review evidence synthetic.fixture' }))
+              expect(await screen.findByRole('dialog', { name: 'Evidence review' })).toBeInTheDocument()
+              expect(screen.getByText('normalized_text')).toBeInTheDocument()
+              expect(screen.getByText('INTEGRITY_VERIFIED')).toBeInTheDocument()
+              expect(screen.getByRole('link', { name: 'Open safe preview' })).toBeInTheDocument()
+              expect(screen.queryByRole('img')).not.toBeInTheDocument()
+              expect(screen.queryByRole('iframe')).not.toBeInTheDocument()
+            })
+
+            it('surfaces integrity mismatch prominently after verification', async () => {
+              vi.stubGlobal(
+                'fetch',
+                vi
+                  .fn()
+                  .mockImplementationOnce(() => response({ items: [evidence], next_cursor: null }))
+                  .mockImplementationOnce(() => response({ evidence, parents: [], children: [], custody: [] }))
+                  .mockImplementationOnce(() =>
+                    response({
+                      evidence_id: evidence.id,
+                      case_id: evidence.case_id,
+                      outcome: 'MISMATCH',
+                      state: 'INTEGRITY_MISMATCH',
+                      expected_sha256: evidence.sha256,
+                      observed_sha256: 'c'.repeat(64),
+                      expected_sha512: null,
+                      observed_sha512: null,
+                      size_bytes: 8,
+                    }),
+                  ),
+              )
+              render(<EvidenceWorkspace caseId={evidence.case_id} />)
+              await screen.findByText('synthetic.fixture')
+              fireEvent.click(screen.getByRole('button', { name: 'Review evidence synthetic.fixture' }))
+              await screen.findByRole('dialog', { name: 'Evidence review' })
+              fireEvent.click(screen.getByRole('button', { name: 'Verify stored bytes' }))
+              expect(await screen.findByText('Integrity mismatch detected — downloads and processing are blocked.')).toBeInTheDocument()
+            })
+          })
+TSX
+
+      - name: Prove RED before production implementation
+        run: |
+          set +e
+          pnpm --filter @darknetra/web test -- evidence-api.test.ts evidence-workspace.test.tsx >/tmp/task11-ui-red.log 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          grep -Eq "Cannot find module|Failed to resolve import|evidence-api|evidence-workspace" /tmp/task11-ui-red.log
+
+      - name: Implement typed evidence API client
+        run: |
+          cat > apps/web/src/features/evidence/evidence-api.ts <<'TS'
+          export type EvidenceState =
+            | 'STAGING'
+            | 'PRESERVED'
+            | 'QUARANTINED'
+            | 'PROCESSING'
+            | 'READY'
+            | 'PARTIAL'
+            | 'FAILED'
+            | 'INTEGRITY_MISMATCH'
+
+          export type EvidenceSourceClass =
+            | 'SYNTHETIC'
+            | 'RESEARCH_ARCHIVE'
+            | 'AUTHORIZED_IMPORT'
+            | 'PUBLIC_OBSERVATION'
+
+          export interface EvidenceArtifact {
+            id: string
+            case_id: string
+            source_class: EvidenceSourceClass
+            source_type: string
+            acquisition_method: string
+            collector_user_id: string
+            captured_at: string
+            ingested_at: string | null
+            original_timezone: string | null
+            media_type: string | null
+            size_bytes: number | null
+            sha256: string | null
+            sha512: string | null
+            state: EvidenceState
+            quarantine_reason: string | null
+            tool_name: string | null
+            tool_version: string | null
+            created_at: string
+            updated_at: string
+          }
+
+          export interface EvidenceListResponse {
+            items: EvidenceArtifact[]
+            next_cursor: string | null
+          }
+
+          export interface EvidenceDerivation {
+            id: string
+            transformation: string
+            transformer_version: string
+            parameters_digest: string
+            created_at: string
+            evidence: EvidenceArtifact
+          }
+
+          export interface CustodyEvent {
+            id: string
+            event_type: string
+            actor_user_id: string | null
+            request_id: string
+            reason: string
+            metadata: Record<string, unknown>
+            created_at: string
+          }
+
+          export interface EvidenceDetail {
+            evidence: EvidenceArtifact
+            parents: EvidenceDerivation[]
+            children: EvidenceDerivation[]
+            custody: CustodyEvent[]
+          }
+
+          export interface EvidenceUploadMetadata {
+            sourceClass: EvidenceSourceClass
+            sourceType: string
+            acquisitionMethod: string
+            capturedAt: string
+            originalTimezone?: string
+            authorityReference?: string
+            sourceLocator?: string
+            notes?: string
+            toolName?: string
+            toolVersion?: string
+          }
+
+          export interface EvidenceUploadAccepted {
+            evidence: EvidenceArtifact
+            job_id: string
+            job_state: 'PENDING' | 'RUNNING' | 'RETRYING' | 'SUCCEEDED' | 'FAILED'
+            delivery_state: 'QUEUED' | 'PENDING_PIPELINE'
+          }
+
+          export interface IntegrityResult {
+            evidence_id: string
+            case_id: string
+            outcome: 'VERIFIED' | 'VERIFIED_PREVIOUS_MISMATCH' | 'MISMATCH' | 'OBJECT_MISSING'
+            state: EvidenceState
+            expected_sha256: string
+            observed_sha256: string | null
+            expected_sha512: string | null
+            observed_sha512: string | null
+            size_bytes: number | null
+          }
+
+          export class EvidenceApiError extends Error {
+            constructor(
+              message: string,
+              public readonly status: number,
+              public readonly details?: unknown,
+            ) {
+              super(message)
+              this.name = 'EvidenceApiError'
+            }
+          }
+
+          const baseUrl = () =>
+            (process.env.NEXT_PUBLIC_DARKNETRA_API_BASE_URL ?? 'http://localhost:8000').replace(/\/$/, '')
+
+          const csrfToken = () => {
+            if (typeof document === 'undefined') return null
+            const value = document.cookie
+              .split(';')
+              .map((part) => part.trim())
+              .find((part) => part.startsWith('darknetra_csrf='))
+              ?.split('=', 2)[1]
+            return value ? decodeURIComponent(value) : null
+          }
+
+          const detailMessage = (detail: unknown, fallback: string) => {
+            if (typeof detail === 'string' && detail.trim()) return detail
+            if (Array.isArray(detail) && detail.length > 0) {
+              const first = detail[0] as { msg?: unknown }
+              if (typeof first?.msg === 'string') return first.msg
+            }
+            return fallback
+          }
+
+          async function jsonRequest<T>(url: string, init: RequestInit): Promise<T> {
+            const response = await fetch(url, {
+              credentials: 'include',
+              cache: 'no-store',
+              ...init,
+            })
+            if (!response.ok) {
+              let detail: unknown = null
+              const contentType = response.headers?.get?.('content-type') ?? ''
+              if (contentType.includes('application/json')) {
+                try {
+                  const body = (await response.json()) as { detail?: unknown }
+                  detail = body.detail
+                } catch {
+                  detail = null
+                }
+              }
+              throw new EvidenceApiError(
+                detailMessage(detail, `Evidence request failed (${response.status}).`),
+                response.status,
+                detail,
+              )
+            }
+            return (await response.json()) as T
+          }
+
+          export async function listEvidence(
+            caseId: string,
+            filters: {
+              state?: EvidenceState | ''
+              sourceClass?: EvidenceSourceClass | ''
+              cursor?: string
+              limit?: number
+            } = {},
+          ): Promise<EvidenceListResponse> {
+            const query = new URLSearchParams()
+            if (filters.state) query.set('state', filters.state)
+            if (filters.sourceClass) query.set('source_class', filters.sourceClass)
+            if (filters.cursor) query.set('cursor', filters.cursor)
+            query.set('limit', String(filters.limit ?? 50))
+            return jsonRequest<EvidenceListResponse>(
+              `${baseUrl()}/api/v1/cases/${encodeURIComponent(caseId)}/evidence?${query}`,
+              { method: 'GET' },
+            )
+          }
+
+          export async function fetchEvidenceDetail(caseId: string, evidenceId: string) {
+            return jsonRequest<EvidenceDetail>(
+              `${baseUrl()}/api/v1/cases/${encodeURIComponent(caseId)}/evidence/${encodeURIComponent(evidenceId)}`,
+              { method: 'GET' },
+            )
+          }
+
+          export async function uploadEvidence(
+            caseId: string,
+            file: File,
+            metadata: EvidenceUploadMetadata,
+          ) {
+            const form = new FormData()
+            form.set('file', file)
+            form.set(
+              'metadata_json',
+              JSON.stringify({
+                source_class: metadata.sourceClass,
+                source_type: metadata.sourceType,
+                acquisition_method: metadata.acquisitionMethod,
+                captured_at: metadata.capturedAt,
+                original_timezone: metadata.originalTimezone || undefined,
+                authority_reference: metadata.authorityReference || undefined,
+                source_locator: metadata.sourceLocator || undefined,
+                notes: metadata.notes || undefined,
+                tool_name: metadata.toolName || undefined,
+                tool_version: metadata.toolVersion || undefined,
+              }),
+            )
+            const headers = new Headers()
+            const csrf = csrfToken()
+            if (csrf) headers.set('X-CSRF-Token', csrf)
+            return jsonRequest<EvidenceUploadAccepted>(
+              `${baseUrl()}/api/v1/cases/${encodeURIComponent(caseId)}/evidence`,
+              { method: 'POST', body: form, headers },
+            )
+          }
+
+          export async function verifyEvidenceIntegrity(caseId: string, evidenceId: string) {
+            const headers = new Headers()
+            const csrf = csrfToken()
+            if (csrf) headers.set('X-CSRF-Token', csrf)
+            return jsonRequest<IntegrityResult>(
+              `${baseUrl()}/api/v1/cases/${encodeURIComponent(caseId)}/evidence/${encodeURIComponent(evidenceId)}/verify-integrity`,
+              { method: 'POST', headers },
+            )
+          }
+
+          export function buildEvidenceContentUrl(caseId: string, evidenceId: string) {
+            return `${baseUrl()}/api/v1/cases/${encodeURIComponent(caseId)}/evidence/${encodeURIComponent(evidenceId)}/content`
+          }
+
+          export function buildEvidencePreviewUrl(caseId: string, parentId: string, childId: string) {
+            return `${baseUrl()}/api/v1/cases/${encodeURIComponent(caseId)}/evidence/${encodeURIComponent(parentId)}/derivatives/${encodeURIComponent(childId)}/preview`
+          }
+TS
+
+      - name: Implement accessible investigator evidence workspace
+        run: |
+          cat > apps/web/src/features/evidence/evidence-workspace.tsx <<'TSX'
+          'use client'
+
+          import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+          import {
+            buildEvidenceContentUrl,
+            buildEvidencePreviewUrl,
+            EvidenceApiError,
+            EvidenceArtifact,
+            EvidenceDetail,
+            EvidenceSourceClass,
+            EvidenceState,
+            fetchEvidenceDetail,
+            IntegrityResult,
+            listEvidence,
+            uploadEvidence,
+            verifyEvidenceIntegrity,
+          } from './evidence-api'
+
+          const sourceClasses: EvidenceSourceClass[] = [
+            'SYNTHETIC',
+            'RESEARCH_ARCHIVE',
+            'AUTHORIZED_IMPORT',
+            'PUBLIC_OBSERVATION',
+          ]
+
+          const states: EvidenceState[] = [
+            'STAGING',
+            'PRESERVED',
+            'PROCESSING',
+            'READY',
+            'PARTIAL',
+            'QUARANTINED',
+            'FAILED',
+            'INTEGRITY_MISMATCH',
+          ]
+
+          const stateDescriptions: Record<EvidenceState, string> = {
+            STAGING: 'Preservation in progress',
+            PRESERVED: 'Original safely preserved',
+            PROCESSING: 'Derivative processing active',
+            READY: 'Verified processing complete',
+            PARTIAL: 'Useful output with warnings',
+            QUARANTINED: 'Preserved; analyst review required',
+            FAILED: 'Processing failed; original retained',
+            INTEGRITY_MISMATCH: 'Stored bytes do not match manifest',
+          }
+
+          const stateTone: Record<EvidenceState, string> = {
+            STAGING: 'border-slate-400 bg-slate-50 text-slate-800 dark:bg-slate-900 dark:text-slate-100',
+            PRESERVED: 'border-blue-400 bg-blue-50 text-blue-900 dark:bg-blue-950 dark:text-blue-100',
+            PROCESSING: 'border-violet-400 bg-violet-50 text-violet-900 dark:bg-violet-950 dark:text-violet-100',
+            READY: 'border-emerald-500 bg-emerald-50 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-100',
+            PARTIAL: 'border-amber-500 bg-amber-50 text-amber-950 dark:bg-amber-950 dark:text-amber-100',
+            QUARANTINED: 'border-orange-600 bg-orange-50 text-orange-950 dark:bg-orange-950 dark:text-orange-100',
+            FAILED: 'border-rose-500 bg-rose-50 text-rose-950 dark:bg-rose-950 dark:text-rose-100',
+            INTEGRITY_MISMATCH: 'border-red-700 bg-red-50 text-red-950 dark:bg-red-950 dark:text-red-100',
+          }
+
+          const formatBytes = (bytes: number | null) => {
+            if (bytes === null) return 'Unknown size'
+            if (bytes < 1024) return `${bytes} B`
+            const units = ['KiB', 'MiB', 'GiB']
+            let value = bytes / 1024
+            let index = 0
+            while (value >= 1024 && index < units.length - 1) {
+              value /= 1024
+              index += 1
+            }
+            return `${value.toFixed(value >= 10 ? 1 : 2)} ${units[index]}`
+          }
+
+          const formatDate = (value: string | null) =>
+            value ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : 'Not recorded'
+
+          function StateBadge({ state }: { state: EvidenceState }) {
+            return (
+              <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${stateTone[state]}`}>
+                {state}
+              </span>
+            )
+          }
+
+          function ErrorNotice({ error, onRetry }: { error: string; onRetry?: () => void }) {
+            return (
+              <div role="alert" className="rounded-lg border border-rose-300 bg-rose-50 p-4 text-sm text-rose-950 dark:border-rose-800 dark:bg-rose-950 dark:text-rose-100">
+                <p className="font-semibold">Evidence workspace could not complete the request.</p>
+                <p className="mt-1">{error}</p>
+                {onRetry ? (
+                  <button type="button" onClick={onRetry} className="mt-3 rounded-md border border-current px-3 py-1.5 font-medium">
+                    Retry
+                  </button>
+                ) : null}
+              </div>
+            )
+          }
+
+          export function EvidenceWorkspace({ caseId }: { caseId: string }) {
+            const [items, setItems] = useState<EvidenceArtifact[]>([])
+            const [cursor, setCursor] = useState<string | null>(null)
+            const [loading, setLoading] = useState(true)
+            const [loadingMore, setLoadingMore] = useState(false)
+            const [error, setError] = useState<string | null>(null)
+            const [stateFilter, setStateFilter] = useState<EvidenceState | ''>('')
+            const [sourceFilter, setSourceFilter] = useState<EvidenceSourceClass | ''>('')
+            const [query, setQuery] = useState('')
+            const [uploadOpen, setUploadOpen] = useState(false)
+            const [uploadMessage, setUploadMessage] = useState<string | null>(null)
+            const [selectedId, setSelectedId] = useState<string | null>(null)
+            const [detail, setDetail] = useState<EvidenceDetail | null>(null)
+            const [detailLoading, setDetailLoading] = useState(false)
+            const [detailError, setDetailError] = useState<string | null>(null)
+            const [integrity, setIntegrity] = useState<IntegrityResult | null>(null)
+            const [verifying, setVerifying] = useState(false)
+            const requestSequence = useRef(0)
+
+            const load = useCallback(
+              async ({ append = false, nextCursor }: { append?: boolean; nextCursor?: string } = {}) => {
+                const sequence = ++requestSequence.current
+                append ? setLoadingMore(true) : setLoading(true)
+                setError(null)
+                try {
+                  const response = await listEvidence(caseId, {
+                    state: stateFilter,
+                    sourceClass: sourceFilter,
+                    cursor: nextCursor,
+                    limit: 50,
+                  })
+                  if (sequence !== requestSequence.current) return
+                  setItems((current) => (append ? [...current, ...response.items] : response.items))
+                  setCursor(response.next_cursor)
+                } catch (cause) {
+                  if (sequence !== requestSequence.current) return
+                  setError(cause instanceof Error ? cause.message : 'The evidence API is unavailable.')
+                } finally {
+                  if (sequence === requestSequence.current) {
+                    setLoading(false)
+                    setLoadingMore(false)
+                  }
+                }
+              },
+              [caseId, sourceFilter, stateFilter],
+            )
+
+            useEffect(() => {
+              void load()
+            }, [load])
+
+            const filteredItems = useMemo(() => {
+              const normalized = query.trim().toLocaleLowerCase()
+              if (!normalized) return items
+              return items.filter((item) =>
+                [item.source_type, item.media_type, item.sha256, item.id]
+                  .filter(Boolean)
+                  .some((value) => String(value).toLocaleLowerCase().includes(normalized)),
+              )
+            }, [items, query])
+
+            const openDetail = async (item: EvidenceArtifact) => {
+              setSelectedId(item.id)
+              setDetail(null)
+              setIntegrity(null)
+              setDetailError(null)
+              setDetailLoading(true)
+              try {
+                setDetail(await fetchEvidenceDetail(caseId, item.id))
+              } catch (cause) {
+                setDetailError(cause instanceof Error ? cause.message : 'Evidence detail is unavailable.')
+              } finally {
+                setDetailLoading(false)
+              }
+            }
+
+            const closeDetail = () => {
+              setSelectedId(null)
+              setDetail(null)
+              setIntegrity(null)
+              setDetailError(null)
+            }
+
+            const verify = async () => {
+              if (!selectedId) return
+              setVerifying(true)
+              setDetailError(null)
+              try {
+                const result = await verifyEvidenceIntegrity(caseId, selectedId)
+                setIntegrity(result)
+                setItems((current) => current.map((item) => (item.id === selectedId ? { ...item, state: result.state } : item)))
+                setDetail((current) => (current ? { ...current, evidence: { ...current.evidence, state: result.state } } : current))
+              } catch (cause) {
+                setDetailError(cause instanceof Error ? cause.message : 'Integrity verification failed.')
+              } finally {
+                setVerifying(false)
+              }
+            }
+
+            return (
+              <main className="space-y-6" aria-labelledby="evidence-heading">
+                <header className="flex flex-col gap-4 border-b pb-5 lg:flex-row lg:items-end lg:justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-muted-foreground">Case-scoped Evidence Vault</p>
+                    <h1 id="evidence-heading" className="text-2xl font-semibold tracking-tight">Evidence</h1>
+                    <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
+                      Preserve authorized originals, inspect provenance and derivatives, and verify stored bytes without exposing storage paths.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setUploadMessage(null)
+                      setUploadOpen(true)
+                    }}
+                    className="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    Preserve evidence
+                  </button>
+                </header>
+
+                {uploadMessage ? (
+                  <div role="status" className="rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-950 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-100">
+                    {uploadMessage}
+                  </div>
+                ) : null}
+
+                <section aria-label="Evidence filters" className="grid gap-3 rounded-lg border bg-card p-4 md:grid-cols-3">
+                  <label className="grid gap-1 text-sm font-medium">
+                    Search this result set
+                    <input
+                      type="search"
+                      value={query}
+                      onChange={(event) => setQuery(event.target.value)}
+                      placeholder="Source type, hash or evidence ID"
+                      className="h-10 rounded-md border bg-background px-3 font-normal"
+                    />
+                  </label>
+                  <label className="grid gap-1 text-sm font-medium">
+                    Processing state
+                    <select
+                      value={stateFilter}
+                      onChange={(event) => setStateFilter(event.target.value as EvidenceState | '')}
+                      className="h-10 rounded-md border bg-background px-3 font-normal"
+                    >
+                      <option value="">All states</option>
+                      {states.map((state) => <option key={state} value={state}>{state}</option>)}
+                    </select>
+                  </label>
+                  <label className="grid gap-1 text-sm font-medium">
+                    Source class
+                    <select
+                      value={sourceFilter}
+                      onChange={(event) => setSourceFilter(event.target.value as EvidenceSourceClass | '')}
+                      className="h-10 rounded-md border bg-background px-3 font-normal"
+                    >
+                      <option value="">All source classes</option>
+                      {sourceClasses.map((source) => <option key={source} value={source}>{source}</option>)}
+                    </select>
+                  </label>
+                </section>
+
+                {error ? <ErrorNotice error={error} onRetry={() => void load()} /> : null}
+
+                {loading ? (
+                  <div role="status" className="rounded-lg border p-8 text-center text-sm text-muted-foreground">
+                    Loading preserved evidence…
+                  </div>
+                ) : filteredItems.length === 0 ? (
+                  <section className="rounded-lg border border-dashed p-10 text-center">
+                    <h2 className="font-semibold">No evidence matches this view</h2>
+                    <p className="mx-auto mt-2 max-w-xl text-sm text-muted-foreground">
+                      Adjust the filters or preserve an authorized artifact. Empty results never imply that another case has no evidence.
+                    </p>
+                    <button type="button" onClick={() => setUploadOpen(true)} className="mt-4 rounded-md border px-4 py-2 text-sm font-medium">
+                      Preserve evidence
+                    </button>
+                  </section>
+                ) : (
+                  <section className="overflow-hidden rounded-lg border" aria-label="Preserved evidence results">
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[920px] text-left text-sm">
+                        <thead className="bg-muted/60 text-xs uppercase tracking-wide text-muted-foreground">
+                          <tr>
+                            <th scope="col" className="px-4 py-3">Source</th>
+                            <th scope="col" className="px-4 py-3">State</th>
+                            <th scope="col" className="px-4 py-3">Type & size</th>
+                            <th scope="col" className="px-4 py-3">Captured</th>
+                            <th scope="col" className="px-4 py-3">Digest</th>
+                            <th scope="col" className="px-4 py-3"><span className="sr-only">Actions</span></th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y">
+                          {filteredItems.map((item) => (
+                            <tr key={item.id} className="align-top hover:bg-muted/30">
+                              <td className="px-4 py-4">
+                                <p className="font-medium">{item.source_type}</p>
+                                <p className="mt-1 text-xs text-muted-foreground">{item.source_class}</p>
+                              </td>
+                              <td className="px-4 py-4">
+                                <StateBadge state={item.state} />
+                                <p className="mt-2 max-w-52 text-xs text-muted-foreground">{stateDescriptions[item.state]}</p>
+                              </td>
+                              <td className="px-4 py-4">
+                                <p>{item.media_type ?? 'Unclassified'}</p>
+                                <p className="mt-1 text-xs text-muted-foreground">{formatBytes(item.size_bytes)}</p>
+                              </td>
+                              <td className="px-4 py-4 text-muted-foreground">{formatDate(item.captured_at)}</td>
+                              <td className="px-4 py-4 font-mono text-xs">{item.sha256 ? `${item.sha256.slice(0, 12)}…${item.sha256.slice(-8)}` : 'Not available'}</td>
+                              <td className="px-4 py-4 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => void openDetail(item)}
+                                  aria-label={`Review evidence ${item.source_type}`}
+                                  className="rounded-md border px-3 py-1.5 font-medium hover:bg-muted"
+                                >
+                                  Review
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    {cursor ? (
+                      <div className="border-t p-3 text-center">
+                        <button
+                          type="button"
+                          disabled={loadingMore}
+                          onClick={() => void load({ append: true, nextCursor: cursor })}
+                          className="rounded-md border px-4 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {loadingMore ? 'Loading more…' : 'Load more evidence'}
+                        </button>
+                      </div>
+                    ) : null}
+                  </section>
+                )}
+
+                {uploadOpen ? (
+                  <UploadDialog
+                    caseId={caseId}
+                    onClose={() => setUploadOpen(false)}
+                    onSuccess={(message) => {
+                      setUploadOpen(false)
+                      setUploadMessage(message)
+                      void load()
+                    }}
+                  />
+                ) : null}
+
+                {selectedId ? (
+                  <DetailDialog
+                    caseId={caseId}
+                    evidenceId={selectedId}
+                    detail={detail}
+                    loading={detailLoading}
+                    error={detailError}
+                    integrity={integrity}
+                    verifying={verifying}
+                    onVerify={() => void verify()}
+                    onClose={closeDetail}
+                  />
+                ) : null}
+              </main>
+            )
+          }
+
+          function UploadDialog({
+            caseId,
+            onClose,
+            onSuccess,
+          }: {
+            caseId: string
+            onClose: () => void
+            onSuccess: (message: string) => void
+          }) {
+            const [sourceClass, setSourceClass] = useState<EvidenceSourceClass>('SYNTHETIC')
+            const [sourceType, setSourceType] = useState('')
+            const [acquisitionMethod, setAcquisitionMethod] = useState('')
+            const [authorityReference, setAuthorityReference] = useState('')
+            const [sourceLocator, setSourceLocator] = useState('')
+            const [notes, setNotes] = useState('')
+            const [file, setFile] = useState<File | null>(null)
+            const [error, setError] = useState<string | null>(null)
+            const [submitting, setSubmitting] = useState(false)
+            const governed = sourceClass === 'PUBLIC_OBSERVATION' || sourceClass === 'AUTHORIZED_IMPORT'
+
+            const submit = async (event: FormEvent) => {
+              event.preventDefault()
+              setError(null)
+              if (!file) {
+                setError('Choose an evidence file to preserve.')
+                return
+              }
+              if (file.size === 0) {
+                setError('The selected file is empty.')
+                return
+              }
+              if (file.size > 100 * 1024 * 1024) {
+                setError('The selected file exceeds the 100 MiB investigator upload policy.')
+                return
+              }
+              if (!sourceType.trim()) {
+                setError('Source type is required.')
+                return
+              }
+              if (!acquisitionMethod.trim()) {
+                setError('Acquisition method is required.')
+                return
+              }
+              if (governed && !authorityReference.trim()) {
+                setError('Authority reference is required for this source class.')
+                return
+              }
+              setSubmitting(true)
+              try {
+                const result = await uploadEvidence(caseId, file, {
+                  sourceClass,
+                  sourceType: sourceType.trim(),
+                  acquisitionMethod: acquisitionMethod.trim(),
+                  capturedAt: new Date(file.lastModified || Date.now()).toISOString(),
+                  originalTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+                  authorityReference: authorityReference.trim() || undefined,
+                  sourceLocator: sourceLocator.trim() || undefined,
+                  notes: notes.trim() || undefined,
+                  toolName: 'darknetra-web',
+                  toolVersion: 'plan03',
+                })
+                const message = result.delivery_state === 'QUEUED'
+                  ? 'Original preserved; processing delivery queued.'
+                  : 'Original preserved; processing is pending worker reconciliation.'
+                onSuccess(message)
+              } catch (cause) {
+                if (cause instanceof EvidenceApiError) {
+                  setError(cause.message)
+                } else {
+                  setError('The evidence could not be preserved. The original was not accepted by this browser request.')
+                }
+              } finally {
+                setSubmitting(false)
+              }
+            }
+
+            return (
+              <div className="fixed inset-0 z-50 grid place-items-center bg-black/55 p-4" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+                <section role="dialog" aria-modal="true" aria-labelledby="upload-title" className="max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-xl border bg-background p-6 shadow-2xl">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <h2 id="upload-title" className="text-lg font-semibold">Preserve evidence</h2>
+                      <p className="mt-1 text-sm text-muted-foreground">Only authorized, research, synthetic or public-observation material may be uploaded. DARKNETRA will not execute active content.</p>
+                    </div>
+                    <button type="button" onClick={onClose} aria-label="Close evidence upload" className="rounded-md border px-2.5 py-1">Close</button>
+                  </div>
+                  <form className="mt-5 grid gap-4" onSubmit={submit} noValidate>
+                    <label className="grid gap-1 text-sm font-medium">
+                      Evidence file
+                      <input aria-label="Evidence file" type="file" onChange={(event) => setFile(event.target.files?.[0] ?? null)} className="rounded-md border p-2 font-normal" />
+                      <span className="text-xs font-normal text-muted-foreground">Maximum 100 MiB. Filename is advisory only; byte signatures determine the parser.</span>
+                    </label>
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <label className="grid gap-1 text-sm font-medium">
+                        Source class
+                        <select aria-label="Source class" value={sourceClass} onChange={(event) => setSourceClass(event.target.value as EvidenceSourceClass)} className="h-10 rounded-md border bg-background px-3 font-normal">
+                          {sourceClasses.map((source) => <option key={source} value={source}>{source}</option>)}
+                        </select>
+                      </label>
+                      <label className="grid gap-1 text-sm font-medium">
+                        Source type
+                        <input aria-label="Source type" value={sourceType} onChange={(event) => setSourceType(event.target.value)} placeholder="e.g. research.warc or authorized.chat.export" className="h-10 rounded-md border bg-background px-3 font-normal" />
+                      </label>
+                    </div>
+                    <label className="grid gap-1 text-sm font-medium">
+                      Acquisition method
+                      <input aria-label="Acquisition method" value={acquisitionMethod} onChange={(event) => setAcquisitionMethod(event.target.value)} placeholder="Describe the lawful acquisition method" className="h-10 rounded-md border bg-background px-3 font-normal" />
+                    </label>
+                    {governed ? (
+                      <label className="grid gap-1 text-sm font-medium">
+                        Authority reference
+                        <input value={authorityReference} onChange={(event) => setAuthorityReference(event.target.value)} placeholder="Authorization, policy or public-observation reference" className="h-10 rounded-md border bg-background px-3 font-normal" />
+                      </label>
+                    ) : null}
+                    <label className="grid gap-1 text-sm font-medium">
+                      Source locator <span className="font-normal text-muted-foreground">(encrypted)</span>
+                      <input value={sourceLocator} onChange={(event) => setSourceLocator(event.target.value)} placeholder="Optional URL, archive ID or export reference" className="h-10 rounded-md border bg-background px-3 font-normal" />
+                    </label>
+                    <label className="grid gap-1 text-sm font-medium">
+                      Investigator notes <span className="font-normal text-muted-foreground">(encrypted)</span>
+                      <textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={3} className="rounded-md border bg-background p-3 font-normal" />
+                    </label>
+                    {error ? <ErrorNotice error={error} /> : null}
+                    <div className="flex justify-end gap-3 border-t pt-4">
+                      <button type="button" onClick={onClose} className="rounded-md border px-4 py-2 text-sm font-medium">Cancel</button>
+                      <button type="submit" disabled={submitting} className="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground disabled:opacity-60">
+                        {submitting ? 'Preserving original…' : 'Preserve original'}
+                      </button>
+                    </div>
+                  </form>
+                </section>
+              </div>
+            )
+          }
+
+          function DetailDialog({
+            caseId,
+            evidenceId,
+            detail,
+            loading,
+            error,
+            integrity,
+            verifying,
+            onVerify,
+            onClose,
+          }: {
+            caseId: string
+            evidenceId: string
+            detail: EvidenceDetail | null
+            loading: boolean
+            error: string | null
+            integrity: IntegrityResult | null
+            verifying: boolean
+            onVerify: () => void
+            onClose: () => void
+          }) {
+            const mismatch = integrity?.state === 'INTEGRITY_MISMATCH' || detail?.evidence.state === 'INTEGRITY_MISMATCH'
+            return (
+              <div className="fixed inset-0 z-50 flex justify-end bg-black/55" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+                <section role="dialog" aria-modal="true" aria-label="Evidence review" className="h-full w-full max-w-3xl overflow-y-auto border-l bg-background p-6 shadow-2xl">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-medium text-muted-foreground">Evidence review</p>
+                      <h2 className="mt-1 font-mono text-sm break-all">{evidenceId}</h2>
+                    </div>
+                    <button type="button" onClick={onClose} aria-label="Close evidence review" className="rounded-md border px-3 py-1.5">Close</button>
+                  </div>
+                  {loading ? <div role="status" className="mt-6 rounded-lg border p-8 text-center text-sm text-muted-foreground">Loading provenance and custody…</div> : null}
+                  {error ? <div className="mt-6"><ErrorNotice error={error} /></div> : null}
+                  {detail ? (
+                    <div className="mt-6 space-y-6">
+                      {mismatch ? (
+                        <div role="alert" className="rounded-lg border-2 border-red-700 bg-red-50 p-4 text-red-950 dark:bg-red-950 dark:text-red-100">
+                          <p className="font-semibold">Integrity mismatch detected — downloads and processing are blocked.</p>
+                          <p className="mt-1 text-sm">Expected manifest values remain unchanged. Review custody and preserve an incident note.</p>
+                        </div>
+                      ) : null}
+                      <section className="rounded-lg border p-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <h3 className="font-semibold">Manifest</h3>
+                            <p className="mt-1 text-sm text-muted-foreground">{detail.evidence.source_type}</p>
+                          </div>
+                          <StateBadge state={detail.evidence.state} />
+                        </div>
+                        <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
+                          <div><dt className="text-muted-foreground">Media type</dt><dd>{detail.evidence.media_type ?? 'Unknown'}</dd></div>
+                          <div><dt className="text-muted-foreground">Size</dt><dd>{formatBytes(detail.evidence.size_bytes)}</dd></div>
+                          <div><dt className="text-muted-foreground">Captured</dt><dd>{formatDate(detail.evidence.captured_at)}</dd></div>
+                          <div><dt className="text-muted-foreground">Ingested</dt><dd>{formatDate(detail.evidence.ingested_at)}</dd></div>
+                          <div className="sm:col-span-2"><dt className="text-muted-foreground">SHA-256</dt><dd className="break-all font-mono text-xs">{detail.evidence.sha256 ?? 'Not available'}</dd></div>
+                        </dl>
+                        <div className="mt-4 flex flex-wrap gap-3">
+                          <button type="button" onClick={onVerify} disabled={verifying} className="rounded-md border px-3 py-2 text-sm font-medium disabled:opacity-60">
+                            {verifying ? 'Verifying stored bytes…' : 'Verify stored bytes'}
+                          </button>
+                          {!mismatch ? (
+                            <a href={buildEvidenceContentUrl(caseId, evidenceId)} className="rounded-md border px-3 py-2 text-sm font-medium" rel="noreferrer">
+                              Download original
+                            </a>
+                          ) : null}
+                        </div>
+                        {integrity ? (
+                          <div className="mt-4 rounded-md bg-muted p-3 text-sm" aria-live="polite">
+                            <p className="font-semibold">Verification outcome: {integrity.outcome}</p>
+                            {integrity.observed_sha256 ? <p className="mt-1 break-all font-mono text-xs">Observed SHA-256: {integrity.observed_sha256}</p> : <p className="mt-1">Stored object was not found.</p>}
+                          </div>
+                        ) : null}
+                      </section>
+
+                      <section className="rounded-lg border p-4">
+                        <h3 className="font-semibold">Derived evidence</h3>
+                        {detail.children.length === 0 ? <p className="mt-2 text-sm text-muted-foreground">No derivative evidence is available yet.</p> : (
+                          <ul className="mt-3 divide-y">
+                            {detail.children.map((child) => (
+                              <li key={child.id} className="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+                                <div>
+                                  <p className="font-medium">{child.transformation}</p>
+                                  <p className="text-xs text-muted-foreground">Version {child.transformer_version} · {child.evidence.media_type}</p>
+                                </div>
+                                {['text/plain', 'text/html', 'image/png'].includes(child.evidence.media_type ?? '') ? (
+                                  <a href={buildEvidencePreviewUrl(caseId, evidenceId, child.evidence.id)} target="_blank" rel="noreferrer" className="rounded-md border px-3 py-1.5 text-sm font-medium">
+                                    Open safe preview
+                                  </a>
+                                ) : <span className="text-xs text-muted-foreground">Preview not allowlisted</span>}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </section>
+
+                      <section className="rounded-lg border p-4">
+                        <h3 className="font-semibold">Custody history</h3>
+                        {detail.custody.length === 0 ? <p className="mt-2 text-sm text-muted-foreground">No custody events were returned.</p> : (
+                          <ol className="mt-3 space-y-4 border-l pl-5">
+                            {detail.custody.map((event) => (
+                              <li key={event.id} className="relative">
+                                <span aria-hidden="true" className="absolute -left-[1.55rem] top-1.5 h-2.5 w-2.5 rounded-full border-2 border-background bg-foreground" />
+                                <p className="font-medium">{event.event_type}</p>
+                                <p className="mt-1 text-sm">{event.reason}</p>
+                                <p className="mt-1 text-xs text-muted-foreground">{formatDate(event.created_at)} · Request {event.request_id}</p>
+                              </li>
+                            ))}
+                          </ol>
+                        )}
+                      </section>
+                    </div>
+                  ) : null}
+                </section>
+              </div>
+            )
+          }
+TSX
+
+      - name: Add Next.js evidence route within the existing case workspace
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          app_root = Path('apps/web/src/app')
+          case_dirs = sorted(
+              path
+              for path in app_root.rglob('[caseId]')
+              if path.is_dir() and path.parent.name == 'cases'
+          )
+          if case_dirs:
+              case_dir = case_dirs[0]
+          elif (app_root / '(dashboard)').exists():
+              case_dir = app_root / '(dashboard)' / 'cases' / '[caseId]'
+          else:
+              case_dir = app_root / 'cases' / '[caseId]'
+          target = case_dir / 'evidence' / 'page.tsx'
+          target.parent.mkdir(parents=True, exist_ok=True)
+          target.write_text('''import { EvidenceWorkspace } from '@/features/evidence/evidence-workspace'
+
+          export default async function EvidencePage({
+            params,
+          }: {
+            params: Promise<{ caseId: string }>
+          }) {
+            const { caseId } = await params
+            return <EvidenceWorkspace caseId={caseId} />
+          }
+          '''.replace('          ', ''), encoding='utf-8')
+          Path('/tmp/task11-route-path').write_text(str(target), encoding='utf-8')
+          PY
+
+      - name: Verify GREEN frontend gates
+        run: |
+          pnpm --filter @darknetra/web lint
+          pnpm --filter @darknetra/web typecheck
+          pnpm --filter @darknetra/web test
+          pnpm --filter @darknetra/web build
+
+      - name: Record Task 11 evidence UI checkpoint and commit
+        run: |
+          ROUTE_PATH="$(cat /tmp/task11-route-path)"
+          mkdir -p docs/verification
+          cat > docs/verification/plan03-task11-evidence-ui.md <<EOF
+          # Plan 03 Task 11 — investigator Evidence workspace TDD checkpoint
+
+          - **Source before implementation:** \`$(git rev-parse HEAD)\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Route:** \`${ROUTE_PATH}\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          ## RED
+
+          Typed API and investigator-workspace contracts were written before implementation and failed because the modules did not exist.
+
+          ## GREEN
+
+          | Gate | Outcome |
+          |---|---|
+          | Frontend lint | success |
+          | TypeScript checking | success |
+          | API-client and workspace tests | success |
+          | Complete frontend unit suite | success |
+          | Next.js production build | success |
+
+          The workspace includes meaningful loading/empty/error states, cursor pagination, state/source filters, local search, governed multipart upload, human-readable state explanations, detail/custody/derivative review, explicit integrity verification and safe download/preview links. It never automatically embeds evidence content, labels a person guilty or exposes encrypted metadata/storage paths.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/web/src/features/evidence "$ROUTE_PATH" docs/verification/plan03-task11-evidence-ui.md
+          git rm .github/workflows/plan03-task11-evidence-ui.yml
+          git commit -m 'feat: add investigator evidence workspace'
+          git push origin HEAD:testing-codex
