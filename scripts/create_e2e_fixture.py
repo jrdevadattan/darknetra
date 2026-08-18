@@ -72,6 +72,7 @@ async def create_fixture(environment: Mapping[str, str]) -> dict[str, object]:
     from darknetra_api.models.case import Case
     from darknetra_api.models.case_membership import CaseMembership, CaseMembershipRole
     from darknetra_api.models.enums import CaseSensitivity, GlobalRole
+    from darknetra_api.models.job import Job
     from darknetra_api.models.user import User
     from darknetra_api.security.passwords import (
         PasswordPolicyError,
@@ -105,6 +106,7 @@ async def create_fixture(environment: Mapping[str, str]) -> dict[str, object]:
     sessions = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     try:
         async with sessions() as session:
+            await session.execute(sa.delete(Job))
             await session.execute(sa.delete(CaseMembershipRole))
             await session.execute(sa.delete(CaseMembership))
             await session.execute(sa.delete(AuditEvent))

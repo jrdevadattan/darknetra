@@ -17,14 +17,26 @@ services:
       timeout: 3s
       retries: 10
 
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks:
+      - app
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
   api:
     build:
       context: .
       dockerfile: infrastructure/docker/api.Dockerfile
-    environment:
+    environment: &api-environment
       DARKNETRA_ENVIRONMENT: development
       DARKNETRA_BUILD_VERSION: docker-dev
       DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:${DARKNETRA_POSTGRES_PASSWORD:-darknetra-dev-only}@postgres:5432/darknetra
+      DARKNETRA_REDIS_URL: redis://redis:6379/0
       DARKNETRA_WEB_ORIGIN: ${DARKNETRA_WEB_ORIGIN:-http://localhost:3000}
       DARKNETRA_JWT_SIGNING_KEY_B64: ${DARKNETRA_JWT_SIGNING_KEY_B64:-}
       DARKNETRA_FIELD_KEY_V1_B64: ${DARKNETRA_FIELD_KEY_V1_B64:-}
@@ -33,6 +45,8 @@ services:
       DARKNETRA_FIELD_ACTIVE_KEY_VERSION: ${DARKNETRA_FIELD_ACTIVE_KEY_VERSION:-v1}
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     networks:
       - app
@@ -46,6 +60,39 @@ services:
       timeout: 4s
       retries: 12
       start_period: 5s
+
+  worker:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api.Dockerfile
+    command:
+      - uv
+      - run
+      - --no-sync
+      - celery
+      - -A
+      - darknetra_api.jobs.celery_app:celery_app
+      - worker
+      - --loglevel=INFO
+      - --queues=ingest
+      - --concurrency=1
+      - --hostname=ingest@%h
+    environment: *api-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - app
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "uv run --no-sync celery -A darknetra_api.jobs.celery_app:celery_app inspect ping -d ingest@$$HOSTNAME --timeout=5 | grep -q pong"
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
 
   web:
     build:
