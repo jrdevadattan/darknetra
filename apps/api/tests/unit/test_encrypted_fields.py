@@ -2,7 +2,6 @@ import base64
 from dataclasses import dataclass
 
 import pytest
-from pydantic import BaseModel, ConfigDict
 
 from darknetra_api.security.encrypted_fields import (
     RedactionKind,
@@ -12,6 +11,7 @@ from darknetra_api.security.encrypted_fields import (
     unpack_envelope,
 )
 from darknetra_api.security.encryption import EncryptedValue
+from pydantic import BaseModel, ConfigDict
 
 
 def envelope() -> EncryptedValue:
