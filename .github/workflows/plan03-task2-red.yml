@@ -1,0 +1,80 @@
+name: Plan 03 Task 2 RED gate
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task2-red.yml
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  red:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task2-red@127.0.0.1:5432/darknetra_plan03_task2_red
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task2_red
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task2-red
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task2_red"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key():
+              return base64.b64encode(secrets.token_bytes(32)).decode('ascii')
+          jwt = key(); field = key(); blind = key()
+          for value in (jwt, field, blind):
+              print(f'::add-mask::{value}')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as out:
+              out.write(f'DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n')
+              out.write(f'DARKNETRA_FIELD_KEY_V1_B64={field}\n')
+              out.write(f'DARKNETRA_FIELD_KEYRING_B64_JSON={json.dumps({"v1": field}, separators=(",", ":"))}\n')
+              out.write('DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n')
+              out.write(f'DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n')
+          PY
+      - name: Install locked workspace
+        run: uv sync --all-packages --dev --frozen
+      - name: Migrate current schema
+        run: uv run alembic -c apps/api/alembic.ini upgrade head
+      - id: focused
+        name: Execute Task 2 focused contract suite
+        continue-on-error: true
+        run: uv run pytest -q apps/api/tests/integration/test_evidence_provenance.py
+      - name: Assert RED failure is real
+        run: |
+          test "${{ steps.focused.outcome }}" = "failure"
