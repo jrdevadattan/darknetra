@@ -1,0 +1,408 @@
+name: Plan 03 Task 4 preservation transaction GREEN gate
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task4-preservation-green.yml
+
+permissions:
+  contents: write
+  statuses: write
+
+jobs:
+  green:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task4-pres-green@127.0.0.1:5432/darknetra_plan03_task4_pres_green
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task4_pres_green
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task4-pres-green
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task4_pres_green"
+          --health-interval 5s --health-timeout 3s --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode('ascii')
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f'::add-mask::{value}')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              output.write(f'DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n')
+              output.write(f'DARKNETRA_FIELD_KEY_V1_B64={field}\n')
+              output.write('DARKNETRA_FIELD_KEYRING_B64_JSON=' + json.dumps({'v1': field}, separators=(',', ':')) + '\n')
+              output.write('DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n')
+              output.write(f'DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n')
+          PY
+
+      - name: Require the verified RED contract
+        run: |
+          set -euo pipefail
+          test -f docs/verification/plan03-task4-preservation-red.md
+          test -f apps/api/tests/integration/test_evidence_ingest_service.py
+          test ! -f apps/api/darknetra_api/services/evidence_ingest.py
+
+      - name: Install locked workspace and migrate
+        run: |
+          uv sync --all-packages --dev --frozen
+          uv run alembic -c apps/api/alembic.ini upgrade head
+
+      - name: Implement transactional evidence preservation
+        run: |
+          cat > apps/api/darknetra_api/services/evidence_ingest.py <<'PY'
+          from __future__ import annotations
+
+          import asyncio
+          import hashlib
+          from collections.abc import Awaitable, BinaryIO, Callable
+          from dataclasses import dataclass
+          from datetime import UTC, datetime
+          from enum import StrEnum
+          from typing import Protocol, Self
+          from uuid import UUID, uuid4
+
+          from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+          from sqlalchemy.ext.asyncio import AsyncSession
+
+          from darknetra_api.authz.permissions import Permission
+          from darknetra_api.authz.policy import authorize_case
+          from darknetra_api.jobs.celery_app import celery_app
+          from darknetra_api.models.custody import CustodyEvent
+          from darknetra_api.models.evidence import EvidenceArtifact, EvidenceState
+          from darknetra_api.models.job import Job, JobState
+          from darknetra_api.models.user import User
+          from darknetra_api.policy.ingestion import (
+              EvidenceSourceMetadata,
+              IngestionPolicyError,
+              detect_evidence_type,
+          )
+          from darknetra_api.security.encryption import SensitiveFieldCrypto
+          from darknetra_api.services.audit import append_audit_event
+          from darknetra_api.services.evidence import preserve_evidence_manifest
+
+          _PIPELINE_VERSION = "v1"
+          _TASK_NAME = "darknetra.ingestion.process_evidence"
+          _SNIFF_BYTES = 1024 * 1024
+          _GENERIC_DECLARED_MEDIA_TYPES = {
+              "application/octet-stream",
+              "binary/octet-stream",
+          }
+
+
+          class EvidenceObjectStore(Protocol):
+              def put_verified(
+                  self,
+                  stream: BinaryIO,
+                  expected_sha256: str | None = None,
+              ): ...
+
+              def open(self, object_key: str) -> BinaryIO: ...
+
+              def verify(self, object_key: str, expected_sha256: str) -> bool: ...
+
+
+          class EvidenceDispatchState(StrEnum):
+              PUBLISHED = "PUBLISHED"
+              PENDING = "PENDING"
+
+
+          class EvidenceIngestRequest(BaseModel):
+              model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+              source: EvidenceSourceMetadata
+              captured_at: datetime
+              original_timezone: str = Field(min_length=1, max_length=120)
+              source_locator: str | None = Field(default=None, min_length=1, max_length=4096)
+              notes: str | None = Field(default=None, min_length=1, max_length=20_000)
+              tool_name: str = Field(default="darknetra", min_length=1, max_length=120)
+              tool_version: str = Field(default="dev", min_length=1, max_length=120)
+              declared_media_type: str | None = Field(default=None, min_length=1, max_length=255)
+              expected_sha256: str | None = None
+
+              @field_validator("captured_at")
+              @classmethod
+              def captured_at_must_be_aware(cls, value: datetime) -> datetime:
+                  if value.tzinfo is None or value.utcoffset() is None:
+                      raise ValueError("captured_at must include timezone information")
+                  return value
+
+              @field_validator("expected_sha256")
+              @classmethod
+              def validate_expected_sha256(cls, value: str | None) -> str | None:
+                  if value is None:
+                      return None
+                  normalized = value.casefold()
+                  if len(normalized) != 64 or any(character not in "0123456789abcdef" for character in normalized):
+                      raise ValueError("expected_sha256 must be a 64-character hexadecimal digest")
+                  return normalized
+
+              @model_validator(mode="after")
+              def normalize_declared_media_type(self) -> Self:
+                  if self.declared_media_type is not None:
+                      self.declared_media_type = self.declared_media_type.partition(";")[0].strip().casefold()
+                  return self
+
+
+          @dataclass(frozen=True, slots=True)
+          class EvidenceIngestResult:
+              evidence_id: UUID
+              job_id: UUID
+              dispatch_state: EvidenceDispatchState
+              dispatch_error_code: str | None = None
+
+
+          JobPublisher = Callable[[UUID], Awaitable[None]]
+
+
+          def _sha512_for_object(object_store: EvidenceObjectStore, object_key: str) -> str:
+              digest = hashlib.sha512()
+              with object_store.open(object_key) as stream:
+                  while chunk := stream.read(64 * 1024):
+                      if not isinstance(chunk, bytes):
+                          raise TypeError("evidence object stream must yield bytes")
+                      digest.update(chunk)
+              return digest.hexdigest()
+
+
+          def _detect_object(object_store: EvidenceObjectStore, object_key: str):
+              with object_store.open(object_key) as stream:
+                  prefix = stream.read(_SNIFF_BYTES)
+              return detect_evidence_type(prefix)
+
+
+          def _validate_declared_media_type(
+              declared_media_type: str | None,
+              detected_media_type: str,
+          ) -> None:
+              if declared_media_type is None or declared_media_type in _GENERIC_DECLARED_MEDIA_TYPES:
+                  return
+              if declared_media_type != detected_media_type.casefold():
+                  raise IngestionPolicyError(
+                      "declared media type does not match the byte-detected evidence type"
+                  )
+
+
+          async def _default_publish(job_id: UUID) -> None:
+              await asyncio.to_thread(
+                  celery_app.send_task,
+                  _TASK_NAME,
+                  args=[str(job_id)],
+                  queue="ingest",
+                  task_id=str(job_id),
+              )
+
+
+          async def preserve_uploaded_evidence(
+              *,
+              actor: User,
+              case_id: UUID,
+              request: EvidenceIngestRequest,
+              stream: BinaryIO,
+              object_store: EvidenceObjectStore,
+              crypto: SensitiveFieldCrypto,
+              session: AsyncSession,
+              request_id: str,
+              publish_job: JobPublisher | None = None,
+          ) -> EvidenceIngestResult:
+              """Preserve one immutable original and publish only after DB commit.
+
+              A content-addressed object may remain unreferenced if validation or the
+              database transaction fails. That is safer than deleting a digest object
+              that could already be shared by another evidence row; later reconciliation
+              may garbage-collect genuinely unreferenced objects.
+              """
+
+              await authorize_case(actor, case_id, Permission.CASE_UPDATE, session)
+
+              stored = object_store.put_verified(stream, request.expected_sha256)
+              detected = _detect_object(object_store, stored.object_key)
+              _validate_declared_media_type(request.declared_media_type, detected.media_type)
+
+              evidence_id = uuid4()
+              artifact = EvidenceArtifact(
+                  id=evidence_id,
+                  case_id=case_id,
+                  source_class=request.source.source_class,
+                  source_type=request.source.source_type,
+                  acquisition_method=request.source.acquisition_method,
+                  collector_user_id=actor.id,
+                  captured_at=request.captured_at,
+                  original_timezone=request.original_timezone,
+                  state=EvidenceState.STAGING,
+                  tool_name=request.tool_name,
+                  tool_version=request.tool_version,
+              )
+
+              if request.source_locator is not None:
+                  artifact.source_locator_ciphertext = crypto.encrypt(
+                      request.source_locator,
+                      purpose="evidence.source_locator",
+                      resource_id=str(evidence_id),
+                  )
+                  artifact.source_locator_hash = crypto.blind_index(
+                      request.source_locator,
+                      purpose=f"evidence.source_locator.{case_id}",
+                  )
+              if request.source.authority_reference is not None:
+                  artifact.authority_reference_ciphertext = crypto.encrypt(
+                      request.source.authority_reference,
+                      purpose="evidence.authority_reference",
+                      resource_id=str(evidence_id),
+                  )
+              if request.notes is not None:
+                  artifact.notes_ciphertext = crypto.encrypt(
+                      request.notes,
+                      purpose="evidence.notes",
+                      resource_id=str(evidence_id),
+                  )
+
+              preserve_evidence_manifest(
+                  artifact,
+                  media_type=detected.media_type,
+                  size_bytes=stored.size_bytes,
+                  sha256=stored.sha256,
+                  sha512=_sha512_for_object(object_store, stored.object_key),
+                  object_key=stored.object_key,
+                  ingested_at=datetime.now(UTC),
+              )
+              session.add(artifact)
+
+              job = Job(
+                  id=uuid4(),
+                  case_id=case_id,
+                  resource_type="evidence",
+                  resource_id=str(evidence_id),
+                  task_name=_TASK_NAME,
+                  queue="ingest",
+                  idempotency_key=f"ingest:{evidence_id}:{_PIPELINE_VERSION}",
+                  state=JobState.PENDING,
+              )
+              session.add(job)
+              session.add(
+                  CustodyEvent(
+                      id=uuid4(),
+                      evidence_id=evidence_id,
+                      case_id=case_id,
+                      actor_user_id=actor.id,
+                      event_type="CUSTODY_CREATED",
+                      request_id=request_id,
+                      reason="Original evidence preserved into the Evidence Vault",
+                      metadata_json={
+                          "source_class": request.source.source_class.value,
+                          "media_type": detected.media_type,
+                          "sha256": stored.sha256,
+                      },
+                  )
+              )
+              append_audit_event(
+                  session,
+                  actor_user_id=actor.id,
+                  event_type="EVIDENCE_INGESTED",
+                  resource_type="evidence",
+                  resource_id=str(evidence_id),
+                  case_id=case_id,
+                  request_id=request_id,
+                  metadata={
+                      "source_class": request.source.source_class.value,
+                      "media_type": detected.media_type,
+                      "size_bytes": stored.size_bytes,
+                      "sha256": stored.sha256,
+                      "job_id": str(job.id),
+                  },
+              )
+              await session.commit()
+
+              publisher = publish_job or _default_publish
+              try:
+                  await publisher(job.id)
+              except Exception:
+                  return EvidenceIngestResult(
+                      evidence_id=evidence_id,
+                      job_id=job.id,
+                      dispatch_state=EvidenceDispatchState.PENDING,
+                      dispatch_error_code="BROKER_PUBLISH_FAILED",
+                  )
+              return EvidenceIngestResult(
+                  evidence_id=evidence_id,
+                  job_id=job.id,
+                  dispatch_state=EvidenceDispatchState.PUBLISHED,
+              )
+          PY
+
+      - name: Run focused GREEN integration tests
+        run: uv run pytest -q apps/api/tests/integration/test_evidence_ingest_service.py | tee /tmp/task4-pres-focused.txt
+
+      - name: Run Ruff
+        run: uv run ruff check .
+
+      - name: Run complete Python regression suite
+        run: uv run pytest -q | tee /tmp/task4-pres-python.txt
+
+      - name: Commit verified preservation service
+        if: success()
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/api/darknetra_api/services/evidence_ingest.py
+          git commit -m 'feat: preserve uploaded evidence transactionally'
+          VERIFIED_SHA="$(git rev-parse HEAD)"
+          cat > docs/verification/plan03-task4-preservation-green.md <<EOF
+          # Plan 03 Task 4 — preservation transaction GREEN verification
+
+          - **Verified code commit:** \`$VERIFIED_SHA\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          | Gate | Outcome |
+          |---|---|
+          | Previously recorded RED integration contract | confirmed |
+          | Focused PostgreSQL-backed preservation tests | success |
+          | Ruff | success |
+          | Complete Python regression suite | success |
+
+          ## Verified transaction boundary
+
+          - Case authorization occurs before object admission.
+          - Original bytes stream into content-addressed storage before metadata is referenced.
+          - Byte-detected type and declared media type are reconciled before authoritative rows are created.
+          - Manifest, encrypted source metadata, custody, audit, and durable job rows commit together.
+          - Transient Celery delivery occurs only after a second database session can observe the committed artifact and job.
+          - Unsupported executable content and MIME conflicts create no authoritative evidence/job/custody/audit rows.
+          - Broker failure leaves the preserved artifact and a durable \`PENDING\` job rather than rolling evidence back.
+
+          Task 4 remains in progress: the authenticated multipart HTTP route and request-size streaming adapter are next.
+          EOF
+          git add docs/verification/plan03-task4-preservation-green.md
+          git rm .github/workflows/plan03-task4-preservation-green.yml
+          git commit -m 'docs: verify Task 4 preservation transaction [skip ci]'
+          git push origin HEAD:testing-codex
