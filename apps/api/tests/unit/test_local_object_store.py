@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -78,13 +79,14 @@ def test_final_object_is_read_only_where_permissions_are_supported(tmp_path: Pat
 
 @given(payload=st.binary(max_size=128 * 1024))
 @settings(max_examples=40, deadline=None)
-def test_arbitrary_bytes_round_trip_to_digest_address(payload: bytes, tmp_path: Path) -> None:
-    store = LocalObjectStore(tmp_path)
-    stored = store.put_verified(io.BytesIO(payload))
+def test_arbitrary_bytes_round_trip_to_digest_address(payload: bytes) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        store = LocalObjectStore(Path(directory))
+        stored = store.put_verified(io.BytesIO(payload))
 
-    assert stored.object_key == _expected_key(payload)
-    assert stored.sha256 == hashlib.sha256(payload).hexdigest()
-    assert stored.size_bytes == len(payload)
-    with store.open(stored.object_key) as handle:
-        assert handle.read() == payload
-    assert store.verify(stored.object_key, stored.sha256) is True
+        assert stored.object_key == _expected_key(payload)
+        assert stored.sha256 == hashlib.sha256(payload).hexdigest()
+        assert stored.size_bytes == len(payload)
+        with store.open(stored.object_key) as handle:
+            assert handle.read() == payload
+        assert store.verify(stored.object_key, stored.sha256) is True
