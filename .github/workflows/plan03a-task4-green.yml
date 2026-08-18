@@ -1,5 +1,6 @@
 name: Plan 03a Task 4 keyring GREEN gate
 
+# Rerun after correcting the final keyring test import-order lint violation.
 on:
   push:
     branches: [testing-codex]
