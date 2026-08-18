@@ -99,6 +99,31 @@ jobs:
           echo '3ad632bef88d519c815cd5951199eead92b62f3139b280272b35408bc764a6e2  .automation/plan03-task1.patch.gz' | sha256sum -c -
           gzip -dc .automation/plan03-task1-run.sh.gz > /tmp/plan03-task1-run.sh
           echo 'da542a8488d72f9687d0dd3563bb241b05ab972b304a8b9396332ef8698a42ab  /tmp/plan03-task1-run.sh' | sha256sum -c -
+          python - <<'PY'
+          from pathlib import Path
+
+          runner = Path('/tmp/plan03-task1-run.sh')
+          text = runner.read_text(encoding='utf-8')
+          apply_line = 'git apply /tmp/plan03-task1.patch\n'
+          correction = '''git apply /tmp/plan03-task1.patch
+          python - <<'PY_WORKER_IMPORT_FIX'
+          from pathlib import Path
+
+          dockerfile = Path('infrastructure/docker/api.Dockerfile')
+          docker_text = dockerfile.read_text(encoding='utf-8')
+          anchor = '    UV_NO_PROGRESS=1\n'
+          addition = 'ENV PYTHONPATH=/app/apps/api\n'
+          if addition not in docker_text:
+              if docker_text.count(anchor) != 1:
+                  raise SystemExit('API Dockerfile environment anchor was not found exactly once')
+              docker_text = docker_text.replace(anchor, anchor + addition, 1)
+          dockerfile.write_text(docker_text, encoding='utf-8')
+          PY_WORKER_IMPORT_FIX
+          '''
+          if text.count(apply_line) != 1:
+              raise SystemExit('Task 1 runner patch-application boundary was not found exactly once')
+          runner.write_text(text.replace(apply_line, correction, 1), encoding='utf-8')
+          PY
           bash -n /tmp/plan03-task1-run.sh
           chmod 700 /tmp/plan03-task1-run.sh
           /tmp/plan03-task1-run.sh
