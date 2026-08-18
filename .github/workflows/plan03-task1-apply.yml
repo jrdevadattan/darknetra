@@ -1,5 +1,6 @@
 name: Plan 03 Task 1 durable job boundary
 
+# Execute the already-staged TDD patch and record fresh release evidence.
 on:
   push:
     branches: [testing-codex]
