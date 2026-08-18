@@ -1,0 +1,623 @@
+name: Plan 03 Task 9 integrity API and pipeline guard TDD
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task9-api-pipeline.yml
+
+permissions:
+  contents: write
+
+jobs:
+  red-green:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task9-api@127.0.0.1:5432/darknetra_plan03_task9_api
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-task9-api
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task9_api
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task9-api
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task9_api"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Require integrity service checkpoint
+        run: test -f docs/verification/plan03-task9-integrity-service.md
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f"::add-mask::{value}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n")
+              out.write(f"DARKNETRA_FIELD_KEY_V1_B64={field}\n")
+              out.write("DARKNETRA_FIELD_KEYRING_B64_JSON=" + json.dumps({"v1": field}, separators=(",", ":")) + "\n")
+              out.write("DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n")
+              out.write(f"DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n")
+          PY
+
+      - name: Install and migrate
+        run: |
+          uv sync --all-packages --dev --frozen
+          uv run alembic -c apps/api/alembic.ini upgrade head
+
+      - name: Write route and processing-guard contracts first
+        run: |
+          cat > apps/api/tests/integration/test_evidence_integrity_route.py <<'PY'
+          from __future__ import annotations
+
+          import io
+          from datetime import UTC, datetime
+          from pathlib import Path
+          from uuid import uuid4
+
+          import httpx
+          import pytest
+          import sqlalchemy as sa
+          from darknetra_api.db.session import async_session_factory
+          from darknetra_api.main import app
+          from darknetra_api.models.audit import AuditEvent
+          from darknetra_api.models.auth_session import AuthSession
+          from darknetra_api.models.case import Case
+          from darknetra_api.models.case_membership import CaseMembership, CaseMembershipRole
+          from darknetra_api.models.custody import CustodyEvent
+          from darknetra_api.models.enums import CaseSensitivity
+          from darknetra_api.models.evidence import EvidenceArtifact, EvidenceDerivation, EvidenceSourceClass, EvidenceState
+          from darknetra_api.models.job import Job
+          from darknetra_api.models.user import User
+          from darknetra_api.routes import evidence as route
+          from darknetra_api.services.evidence import preserve_evidence_manifest
+          from darknetra_api.storage.local import LocalObjectStore
+
+
+          async def clean_database() -> None:
+              async with async_session_factory() as session:
+                  await session.execute(sa.delete(CustodyEvent))
+                  await session.execute(sa.delete(EvidenceDerivation))
+                  await session.execute(sa.delete(EvidenceArtifact))
+                  await session.execute(sa.delete(Job))
+                  await session.execute(sa.delete(CaseMembershipRole))
+                  await session.execute(sa.delete(CaseMembership))
+                  await session.execute(sa.delete(AuditEvent))
+                  await session.execute(sa.delete(Case))
+                  await session.execute(sa.delete(AuthSession))
+                  await session.execute(sa.delete(User))
+                  await session.commit()
+
+
+          @pytest.fixture(autouse=True)
+          async def clean() -> None:
+              app.dependency_overrides.clear()
+              await clean_database()
+              yield
+              app.dependency_overrides.clear()
+              await clean_database()
+
+
+          async def seed(store: LocalObjectStore) -> tuple[User, Case, EvidenceArtifact, Path]:
+              data = b"authorized integrity route bytes"
+              stored = store.put_verified(io.BytesIO(data))
+              async with async_session_factory() as session:
+                  suffix = uuid4().hex[:10]
+                  owner = User(
+                      username=f"integrity-route-{suffix}",
+                      username_normalized=f"integrity-route-{suffix}",
+                      display_name="Integrity Route Owner",
+                      password_hash="unused",
+                      global_roles=[],
+                      is_active=True,
+                      must_change_password=False,
+                  )
+                  session.add(owner)
+                  await session.flush()
+                  case = Case(
+                      case_code=f"IRR-{suffix.upper()}",
+                      title="Authorized integrity route fixture",
+                      sensitivity=CaseSensitivity.RESTRICTED,
+                      owner_user_id=owner.id,
+                      source_authority_summary="Authorized synthetic fixture",
+                  )
+                  session.add(case)
+                  await session.flush()
+                  artifact = EvidenceArtifact(
+                      case_id=case.id,
+                      source_class=EvidenceSourceClass.SYNTHETIC,
+                      source_type="synthetic.integrity.route",
+                      acquisition_method="authorized_test_generation",
+                      collector_user_id=owner.id,
+                      captured_at=datetime.now(UTC),
+                      original_timezone="UTC",
+                      state=EvidenceState.STAGING,
+                  )
+                  preserve_evidence_manifest(
+                      artifact,
+                      media_type="text/plain",
+                      size_bytes=stored.size_bytes,
+                      sha256=stored.sha256,
+                      sha512=None,
+                      object_key=stored.object_key,
+                  )
+                  artifact.state = EvidenceState.READY
+                  session.add(artifact)
+                  await session.commit()
+                  await session.refresh(owner)
+                  await session.refresh(case)
+                  await session.refresh(artifact)
+                  return owner, case, artifact, store.root / stored.object_key
+
+
+          def overrides(actor: User, store: LocalObjectStore) -> None:
+              async def actor_override(): return actor
+              async def session_override():
+                  async with async_session_factory() as session:
+                      yield session
+              app.dependency_overrides[route.AUTH_DEPENDENCY] = actor_override
+              app.dependency_overrides[route.SESSION_DEPENDENCY] = session_override
+              app.dependency_overrides[route.OBJECT_STORE_DEPENDENCY] = lambda: store
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_integrity_route_returns_safe_verified_response(tmp_path: Path) -> None:
+              store = LocalObjectStore(tmp_path / "vault")
+              owner, case, artifact, _path = await seed(store)
+              overrides(owner, store)
+              transport = httpx.ASGITransport(app=app)
+              async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+                  response = await client.post(
+                      f"/api/v1/cases/{case.id}/evidence/{artifact.id}/verify-integrity"
+                  )
+              assert response.status_code == 200, response.text
+              body = response.json()
+              assert body["outcome"] == "VERIFIED"
+              assert body["state"] == "READY"
+              assert body["expected_sha256"] == artifact.sha256
+              assert body["observed_sha256"] == artifact.sha256
+              assert "object_key" not in body
+              assert str(tmp_path) not in response.text
+              assert response.headers["cache-control"] == "no-store"
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_integrity_route_reports_mismatch_as_successful_detection(tmp_path: Path) -> None:
+              store = LocalObjectStore(tmp_path / "vault")
+              owner, case, artifact, object_path = await seed(store)
+              object_path.chmod(0o600)
+              object_path.write_bytes(b"tampered")
+              object_path.chmod(0o400)
+              overrides(owner, store)
+              transport = httpx.ASGITransport(app=app)
+              async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+                  response = await client.post(
+                      f"/api/v1/cases/{case.id}/evidence/{artifact.id}/verify-integrity"
+                  )
+              assert response.status_code == 200
+              body = response.json()
+              assert body["outcome"] == "MISMATCH"
+              assert body["state"] == "INTEGRITY_MISMATCH"
+              assert body["observed_sha256"] != body["expected_sha256"]
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_integrity_route_unknown_and_wrong_case_are_identical_404(tmp_path: Path) -> None:
+              store = LocalObjectStore(tmp_path / "vault")
+              owner, case, artifact, _path = await seed(store)
+              overrides(owner, store)
+              transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+              async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+                  wrong_case = await client.post(
+                      f"/api/v1/cases/{uuid4()}/evidence/{artifact.id}/verify-integrity"
+                  )
+                  unknown = await client.post(
+                      f"/api/v1/cases/{case.id}/evidence/{uuid4()}/verify-integrity"
+                  )
+              assert wrong_case.status_code == 404
+              assert unknown.status_code == 404
+              assert wrong_case.json() == unknown.json()
+          PY
+
+          cat > apps/api/tests/integration/test_pipeline_integrity_guard.py <<'PY'
+          from __future__ import annotations
+
+          import io
+          from datetime import UTC, datetime
+          from pathlib import Path
+          from uuid import uuid4
+
+          import pytest
+          import sqlalchemy as sa
+          from darknetra_api.db.session import async_session_factory
+          from darknetra_api.models.audit import AuditEvent
+          from darknetra_api.models.auth_session import AuthSession
+          from darknetra_api.models.case import Case
+          from darknetra_api.models.case_membership import CaseMembership, CaseMembershipRole
+          from darknetra_api.models.custody import CustodyEvent
+          from darknetra_api.models.enums import CaseSensitivity
+          from darknetra_api.models.evidence import EvidenceArtifact, EvidenceDerivation, EvidenceSourceClass, EvidenceState
+          from darknetra_api.models.job import Job, JobState
+          from darknetra_api.models.user import User
+          from darknetra_api.security.encryption import SensitiveFieldCrypto
+          from darknetra_api.services.evidence import preserve_evidence_manifest
+          from darknetra_api.services.ingestion_pipeline import process_evidence_once
+          from darknetra_api.storage.local import LocalObjectStore
+
+
+          async def clean_database() -> None:
+              async with async_session_factory() as session:
+                  await session.execute(sa.delete(CustodyEvent))
+                  await session.execute(sa.delete(EvidenceDerivation))
+                  await session.execute(sa.delete(EvidenceArtifact))
+                  await session.execute(sa.delete(Job))
+                  await session.execute(sa.delete(CaseMembershipRole))
+                  await session.execute(sa.delete(CaseMembership))
+                  await session.execute(sa.delete(AuditEvent))
+                  await session.execute(sa.delete(Case))
+                  await session.execute(sa.delete(AuthSession))
+                  await session.execute(sa.delete(User))
+                  await session.commit()
+
+
+          @pytest.fixture(autouse=True)
+          async def clean() -> None:
+              await clean_database()
+              yield
+              await clean_database()
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_worker_detects_tamper_and_never_parses_or_creates_derivatives(tmp_path: Path) -> None:
+              store = LocalObjectStore(tmp_path / "vault")
+              stored = store.put_verified(io.BytesIO(b"original worker bytes"))
+              object_path = store.root / stored.object_key
+              async with async_session_factory() as session:
+                  suffix = uuid4().hex[:10]
+                  owner = User(
+                      username=f"guard-owner-{suffix}",
+                      username_normalized=f"guard-owner-{suffix}",
+                      display_name="Guard Owner",
+                      password_hash="unused",
+                      global_roles=[],
+                      is_active=True,
+                      must_change_password=False,
+                  )
+                  session.add(owner)
+                  await session.flush()
+                  case = Case(
+                      case_code=f"GRD-{suffix.upper()}",
+                      title="Authorized guard fixture",
+                      sensitivity=CaseSensitivity.RESTRICTED,
+                      owner_user_id=owner.id,
+                      source_authority_summary="Authorized synthetic fixture",
+                  )
+                  session.add(case)
+                  await session.flush()
+                  artifact = EvidenceArtifact(
+                      case_id=case.id,
+                      source_class=EvidenceSourceClass.SYNTHETIC,
+                      source_type="synthetic.guard",
+                      acquisition_method="authorized_test_generation",
+                      collector_user_id=owner.id,
+                      captured_at=datetime.now(UTC),
+                      original_timezone="UTC",
+                      state=EvidenceState.STAGING,
+                  )
+                  preserve_evidence_manifest(
+                      artifact,
+                      media_type="text/plain",
+                      size_bytes=stored.size_bytes,
+                      sha256=stored.sha256,
+                      sha512=None,
+                      object_key=stored.object_key,
+                  )
+                  session.add(artifact)
+                  await session.flush()
+                  job = Job(
+                      case_id=case.id,
+                      resource_type="evidence",
+                      resource_id=str(artifact.id),
+                      task_name="darknetra.ingestion.process_evidence",
+                      queue="ingest",
+                      idempotency_key=f"ingest:{artifact.id}:v1",
+                      state=JobState.PENDING,
+                  )
+                  session.add(job)
+                  await session.commit()
+                  artifact_id = artifact.id
+                  expected_hash = artifact.sha256
+              object_path.chmod(0o600)
+              object_path.write_bytes(b"tampered before worker")
+              object_path.chmod(0o400)
+              crypto = SensitiveFieldCrypto(
+                  field_keys={"v1": b"I" * 32},
+                  active_key_version="v1",
+                  blind_index_key=b"J" * 32,
+              )
+              async with async_session_factory() as session:
+                  outcome = await process_evidence_once(
+                      session=session,
+                      evidence_id=artifact_id,
+                      pipeline_version="v1",
+                      object_store=store,
+                      crypto=crypto,
+                      request_id=str(uuid4()),
+                  )
+                  await session.commit()
+                  assert outcome.state is EvidenceState.INTEGRITY_MISMATCH
+                  assert outcome.derivative_ids == ()
+              async with async_session_factory() as session:
+                  artifact = await session.get(EvidenceArtifact, artifact_id)
+                  job = (
+                      await session.execute(
+                          sa.select(Job).where(Job.idempotency_key == f"ingest:{artifact_id}:v1")
+                      )
+                  ).scalar_one()
+                  assert artifact is not None
+                  assert artifact.sha256 == expected_hash
+                  assert artifact.state is EvidenceState.INTEGRITY_MISMATCH
+                  assert artifact.quarantine_reason == "HASH_MISMATCH"
+                  assert job.state is JobState.FAILED
+                  assert job.error_code == "INTEGRITY_MISMATCH"
+                  assert (
+                      await session.execute(
+                          sa.select(sa.func.count(EvidenceDerivation.id)).where(
+                              EvidenceDerivation.parent_evidence_id == artifact_id
+                          )
+                      )
+                  ).scalar_one() == 0
+          PY
+
+      - name: Prove RED before implementation
+        run: |
+          set +e
+          uv run pytest -q \
+            apps/api/tests/integration/test_evidence_integrity_route.py \
+            apps/api/tests/integration/test_pipeline_integrity_guard.py \
+            >/tmp/task9-api-red.log 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          grep -Eq 'verify-integrity|INTEGRITY_MISMATCH|404|assert' /tmp/task9-api-red.log
+
+      - name: Extend safe evidence response schemas
+        run: |
+          cat >> apps/api/darknetra_api/schemas/evidence.py <<'PY'
+
+
+          class EvidenceIntegrityRead(BaseModel):
+              model_config = {"extra": "forbid"}
+
+              evidence_id: UUID
+              case_id: UUID
+              outcome: Literal[
+                  "VERIFIED",
+                  "VERIFIED_PREVIOUS_MISMATCH",
+                  "MISMATCH",
+                  "OBJECT_MISSING",
+              ]
+              state: EvidenceState
+              expected_sha256: str
+              observed_sha256: str | None
+              expected_sha512: str | None
+              observed_sha512: str | None
+              size_bytes: int | None
+          PY
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("apps/api/darknetra_api/schemas/evidence.py")
+          text = path.read_text(encoding="utf-8")
+          if "from typing import Literal" not in text:
+              lines = text.splitlines()
+              insert = 1 if lines and lines[0].startswith("from __future__") else 0
+              lines.insert(insert, "from typing import Literal")
+              text = "\n".join(lines) + "\n"
+          path.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Add authenticated integrity endpoint
+        run: |
+          cat >> apps/api/darknetra_api/routes/evidence.py <<'PY'
+
+
+          @router.post(
+              "/cases/{case_id}/evidence/{evidence_id}/verify-integrity",
+              response_model=EvidenceIntegrityRead,
+          )
+          async def verify_integrity(
+              case_id: UUID,
+              evidence_id: UUID,
+              request: Request,
+              response: Response,
+              actor: Annotated[User, Depends(AUTH_DEPENDENCY)],
+              session: Annotated[AsyncSession, Depends(SESSION_DEPENDENCY)],
+              object_store: Annotated[LocalObjectStore, Depends(OBJECT_STORE_DEPENDENCY)],
+          ) -> EvidenceIntegrityRead:
+              request_id = getattr(request.state, "request_id", None) or str(uuid4())
+              result = await verify_evidence_integrity(
+                  session=session,
+                  actor=actor,
+                  case_id=case_id,
+                  evidence_id=evidence_id,
+                  object_store=object_store,
+                  request_id=request_id,
+              )
+              await session.commit()
+              response.headers["Cache-Control"] = "no-store"
+              return EvidenceIntegrityRead.model_validate(result, from_attributes=True)
+          PY
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("apps/api/darknetra_api/routes/evidence.py")
+          text = path.read_text(encoding="utf-8")
+          schema_import = "from darknetra_api.schemas.evidence import EvidenceArtifactRead\n"
+          replacement = "from darknetra_api.schemas.evidence import EvidenceArtifactRead, EvidenceIntegrityRead\n"
+          if schema_import in text:
+              text = text.replace(schema_import, replacement, 1)
+          elif "EvidenceIntegrityRead" not in text.split("\n", 80):
+              raise SystemExit("evidence schema import marker missing")
+          service_import = "from darknetra_api.services.integrity import verify_evidence_integrity\n"
+          if service_import not in text:
+              marker = "from darknetra_api.services.job_delivery import publish_ingestion_job\n"
+              if marker not in text:
+                  raise SystemExit("job delivery import marker missing")
+              text = text.replace(marker, marker + service_import, 1)
+          path.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Add fail-closed integrity mismatch handling to pipeline
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("apps/api/darknetra_api/services/ingestion_pipeline.py")
+          text = path.read_text(encoding="utf-8")
+          if "class EvidenceIntegrityError" not in text:
+              marker = "class RetryablePipelineError(PipelineError):\n    pass\n"
+              addition = marker + "\n\nclass EvidenceIntegrityError(PipelineError):\n    pass\n"
+              if marker not in text:
+                  raise SystemExit("pipeline error marker missing")
+              text = text.replace(marker, addition, 1)
+          text = text.replace(
+              '                      raise PipelineError("preserved evidence failed integrity verification")\n',
+              '                      raise EvidenceIntegrityError("preserved evidence failed integrity verification")\n',
+              1,
+          )
+          quarantine_marker = '''              if parent.state is EvidenceState.QUARANTINED:
+                  job.state = JobState.FAILED
+          '''
+          if "parent.state is EvidenceState.INTEGRITY_MISMATCH" not in text:
+              block = '''              if parent.state is EvidenceState.INTEGRITY_MISMATCH:
+                  job.state = JobState.FAILED
+                  job.error_code = "INTEGRITY_MISMATCH"
+                  job.error_message = "Evidence integrity mismatch blocks processing"
+                  job.finished_at = datetime.now(UTC)
+                  return PipelineOutcome(
+                      evidence_id=parent.id,
+                      pipeline_version=pipeline_version,
+                      state=parent.state,
+                      derivative_ids=(),
+                      warnings=("INTEGRITY_MISMATCH",),
+                  )
+
+          '''
+              if quarantine_marker not in text:
+                  raise SystemExit("pipeline quarantine marker missing")
+              text = text.replace(quarantine_marker, block + quarantine_marker, 1)
+          read_marker = '''                  data = await _read_original(object_store, parent)
+                  media_type = (parent.media_type or "").split(";", 1)[0].casefold()
+          '''
+          if "except EvidenceIntegrityError:" not in text:
+              replacement = '''                  try:
+                      data = await _read_original(object_store, parent)
+                  except EvidenceIntegrityError:
+                      parent.state = EvidenceState.INTEGRITY_MISMATCH
+                      parent.quarantine_reason = "HASH_MISMATCH"
+                      job.state = JobState.FAILED
+                      job.error_code = "INTEGRITY_MISMATCH"
+                      job.error_message = "Preserved evidence failed digest verification"
+                      job.finished_at = datetime.now(UTC)
+                      await session.flush()
+                      return PipelineOutcome(
+                          evidence_id=parent.id,
+                          pipeline_version=pipeline_version,
+                          state=parent.state,
+                          derivative_ids=(),
+                          warnings=("INTEGRITY_MISMATCH",),
+                      )
+                  media_type = (parent.media_type or "").split(";", 1)[0].casefold()
+          '''
+              if read_marker not in text:
+                  raise SystemExit("pipeline original-read marker missing")
+              text = text.replace(read_marker, replacement, 1)
+          path.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Verify GREEN and complete regression
+        run: |
+          uv run ruff check .
+          uv run pytest -q \
+            apps/api/tests/integration/test_evidence_integrity_route.py \
+            apps/api/tests/integration/test_pipeline_integrity_guard.py
+          uv run pytest -q
+          uv run python - <<'PY'
+          from darknetra_api.main import app
+          operation = app.openapi()["paths"]["/api/v1/cases/{case_id}/evidence/{evidence_id}/verify-integrity"]["post"]
+          assert "200" in operation["responses"]
+          serialized = str(operation).lower()
+          for forbidden in ("object_key", "ciphertext", "filesystem"):
+              assert forbidden not in serialized
+          PY
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml build api worker
+
+      - name: Record Task 9 API and guard checkpoint
+        run: |
+          mkdir -p docs/verification
+          cat > docs/verification/plan03-task9-api-pipeline.md <<EOF
+          # Plan 03 Task 9 — integrity API and pipeline guard TDD checkpoint
+
+          - **Source before implementation:** \`$(git rev-parse HEAD)\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          ## RED
+
+          Authenticated endpoint, anti-enumeration and pre-parse tamper-guard contracts were written before implementation and failed as expected.
+
+          ## GREEN
+
+          | Gate | Outcome |
+          |---|---|
+          | Ruff | success |
+          | Safe verified/mismatch response tests | success |
+          | Wrong-case/unknown identical 404 tests | success |
+          | Worker pre-parse mismatch block test | success |
+          | Expected digest immutability and no-derivative test | success |
+          | Complete Python suite | success |
+          | OpenAPI sensitive/internal-field exclusion | success |
+          | Compose validation and image build | success |
+
+          A detected mismatch is a successful verification result, not a server error. The API exposes hashes and state but never the object key or filesystem path. The worker refuses to parse mismatched evidence and marks the authoritative job failed without creating a derivative.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/api/darknetra_api/schemas/evidence.py apps/api/darknetra_api/routes/evidence.py apps/api/darknetra_api/services/ingestion_pipeline.py apps/api/tests/integration/test_evidence_integrity_route.py apps/api/tests/integration/test_pipeline_integrity_guard.py docs/verification/plan03-task9-api-pipeline.md
+          git rm .github/workflows/plan03-task9-api-pipeline.yml
+          git commit -m 'feat: expose integrity verification and block tampered processing'
+          git push origin HEAD:testing-codex
