@@ -88,4 +88,21 @@ jobs:
       - name: Validate Compose
         run: docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
       - name: Build Compose images
-        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml build
+        run: docker compose -p darknetra-ci-worker -f docker-compose.yml -f docker-compose.dev.yml build
+      - name: Start and verify the real Celery worker
+        run: |
+          docker compose -p darknetra-ci-worker \
+            -f docker-compose.yml -f docker-compose.dev.yml \
+            up -d --no-build --wait --wait-timeout 180 postgres redis worker
+          docker compose -p darknetra-ci-worker \
+            -f docker-compose.yml -f docker-compose.dev.yml ps
+          docker compose -p darknetra-ci-worker \
+            -f docker-compose.yml -f docker-compose.dev.yml \
+            exec -T worker sh -lc \
+            'uv run --no-sync celery -A darknetra_api.jobs.celery_app:celery_app inspect ping -d "ingest@$HOSTNAME" --timeout=10 | grep -q pong'
+      - name: Tear down worker smoke stack
+        if: always()
+        run: |
+          docker compose -p darknetra-ci-worker \
+            -f docker-compose.yml -f docker-compose.dev.yml \
+            down -v --remove-orphans
