@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     )
     web_origin: str = "http://localhost:3000"
     jwt_signing_key_b64: str = ""
+    field_key_v1_b64: str = ""
+    field_blind_index_key_b64: str = ""
+    field_active_key_version: str = "v1"
 
     model_config = SettingsConfigDict(env_prefix="DARKNETRA_", extra="ignore")
 
@@ -23,6 +26,16 @@ class Settings(BaseSettings):
         if not self.jwt_signing_key_b64:
             raise RuntimeError("DARKNETRA_JWT_SIGNING_KEY_B64 must be configured")
         return self.jwt_signing_key_b64
+
+    def require_field_key_v1_b64(self) -> str:
+        if not self.field_key_v1_b64:
+            raise RuntimeError("DARKNETRA_FIELD_KEY_V1_B64 must be configured")
+        return self.field_key_v1_b64
+
+    def require_field_blind_index_key_b64(self) -> str:
+        if not self.field_blind_index_key_b64:
+            raise RuntimeError("DARKNETRA_FIELD_BLIND_INDEX_KEY_B64 must be configured")
+        return self.field_blind_index_key_b64
 
 
 @lru_cache
