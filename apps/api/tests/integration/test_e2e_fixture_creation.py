@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import subprocess
@@ -7,13 +8,12 @@ from uuid import UUID
 
 import pytest
 import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
 from darknetra_api.models.case import Case
 from darknetra_api.models.case_membership import CaseMembership, CaseMembershipRole
 from darknetra_api.models.enums import GlobalRole
 from darknetra_api.models.user import User
 from darknetra_api.security.passwords import verify_password
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = ROOT / "scripts" / "create_e2e_fixture.py"
@@ -51,7 +51,8 @@ async def test_fixture_cli_creates_deterministic_isolated_state_without_secret_o
         }
     )
 
-    result = subprocess.run(
+    result = await asyncio.to_thread(
+        subprocess.run,
         [sys.executable, str(SCRIPT)],
         cwd=ROOT,
         env=env,
