@@ -1,0 +1,661 @@
+name: Plan 03 Task 8 registered Celery ingestion worker TDD
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task8-celery.yml
+
+permissions:
+  contents: write
+
+jobs:
+  red-green:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task8-celery@127.0.0.1:5432/darknetra_plan03_task8_celery
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-task8-celery
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task8_celery
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task8-celery
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task8_celery"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Require pipeline checkpoint
+        run: test -f docs/verification/plan03-task8-pipeline.md
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f"::add-mask::{value}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n")
+              out.write(f"DARKNETRA_FIELD_KEY_V1_B64={field}\n")
+              out.write("DARKNETRA_FIELD_KEYRING_B64_JSON=" + json.dumps({"v1": field}, separators=(",", ":")) + "\n")
+              out.write("DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n")
+              out.write(f"DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n")
+          PY
+
+      - name: Install and migrate
+        run: |
+          uv sync --all-packages --dev --frozen
+          uv run alembic -c apps/api/alembic.ini upgrade head
+
+      - name: Write Celery registration and delivery contracts first
+        run: |
+          cat > apps/api/tests/integration/test_ingestion_celery.py <<'PY'
+          from __future__ import annotations
+
+          import asyncio
+          import importlib
+          import importlib.util
+          import io
+          from datetime import UTC, datetime
+          from pathlib import Path
+          from uuid import uuid4
+
+          import pytest
+          import sqlalchemy as sa
+          from darknetra_api.db.session import async_session_factory
+          from darknetra_api.jobs.celery_app import celery_app
+          from darknetra_api.models.audit import AuditEvent
+          from darknetra_api.models.auth_session import AuthSession
+          from darknetra_api.models.case import Case
+          from darknetra_api.models.case_membership import CaseMembership, CaseMembershipRole
+          from darknetra_api.models.custody import CustodyEvent
+          from darknetra_api.models.enums import CaseSensitivity
+          from darknetra_api.models.evidence import EvidenceArtifact, EvidenceDerivation, EvidenceSourceClass, EvidenceState
+          from darknetra_api.models.job import Job, JobState
+          from darknetra_api.models.user import User
+          from darknetra_api.services.evidence import preserve_evidence_manifest
+          from darknetra_api.storage.local import LocalObjectStore
+
+
+          TASK_NAME = "darknetra.ingestion.process_evidence"
+
+
+          def task_module():
+              spec = importlib.util.find_spec("darknetra_api.jobs.tasks.ingestion")
+              assert spec is not None, "registered ingestion Celery task is not implemented"
+              return importlib.import_module("darknetra_api.jobs.tasks.ingestion")
+
+
+          def delivery_module():
+              spec = importlib.util.find_spec("darknetra_api.services.job_delivery")
+              assert spec is not None, "durable pending-job delivery service is not implemented"
+              return importlib.import_module("darknetra_api.services.job_delivery")
+
+
+          async def clean_database() -> None:
+              async with async_session_factory() as session:
+                  await session.execute(sa.delete(CustodyEvent))
+                  await session.execute(sa.delete(EvidenceDerivation))
+                  await session.execute(sa.delete(EvidenceArtifact))
+                  await session.execute(sa.delete(Job))
+                  await session.execute(sa.delete(CaseMembershipRole))
+                  await session.execute(sa.delete(CaseMembership))
+                  await session.execute(sa.delete(AuditEvent))
+                  await session.execute(sa.delete(Case))
+                  await session.execute(sa.delete(AuthSession))
+                  await session.execute(sa.delete(User))
+                  await session.commit()
+
+
+          @pytest.fixture(autouse=True)
+          async def clean() -> None:
+              await clean_database()
+              yield
+              await clean_database()
+
+
+          async def seed_text(store: LocalObjectStore) -> tuple[EvidenceArtifact, Job]:
+              stored = store.put_verified(io.BytesIO(b"authorized eager worker text"))
+              async with async_session_factory() as session:
+                  suffix = uuid4().hex[:10]
+                  owner = User(
+                      username=f"celery-owner-{suffix}",
+                      username_normalized=f"celery-owner-{suffix}",
+                      display_name="Celery Owner",
+                      password_hash="unused",
+                      global_roles=[],
+                      is_active=True,
+                      must_change_password=False,
+                  )
+                  session.add(owner)
+                  await session.flush()
+                  case = Case(
+                      case_code=f"CEL-{suffix.upper()}",
+                      title="Authorized Celery fixture",
+                      sensitivity=CaseSensitivity.RESTRICTED,
+                      owner_user_id=owner.id,
+                      source_authority_summary="Authorized synthetic fixture",
+                  )
+                  session.add(case)
+                  await session.flush()
+                  artifact = EvidenceArtifact(
+                      case_id=case.id,
+                      source_class=EvidenceSourceClass.SYNTHETIC,
+                      source_type="synthetic.celery",
+                      acquisition_method="authorized_test_generation",
+                      collector_user_id=owner.id,
+                      captured_at=datetime.now(UTC),
+                      original_timezone="UTC",
+                      state=EvidenceState.STAGING,
+                  )
+                  preserve_evidence_manifest(
+                      artifact,
+                      media_type="text/plain",
+                      size_bytes=stored.size_bytes,
+                      sha256=stored.sha256,
+                      sha512=None,
+                      object_key=stored.object_key,
+                  )
+                  session.add(artifact)
+                  await session.flush()
+                  job = Job(
+                      case_id=case.id,
+                      resource_type="evidence",
+                      resource_id=str(artifact.id),
+                      task_name=TASK_NAME,
+                      queue="ingest",
+                      idempotency_key=f"ingest:{artifact.id}:v1",
+                      state=JobState.PENDING,
+                  )
+                  session.add(job)
+                  await session.commit()
+                  await session.refresh(artifact)
+                  await session.refresh(job)
+                  return artifact, job
+
+
+          def test_task_is_registered_with_bounded_retry_and_json_only_transport() -> None:
+              task = task_module()
+              celery_app.loader.import_default_modules()
+              assert TASK_NAME in celery_app.tasks
+              registered = celery_app.tasks[TASK_NAME]
+              assert registered.max_retries == 3
+              assert registered.soft_time_limit <= 270
+              assert registered.time_limit <= 300
+              assert celery_app.conf.task_serializer == "json"
+              assert celery_app.conf.accept_content == ["json"]
+              assert task.process_evidence.name == TASK_NAME
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_eager_task_processes_evidence_and_persists_success(tmp_path: Path, monkeypatch) -> None:
+              task = task_module()
+              store_path = tmp_path / "vault"
+              monkeypatch.setenv("DARKNETRA_EVIDENCE_STORE_PATH", str(store_path))
+              from darknetra_api.config import get_settings
+              get_settings.cache_clear()
+              artifact, job = await seed_text(LocalObjectStore(store_path))
+              celery_app.conf.task_always_eager = True
+              result = await asyncio.to_thread(
+                  task.process_evidence.apply,
+                  args=[str(artifact.id), "v1"],
+                  throw=True,
+              )
+              assert result.successful()
+              assert result.result["state"] == "READY"
+              async with async_session_factory() as session:
+                  refreshed = await session.get(EvidenceArtifact, artifact.id)
+                  refreshed_job = await session.get(Job, job.id)
+                  assert refreshed is not None and refreshed.state is EvidenceState.READY
+                  assert refreshed_job is not None and refreshed_job.state is JobState.SUCCEEDED
+                  assert (
+                      await session.execute(
+                          sa.select(sa.func.count(EvidenceDerivation.id)).where(
+                              EvidenceDerivation.parent_evidence_id == artifact.id
+                          )
+                      )
+                  ).scalar_one() == 1
+              get_settings.cache_clear()
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_pending_delivery_reconciliation_is_bounded_and_state_selective(tmp_path: Path) -> None:
+              delivery = delivery_module()
+              store = LocalObjectStore(tmp_path / "vault")
+              artifact, pending = await seed_text(store)
+              async with async_session_factory() as session:
+                  session.add(
+                      Job(
+                          case_id=artifact.case_id,
+                          resource_type="evidence",
+                          resource_id=str(uuid4()),
+                          task_name=TASK_NAME,
+                          queue="ingest",
+                          idempotency_key=f"ingest:{uuid4()}:succeeded",
+                          state=JobState.SUCCEEDED,
+                      )
+                  )
+                  await session.commit()
+
+              sent = []
+
+              class FakeApp:
+                  def send_task(self, name, *, args, queue, task_id):
+                      sent.append((name, args, queue, task_id))
+
+              async with async_session_factory() as session:
+                  report = await delivery.publish_pending_ingestion_jobs(
+                      session=session,
+                      app=FakeApp(),
+                      limit=1,
+                  )
+              assert report.selected == 1
+              assert report.published == 1
+              assert report.failed == 0
+              assert sent == [
+                  (TASK_NAME, [str(artifact.id), "v1"], "ingest", str(pending.id))
+              ]
+
+
+          def test_single_job_publish_fails_safe_when_broker_is_unavailable() -> None:
+              delivery = delivery_module()
+              job = Job(
+                  id=uuid4(),
+                  resource_type="evidence",
+                  resource_id=str(uuid4()),
+                  task_name=TASK_NAME,
+                  queue="ingest",
+                  idempotency_key=f"ingest:{uuid4()}:v1",
+                  state=JobState.PENDING,
+              )
+
+              class BrokenApp:
+                  def send_task(self, *args, **kwargs):
+                      raise OSError("broker unavailable")
+
+              assert delivery.publish_ingestion_job(job, app=BrokenApp()) is False
+              assert job.state is JobState.PENDING
+
+
+          def test_single_job_publish_rejects_non_ingestion_and_invalid_idempotency_keys() -> None:
+              delivery = delivery_module()
+              wrong_task = Job(
+                  id=uuid4(),
+                  resource_type="evidence",
+                  resource_id=str(uuid4()),
+                  task_name="other.task",
+                  queue="ingest",
+                  idempotency_key=f"ingest:{uuid4()}:v1",
+                  state=JobState.PENDING,
+              )
+              with pytest.raises(delivery.JobDeliveryError):
+                  delivery.publish_ingestion_job(wrong_task, app=object())
+              wrong_key = Job(
+                  id=uuid4(),
+                  resource_type="evidence",
+                  resource_id=str(uuid4()),
+                  task_name=TASK_NAME,
+                  queue="ingest",
+                  idempotency_key="malformed",
+                  state=JobState.PENDING,
+              )
+              with pytest.raises(delivery.JobDeliveryError):
+                  delivery.publish_ingestion_job(wrong_key, app=object())
+          PY
+
+      - name: Prove RED before implementation
+        run: |
+          set +e
+          uv run pytest -q apps/api/tests/integration/test_ingestion_celery.py >/tmp/task8-celery-red.log 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          grep -Eq 'registered ingestion Celery task is not implemented|durable pending-job delivery service is not implemented' /tmp/task8-celery-red.log
+
+      - name: Implement durable pending job delivery service
+        run: |
+          cat > apps/api/darknetra_api/services/job_delivery.py <<'PY'
+          from __future__ import annotations
+
+          import re
+          from dataclasses import dataclass
+          from typing import Any
+          from uuid import UUID
+
+          import sqlalchemy as sa
+          from celery import Celery
+          from sqlalchemy.ext.asyncio import AsyncSession
+
+          from darknetra_api.jobs.celery_app import celery_app
+          from darknetra_api.models.job import Job, JobState
+
+          TASK_NAME = "darknetra.ingestion.process_evidence"
+          _KEY = re.compile(
+              r"^ingest:(?P<evidence>[0-9a-fA-F-]{36}):(?P<version>[A-Za-z0-9._-]{1,80})$"
+          )
+
+
+          class JobDeliveryError(ValueError):
+              pass
+
+
+          @dataclass(frozen=True, slots=True)
+          class DeliveryReport:
+              selected: int
+              published: int
+              failed: int
+              job_ids: tuple[UUID, ...]
+
+
+          def _delivery_args(job: Job) -> tuple[str, str]:
+              if job.task_name != TASK_NAME or job.resource_type != "evidence":
+                  raise JobDeliveryError("job is not an evidence ingestion delivery")
+              match = _KEY.fullmatch(job.idempotency_key)
+              if match is None:
+                  raise JobDeliveryError("job idempotency key is invalid")
+              if match.group("evidence") != job.resource_id:
+                  raise JobDeliveryError("job resource and idempotency key disagree")
+              return job.resource_id, match.group("version")
+
+
+          def publish_ingestion_job(
+              job: Job,
+              *,
+              app: Celery | Any = celery_app,
+          ) -> bool:
+              evidence_id, pipeline_version = _delivery_args(job)
+              if job.state not in {JobState.PENDING, JobState.RETRYING}:
+                  return False
+              try:
+                  app.send_task(
+                      TASK_NAME,
+                      args=[evidence_id, pipeline_version],
+                      queue="ingest",
+                      task_id=str(job.id),
+                  )
+              except Exception:
+                  # PostgreSQL remains authoritative. A later reconciliation pass
+                  # can publish the same idempotent job again.
+                  return False
+              return True
+
+
+          async def publish_pending_ingestion_jobs(
+              *,
+              session: AsyncSession,
+              app: Celery | Any = celery_app,
+              limit: int = 100,
+          ) -> DeliveryReport:
+              if not 1 <= limit <= 1_000:
+                  raise JobDeliveryError("delivery batch limit must be between 1 and 1000")
+              jobs = (
+                  await session.execute(
+                      sa.select(Job)
+                      .where(
+                          Job.task_name == TASK_NAME,
+                          Job.resource_type == "evidence",
+                          Job.state.in_([JobState.PENDING, JobState.RETRYING]),
+                      )
+                      .order_by(Job.created_at, Job.id)
+                      .limit(limit)
+                      .with_for_update(skip_locked=True)
+                  )
+              ).scalars().all()
+              published = 0
+              failed = 0
+              for job in jobs:
+                  if publish_ingestion_job(job, app=app):
+                      published += 1
+                  else:
+                      failed += 1
+              return DeliveryReport(
+                  selected=len(jobs),
+                  published=published,
+                  failed=failed,
+                  job_ids=tuple(job.id for job in jobs),
+              )
+          PY
+
+      - name: Implement registered Celery ingestion task
+        run: |
+          mkdir -p apps/api/darknetra_api/jobs/tasks
+          cat > apps/api/darknetra_api/jobs/tasks/ingestion.py <<'PY'
+          from __future__ import annotations
+
+          import asyncio
+          from uuid import UUID, uuid4
+
+          from darknetra_api.config import get_settings
+          from darknetra_api.db.session import async_session_factory
+          from darknetra_api.jobs.celery_app import celery_app
+          from darknetra_api.security.keyring import SensitiveFieldKeyring
+          from darknetra_api.services.ingestion_pipeline import (
+              RetryablePipelineError,
+              mark_retry_exhausted,
+              process_evidence_once,
+          )
+          from darknetra_api.storage.local import LocalObjectStore
+
+          TASK_NAME = "darknetra.ingestion.process_evidence"
+          MAX_RETRIES = 3
+
+
+          async def _attempt(evidence_id: UUID, pipeline_version: str, request_id: str):
+              settings = get_settings()
+              store = LocalObjectStore(settings.evidence_store_path)
+              crypto = SensitiveFieldKeyring.from_settings(settings).crypto()
+              async with async_session_factory() as session:
+                  try:
+                      outcome = await process_evidence_once(
+                          session=session,
+                          evidence_id=evidence_id,
+                          pipeline_version=pipeline_version,
+                          object_store=store,
+                          crypto=crypto,
+                          request_id=request_id,
+                      )
+                  except RetryablePipelineError:
+                      await session.commit()
+                      raise
+                  else:
+                      await session.commit()
+                      return {
+                          "evidence_id": str(outcome.evidence_id),
+                          "pipeline_version": outcome.pipeline_version,
+                          "state": outcome.state.value,
+                          "derivative_ids": [str(value) for value in outcome.derivative_ids],
+                          "warnings": list(outcome.warnings),
+                          "idempotent_replay": outcome.idempotent_replay,
+                      }
+
+
+          async def _exhaust(evidence_id: UUID, pipeline_version: str) -> None:
+              async with async_session_factory() as session:
+                  await mark_retry_exhausted(
+                      session=session,
+                      evidence_id=evidence_id,
+                      pipeline_version=pipeline_version,
+                      error_code="PARSER_FAILURE",
+                      error_message="Parser failed after bounded Celery retries",
+                  )
+                  await session.commit()
+
+
+          @celery_app.task(
+              bind=True,
+              name=TASK_NAME,
+              max_retries=MAX_RETRIES,
+              soft_time_limit=270,
+              time_limit=300,
+              acks_late=True,
+              reject_on_worker_lost=True,
+              ignore_result=True,
+              serializer="json",
+          )
+          def process_evidence(self, evidence_id: str, pipeline_version: str = "v1"):
+              parsed_id = UUID(evidence_id)
+              request_id = str(getattr(self.request, "id", None) or uuid4())
+              try:
+                  return asyncio.run(_attempt(parsed_id, pipeline_version, request_id))
+              except RetryablePipelineError as exc:
+                  if self.request.retries >= MAX_RETRIES:
+                      asyncio.run(_exhaust(parsed_id, pipeline_version))
+                      raise
+                  countdown = min(2 ** self.request.retries, 30)
+                  raise self.retry(exc=exc, countdown=countdown, max_retries=MAX_RETRIES)
+          PY
+
+      - name: Register task imports with Celery and package
+        run: |
+          cat > apps/api/darknetra_api/jobs/tasks/__init__.py <<'PY'
+          """Registered ingestion tasks."""
+
+          from darknetra_api.jobs.tasks.ingestion import process_evidence
+
+          __all__ = ["process_evidence"]
+          PY
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("apps/api/darknetra_api/jobs/celery_app.py")
+          text = path.read_text(encoding="utf-8")
+          old = '    include=["darknetra_api.jobs.tasks"],\n'
+          new = '    include=["darknetra_api.jobs.tasks.ingestion"],\n'
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit("Celery include marker was not found")
+          marker = "celery_app.conf.update(\n"
+          import_setting = '    imports=("darknetra_api.jobs.tasks.ingestion",),\n'
+          if import_setting not in text:
+              if marker not in text:
+                  raise SystemExit("Celery config marker was not found")
+              text = text.replace(marker, marker + import_setting, 1)
+          path.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Use durable fail-safe delivery in the upload route
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("apps/api/darknetra_api/routes/evidence.py")
+          text = path.read_text(encoding="utf-8")
+          import_line = "from darknetra_api.services.job_delivery import publish_ingestion_job\n"
+          if import_line not in text:
+              marker = "from darknetra_api.services.evidence_ingest import preserve_uploaded_evidence\n"
+              if marker not in text:
+                  raise SystemExit("route service import marker was not found")
+              text = text.replace(marker, marker + import_line, 1)
+          start = text.find("def _publish_if_pipeline_available(")
+          end = text.find("\n\n\n@router.post", start)
+          if start < 0 or end < 0:
+              raise SystemExit("route publication helper was not found")
+          replacement = '''def _publish_if_pipeline_available(*, job, evidence_id: UUID, pipeline_version: str) -> bool:
+              del evidence_id, pipeline_version
+              celery_app.loader.import_default_modules()
+              return publish_ingestion_job(job, app=celery_app)
+          '''
+          replacement = "\n".join(
+              line[10:] if line.startswith("          ") else line
+              for line in replacement.splitlines()
+          )
+          text = text[:start] + replacement + text[end:]
+          old_call = '''              queued = _publish_if_pipeline_available(
+                  job_id=result.job.id,
+                  evidence_id=result.artifact.id,
+                  pipeline_version="v1",
+              )
+          '''
+          new_call = '''              queued = _publish_if_pipeline_available(
+                  job=result.job,
+                  evidence_id=result.artifact.id,
+                  pipeline_version="v1",
+              )
+          '''
+          if old_call not in text:
+              raise SystemExit("route publication call marker was not found")
+          path.write_text(text.replace(old_call, new_call, 1), encoding="utf-8")
+          PY
+
+      - name: Verify GREEN focused and full suites
+        run: |
+          uv run ruff check .
+          uv run pytest -q apps/api/tests/integration/test_ingestion_celery.py
+          uv run pytest -q
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml build api worker
+
+      - name: Real worker registration smoke
+        run: |
+          docker compose -p darknetra-task8-worker -f docker-compose.yml \
+            up -d --no-build --wait --wait-timeout 180 postgres redis worker
+          docker compose -p darknetra-task8-worker -f docker-compose.yml \
+            exec -T worker sh -lc \
+            'uv run --no-sync celery -A darknetra_api.jobs.celery_app:celery_app inspect registered -d "ingest@$HOSTNAME" --timeout=10 | grep -q "darknetra.ingestion.process_evidence"'
+          docker compose -p darknetra-task8-worker -f docker-compose.yml down -v --remove-orphans
+
+      - name: Record Task 8 Celery checkpoint
+        run: |
+          mkdir -p docs/verification
+          cat > docs/verification/plan03-task8-celery.md <<EOF
+          # Plan 03 Task 8 — registered Celery ingestion worker TDD checkpoint
+
+          - **Source before implementation:** \`$(git rev-parse HEAD)\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          ## RED
+
+          Task registration, eager execution, durable reconciliation and broker-failure contracts were written first and failed with the expected missing-task/service assertions.
+
+          ## GREEN
+
+          | Gate | Outcome |
+          |---|---|
+          | Ruff | success |
+          | Registered JSON-only task with three bounded retries | success |
+          | Eager PostgreSQL/object-store end-to-end task | success |
+          | Bounded PENDING/RETRYING reconciliation | success |
+          | Broker-unavailable fail-safe PENDING behaviour | success |
+          | Complete Python suite | success |
+          | API/worker image build | success |
+          | Real Celery worker registered-task inspection | success |
+
+          The upload route commits the immutable original and authoritative job before delivery. A broker failure leaves the job pending for reconciliation. Duplicate delivery is safe because the processing and derivative layers enforce PostgreSQL idempotency.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/api/darknetra_api/jobs/celery_app.py apps/api/darknetra_api/jobs/tasks apps/api/darknetra_api/services/job_delivery.py apps/api/darknetra_api/routes/evidence.py apps/api/tests/integration/test_ingestion_celery.py docs/verification/plan03-task8-celery.md
+          git rm .github/workflows/plan03-task8-celery.yml
+          git commit -m 'feat: register durable evidence ingestion worker'
+          git push origin HEAD:testing-codex
