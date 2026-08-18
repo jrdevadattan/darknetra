@@ -1,0 +1,641 @@
+name: Plan 03 Task 4 preservation service TDD
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task4-preservation-service.yml
+
+permissions:
+  contents: write
+
+jobs:
+  red-green:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task4-service@127.0.0.1:5432/darknetra_plan03_task4_service
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-task4-service
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task4_service
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task4-service
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task4_service"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Require verified Task 3 and Task 4 policy checkpoints
+        run: |
+          test -f docs/verification/plan03-task3-content-addressed-storage.md
+          test -f docs/verification/plan03-task4-ingestion-policy.md
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key():
+              return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind):
+              print(f"::add-mask::{value}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n")
+              out.write(f"DARKNETRA_FIELD_KEY_V1_B64={field}\n")
+              out.write("DARKNETRA_FIELD_KEYRING_B64_JSON=" + json.dumps({"v1": field}, separators=(",", ":")) + "\n")
+              out.write("DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n")
+              out.write(f"DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n")
+          PY
+
+      - name: Install frozen workspace and migrate
+        run: |
+          uv sync --all-packages --dev --frozen
+          uv run alembic -c apps/api/alembic.ini upgrade head
+
+      - name: Write preservation contracts before production code
+        run: |
+          cat > apps/api/tests/integration/test_evidence_preservation.py <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import importlib
+          import importlib.util
+          from datetime import UTC, datetime
+          from io import BytesIO
+          from pathlib import Path
+          from uuid import uuid4
+
+          import pytest
+          import sqlalchemy as sa
+          from darknetra_api.authz.policy import CaseNotFound
+          from darknetra_api.db.session import async_session_factory
+          from darknetra_api.models.audit import AuditEvent
+          from darknetra_api.models.auth_session import AuthSession
+          from darknetra_api.models.case import Case
+          from darknetra_api.models.case_membership import CaseMembership, CaseMembershipRole
+          from darknetra_api.models.custody import CustodyEvent
+          from darknetra_api.models.enums import CaseSensitivity
+          from darknetra_api.models.evidence import EvidenceArtifact, EvidenceSourceClass, EvidenceState
+          from darknetra_api.models.job import Job, JobState
+          from darknetra_api.models.user import User
+          from darknetra_api.policy.ingestion import (
+              EvidenceSourceMetadata,
+              IngestionLimits,
+              MediaTypeMismatch,
+              UploadSizeExceeded,
+          )
+          from darknetra_api.security.encryption import SensitiveFieldCrypto
+          from darknetra_api.storage.local import LocalObjectStore
+
+
+          def service_module():
+              spec = importlib.util.find_spec("darknetra_api.services.evidence_ingest")
+              assert spec is not None, "evidence preservation service is not implemented"
+              return importlib.import_module("darknetra_api.services.evidence_ingest")
+
+
+          async def clean_database() -> None:
+              async with async_session_factory() as session:
+                  await session.execute(sa.delete(CustodyEvent))
+                  await session.execute(sa.delete(EvidenceArtifact))
+                  await session.execute(sa.delete(Job))
+                  await session.execute(sa.delete(CaseMembershipRole))
+                  await session.execute(sa.delete(CaseMembership))
+                  await session.execute(sa.delete(AuditEvent))
+                  await session.execute(sa.delete(Case))
+                  await session.execute(sa.delete(AuthSession))
+                  await session.execute(sa.delete(User))
+                  await session.commit()
+
+
+          @pytest.fixture(autouse=True)
+          async def clean() -> None:
+              await clean_database()
+              yield
+              await clean_database()
+
+
+          async def seed_case() -> tuple[User, Case]:
+              async with async_session_factory() as session:
+                  suffix = uuid4().hex[:10]
+                  owner = User(
+                      username=f"preserver-{suffix}",
+                      username_normalized=f"preserver-{suffix}",
+                      display_name="Synthetic Evidence Preserver",
+                      password_hash="unused",
+                      global_roles=[],
+                      is_active=True,
+                      must_change_password=False,
+                  )
+                  session.add(owner)
+                  await session.flush()
+                  case = Case(
+                      case_code=f"PRE-{suffix.upper()}",
+                      title="Authorized synthetic preservation test",
+                      sensitivity=CaseSensitivity.RESTRICTED,
+                      owner_user_id=owner.id,
+                      source_authority_summary="Authorized synthetic fixture",
+                  )
+                  session.add(case)
+                  await session.commit()
+                  await session.refresh(owner)
+                  await session.refresh(case)
+                  return owner, case
+
+
+          def metadata() -> EvidenceSourceMetadata:
+              return EvidenceSourceMetadata(
+                  source_class=EvidenceSourceClass.SYNTHETIC,
+                  source_type="synthetic.fixture",
+                  acquisition_method="authorized_test_generation",
+                  captured_at=datetime.now(UTC),
+                  original_timezone="UTC",
+                  source_locator="https://example.invalid/authorized-fixture",
+                  notes="Restricted synthetic fixture note",
+                  tool_name="pytest",
+                  tool_version="1",
+              )
+
+
+          def crypto() -> SensitiveFieldCrypto:
+              return SensitiveFieldCrypto(
+                  field_keys={"v1": b"A" * 32},
+                  active_key_version="v1",
+                  blind_index_key=b"B" * 32,
+              )
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_preservation_creates_manifest_custody_audit_and_job(tmp_path: Path) -> None:
+              service = service_module()
+              actor, case = await seed_case()
+              payload = b"authorized synthetic evidence\n"
+              store = LocalObjectStore(tmp_path / "vault")
+
+              async with async_session_factory() as session:
+                  result = await service.preserve_uploaded_evidence(
+                      session=session,
+                      actor=actor,
+                      case_id=case.id,
+                      stream=BytesIO(payload),
+                      metadata=metadata(),
+                      declared_media_type="text/plain; charset=utf-8",
+                      content_length=str(len(payload)),
+                      object_store=store,
+                      crypto=crypto(),
+                      request_id=str(uuid4()),
+                      pipeline_version="v1",
+                  )
+                  evidence_id = result.artifact.id
+                  job_id = result.job.id
+                  await session.commit()
+
+              async with async_session_factory() as session:
+                  artifact = await session.get(EvidenceArtifact, evidence_id)
+                  job = await session.get(Job, job_id)
+                  custody = (
+                      await session.execute(
+                          sa.select(CustodyEvent).where(CustodyEvent.evidence_id == evidence_id)
+                      )
+                  ).scalars().all()
+                  audits = (
+                      await session.execute(
+                          sa.select(AuditEvent).where(
+                              AuditEvent.resource_type == "evidence",
+                              AuditEvent.resource_id == str(evidence_id),
+                          )
+                      )
+                  ).scalars().all()
+
+                  assert artifact is not None
+                  assert artifact.state is EvidenceState.PRESERVED
+                  assert artifact.sha256 == hashlib.sha256(payload).hexdigest()
+                  assert artifact.size_bytes == len(payload)
+                  assert artifact.media_type == "text/plain"
+                  assert artifact.source_locator_ciphertext is not None
+                  assert artifact.notes_ciphertext is not None
+                  assert artifact.source_locator_hash is not None
+                  assert artifact.object_key is not None
+                  assert store.verify(artifact.object_key, artifact.sha256)
+                  assert len(custody) == 1
+                  assert custody[0].event_type == "CUSTODY_CREATED"
+                  assert len(audits) == 1
+                  assert audits[0].event_type == "EVIDENCE_INGESTED"
+                  assert job is not None
+                  assert job.state is JobState.PENDING
+                  assert job.idempotency_key == f"ingest:{evidence_id}:v1"
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_oversize_stream_is_rejected_without_metadata_or_staging_leaks(tmp_path: Path) -> None:
+              service = service_module()
+              actor, case = await seed_case()
+              store = LocalObjectStore(tmp_path / "vault")
+              limits = IngestionLimits(max_upload_bytes=8)
+              async with async_session_factory() as session:
+                  with pytest.raises(UploadSizeExceeded):
+                      await service.preserve_uploaded_evidence(
+                          session=session,
+                          actor=actor,
+                          case_id=case.id,
+                          stream=BytesIO(b"123456789"),
+                          metadata=metadata(),
+                          declared_media_type="text/plain",
+                          content_length=None,
+                          object_store=store,
+                          crypto=crypto(),
+                          limits=limits,
+                          request_id=str(uuid4()),
+                      )
+                  await session.rollback()
+
+              async with async_session_factory() as session:
+                  assert (await session.execute(sa.select(sa.func.count(EvidenceArtifact.id)))).scalar_one() == 0
+              assert not any(path.is_file() for path in (tmp_path / "vault").rglob("*"))
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_mime_mismatch_is_rejected_before_object_promotion(tmp_path: Path) -> None:
+              service = service_module()
+              actor, case = await seed_case()
+              store = LocalObjectStore(tmp_path / "vault")
+              async with async_session_factory() as session:
+                  with pytest.raises(MediaTypeMismatch):
+                      await service.preserve_uploaded_evidence(
+                          session=session,
+                          actor=actor,
+                          case_id=case.id,
+                          stream=BytesIO(b"%PDF-1.7\n"),
+                          metadata=metadata(),
+                          declared_media_type="image/png",
+                          content_length="9",
+                          object_store=store,
+                          crypto=crypto(),
+                          request_id=str(uuid4()),
+                      )
+                  await session.rollback()
+              assert not any(path.is_file() for path in (tmp_path / "vault").rglob("*"))
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_unknown_case_is_rejected_before_bytes_are_written(tmp_path: Path) -> None:
+              service = service_module()
+              actor, _case = await seed_case()
+              store = LocalObjectStore(tmp_path / "vault")
+              async with async_session_factory() as session:
+                  with pytest.raises(CaseNotFound):
+                      await service.preserve_uploaded_evidence(
+                          session=session,
+                          actor=actor,
+                          case_id=uuid4(),
+                          stream=BytesIO(b"safe text"),
+                          metadata=metadata(),
+                          declared_media_type="text/plain",
+                          content_length="9",
+                          object_store=store,
+                          crypto=crypto(),
+                          request_id=str(uuid4()),
+                      )
+              assert not any(path.is_file() for path in (tmp_path / "vault").rglob("*"))
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_duplicate_content_shares_one_object_but_keeps_separate_evidence_rows(tmp_path: Path) -> None:
+              service = service_module()
+              actor, case = await seed_case()
+              payload = b"same authorized bytes"
+              store = LocalObjectStore(tmp_path / "vault")
+              ids = []
+              keys = []
+              async with async_session_factory() as session:
+                  for _ in range(2):
+                      result = await service.preserve_uploaded_evidence(
+                          session=session,
+                          actor=actor,
+                          case_id=case.id,
+                          stream=BytesIO(payload),
+                          metadata=metadata(),
+                          declared_media_type="text/plain",
+                          content_length=str(len(payload)),
+                          object_store=store,
+                          crypto=crypto(),
+                          request_id=str(uuid4()),
+                      )
+                      ids.append(result.artifact.id)
+                      keys.append(result.artifact.object_key)
+                  await session.commit()
+              assert ids[0] != ids[1]
+              assert keys[0] == keys[1]
+              object_files = [
+                  path for path in (tmp_path / "vault" / "sha256").rglob("*") if path.is_file()
+              ]
+              assert len(object_files) == 1
+          PY
+
+      - name: Prove RED before implementation
+        run: |
+          set +e
+          uv run pytest -q apps/api/tests/integration/test_evidence_preservation.py >/tmp/task4-service-red.log 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          grep -q 'evidence preservation service is not implemented' /tmp/task4-service-red.log
+
+      - name: Implement preservation transaction service
+        run: |
+          cat > apps/api/darknetra_api/services/evidence_ingest.py <<'PY'
+          from __future__ import annotations
+
+          from dataclasses import dataclass
+          from datetime import UTC, datetime
+          from io import BufferedIOBase
+          from typing import BinaryIO
+          from uuid import UUID, uuid4
+
+          from sqlalchemy.ext.asyncio import AsyncSession
+
+          from darknetra_api.authz.permissions import Permission
+          from darknetra_api.authz.policy import authorize_case
+          from darknetra_api.models.custody import CustodyEvent
+          from darknetra_api.models.evidence import EvidenceArtifact, EvidenceState
+          from darknetra_api.models.job import Job, JobState
+          from darknetra_api.models.user import User
+          from darknetra_api.policy.ingestion import (
+              DetectedMedia,
+              EvidenceSourceMetadata,
+              IngestionLimits,
+              UploadSizeExceeded,
+              detect_media_type,
+              validate_content_length,
+          )
+          from darknetra_api.security.encryption import SensitiveFieldCrypto
+          from darknetra_api.services.audit import append_audit_event
+          from darknetra_api.services.evidence import preserve_evidence_manifest
+          from darknetra_api.storage.base import ObjectStore, StoredObject
+
+
+          class _BoundedReplayStream(BufferedIOBase):
+              """Replay sniffed bytes, then stream the source while enforcing a hard byte limit."""
+
+              def __init__(
+                  self,
+                  prefix: bytes,
+                  source: BinaryIO,
+                  *,
+                  max_bytes: int,
+              ) -> None:
+                  self._prefix = memoryview(prefix)
+                  self._offset = 0
+                  self._source = source
+                  self._max_bytes = max_bytes
+                  self._observed = 0
+
+              def readable(self) -> bool:
+                  return True
+
+              def read(self, size: int = -1) -> bytes:
+                  if size == 0:
+                      return b""
+                  chunks: list[bytes] = []
+                  remaining = size
+                  if self._offset < len(self._prefix):
+                      available = len(self._prefix) - self._offset
+                      take = available if size < 0 else min(available, remaining)
+                      chunks.append(self._prefix[self._offset : self._offset + take].tobytes())
+                      self._offset += take
+                      if size >= 0:
+                          remaining -= take
+                  if size < 0 or remaining > 0:
+                      tail = self._source.read(-1 if size < 0 else remaining)
+                      if tail:
+                          chunks.append(tail)
+                  payload = b"".join(chunks)
+                  self._observed += len(payload)
+                  if self._observed > self._max_bytes:
+                      raise UploadSizeExceeded(
+                          f"streamed upload exceeds {self._max_bytes} bytes"
+                      )
+                  return payload
+
+
+          @dataclass(frozen=True, slots=True)
+          class PreservedEvidence:
+              artifact: EvidenceArtifact
+              job: Job
+              stored_object: StoredObject
+              detected_media: DetectedMedia
+
+
+          async def preserve_uploaded_evidence(
+              *,
+              session: AsyncSession,
+              actor: User,
+              case_id: UUID,
+              stream: BinaryIO,
+              metadata: EvidenceSourceMetadata,
+              declared_media_type: str | None,
+              content_length: str | int | None,
+              object_store: ObjectStore,
+              crypto: SensitiveFieldCrypto,
+              request_id: str,
+              limits: IngestionLimits | None = None,
+              pipeline_version: str = "v1",
+          ) -> PreservedEvidence:
+              """Authorize and preserve one immutable original plus authoritative metadata.
+
+              The caller owns commit/rollback. Bytes are promoted before metadata is
+              flushed; an unreferenced content-addressed object after a later database
+              failure is safe and must be reconciled rather than blindly deleted.
+              """
+
+              active_limits = limits or IngestionLimits()
+              validate_content_length(content_length, limits=active_limits)
+              await authorize_case(actor, case_id, Permission.CASE_UPDATE, session)
+
+              prefix = stream.read(active_limits.sniff_bytes)
+              if not isinstance(prefix, bytes):
+                  raise TypeError("evidence stream must return bytes")
+              detected = detect_media_type(
+                  prefix,
+                  declared_media_type=declared_media_type,
+              )
+              bounded = _BoundedReplayStream(
+                  prefix,
+                  stream,
+                  max_bytes=active_limits.max_upload_bytes,
+              )
+              stored = object_store.put_verified(bounded)
+
+              evidence_id = uuid4()
+              artifact = EvidenceArtifact(
+                  id=evidence_id,
+                  case_id=case_id,
+                  source_class=metadata.source_class,
+                  source_type=metadata.source_type,
+                  acquisition_method=metadata.acquisition_method,
+                  collector_user_id=actor.id,
+                  captured_at=metadata.captured_at,
+                  original_timezone=metadata.original_timezone,
+                  state=EvidenceState.STAGING,
+                  tool_name=metadata.tool_name,
+                  tool_version=metadata.tool_version,
+              )
+              if metadata.source_locator:
+                  artifact.source_locator_ciphertext = crypto.encrypt(
+                      metadata.source_locator,
+                      purpose="evidence.source_locator",
+                      resource_id=str(evidence_id),
+                  )
+                  artifact.source_locator_hash = crypto.blind_index(
+                      metadata.source_locator,
+                      purpose="evidence.source_locator",
+                  )
+              if metadata.authority_reference:
+                  artifact.authority_reference_ciphertext = crypto.encrypt(
+                      metadata.authority_reference,
+                      purpose="evidence.authority_reference",
+                      resource_id=str(evidence_id),
+                  )
+              if metadata.notes:
+                  artifact.notes_ciphertext = crypto.encrypt(
+                      metadata.notes,
+                      purpose="evidence.notes",
+                      resource_id=str(evidence_id),
+                  )
+
+              preserve_evidence_manifest(
+                  artifact,
+                  media_type=detected.media_type,
+                  size_bytes=stored.size_bytes,
+                  sha256=stored.sha256,
+                  sha512=None,
+                  object_key=stored.object_key,
+                  ingested_at=datetime.now(UTC),
+              )
+              session.add(artifact)
+              await session.flush()
+
+              custody = CustodyEvent(
+                  evidence_id=evidence_id,
+                  case_id=case_id,
+                  actor_user_id=actor.id,
+                  event_type="CUSTODY_CREATED",
+                  request_id=request_id,
+                  reason="Original evidence preserved after policy and integrity verification",
+                  metadata_json={
+                      "source_class": metadata.source_class.value,
+                      "media_type": detected.media_type,
+                      "sha256": stored.sha256,
+                  },
+              )
+              session.add(custody)
+              append_audit_event(
+                  session,
+                  actor_user_id=actor.id,
+                  event_type="EVIDENCE_INGESTED",
+                  resource_type="evidence",
+                  resource_id=str(evidence_id),
+                  case_id=case_id,
+                  request_id=request_id,
+                  metadata={
+                      "source_class": metadata.source_class.value,
+                      "source_type": metadata.source_type,
+                      "media_type": detected.media_type,
+                      "size_bytes": stored.size_bytes,
+                  },
+              )
+
+              job = Job(
+                  case_id=case_id,
+                  resource_type="evidence",
+                  resource_id=str(evidence_id),
+                  task_name="darknetra.ingestion.process_evidence",
+                  queue="ingest",
+                  idempotency_key=f"ingest:{evidence_id}:{pipeline_version}",
+                  state=JobState.PENDING,
+              )
+              session.add(job)
+              await session.flush()
+              return PreservedEvidence(
+                  artifact=artifact,
+                  job=job,
+                  stored_object=stored,
+                  detected_media=detected,
+              )
+          PY
+
+      - name: Verify GREEN and full regression
+        run: |
+          uv run ruff check .
+          uv run pytest -q apps/api/tests/integration/test_evidence_preservation.py
+          uv run pytest -q
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml build api worker
+
+      - name: Record preservation checkpoint and commit
+        run: |
+          mkdir -p docs/verification
+          cat > docs/verification/plan03-task4-preservation-service.md <<EOF
+          # Plan 03 Task 4 — preservation transaction TDD checkpoint
+
+          - **Source before implementation:** \`$(git rev-parse HEAD)\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          ## RED
+
+          Preservation contracts were created first and failed with the expected assertion \`evidence preservation service is not implemented\`.
+
+          ## GREEN
+
+          | Gate | Outcome |
+          |---|---|
+          | Ruff | success |
+          | Focused PostgreSQL/object-store integration tests | success |
+          | Complete Python suite | success |
+          | Compose validation | success |
+          | API and worker image build | success |
+
+          The service authorizes the case before reading bytes; sniffs and validates MIME; enforces actual streamed size; atomically promotes content-addressed bytes; encrypts protected source metadata; creates the immutable manifest, custody event, audit event, and durable pending ingestion job in one caller-owned database transaction. Duplicate bytes deduplicate at storage while retaining separate evidence records.
+
+          Post-commit Celery publication and the HTTP multipart route remain the next Task 4 checkpoint.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/api/darknetra_api/services/evidence_ingest.py apps/api/tests/integration/test_evidence_preservation.py docs/verification/plan03-task4-preservation-service.md
+          git rm .github/workflows/plan03-task4-preservation-service.yml
+          git commit -m 'feat: preserve uploaded evidence transactionally'
+          git push origin HEAD:testing-codex
