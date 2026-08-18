@@ -1,0 +1,612 @@
+name: Plan 03 Task 4 evidence upload route TDD
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task4-http-route.yml
+
+permissions:
+  contents: write
+
+jobs:
+  red-green:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task4-route@127.0.0.1:5432/darknetra_plan03_task4_route
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-task4-route
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task4_route
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task4-route
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task4_route"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Require prior Task 4 checkpoints
+        run: |
+          test -f docs/verification/plan03-task4-ingestion-policy.md
+          test -f docs/verification/plan03-task4-preservation-service.md
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key():
+              return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind):
+              print(f"::add-mask::{value}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n")
+              out.write(f"DARKNETRA_FIELD_KEY_V1_B64={field}\n")
+              out.write("DARKNETRA_FIELD_KEYRING_B64_JSON=" + json.dumps({"v1": field}, separators=(",", ":")) + "\n")
+              out.write("DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n")
+              out.write(f"DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n")
+          PY
+
+      - name: Install frozen workspace and migrate
+        run: |
+          uv sync --all-packages --dev --frozen
+          uv run alembic -c apps/api/alembic.ini upgrade head
+
+      - name: Write HTTP contracts before route implementation
+        run: |
+          cat > apps/api/tests/integration/test_evidence_upload_route.py <<'PY'
+          from __future__ import annotations
+
+          import importlib
+          import importlib.util
+          from datetime import UTC, datetime
+          from pathlib import Path
+          from uuid import uuid4
+
+          import httpx
+          import pytest
+          import sqlalchemy as sa
+          from darknetra_api.db.session import async_session_factory
+          from darknetra_api.main import app
+          from darknetra_api.models.audit import AuditEvent
+          from darknetra_api.models.auth_session import AuthSession
+          from darknetra_api.models.case import Case
+          from darknetra_api.models.case_membership import CaseMembership, CaseMembershipRole
+          from darknetra_api.models.custody import CustodyEvent
+          from darknetra_api.models.enums import CaseSensitivity
+          from darknetra_api.models.evidence import EvidenceArtifact, EvidenceDerivation
+          from darknetra_api.models.job import Job
+          from darknetra_api.models.user import User
+          from darknetra_api.policy.ingestion import EvidenceSourceMetadata, IngestionLimits
+          from darknetra_api.security.encryption import SensitiveFieldCrypto
+          from darknetra_api.storage.local import LocalObjectStore
+
+
+          def evidence_route_module():
+              spec = importlib.util.find_spec("darknetra_api.routes.evidence")
+              assert spec is not None, "evidence upload route is not implemented"
+              return importlib.import_module("darknetra_api.routes.evidence")
+
+
+          async def clean_database() -> None:
+              async with async_session_factory() as session:
+                  await session.execute(sa.delete(CustodyEvent))
+                  await session.execute(sa.delete(EvidenceDerivation))
+                  await session.execute(sa.delete(EvidenceArtifact))
+                  await session.execute(sa.delete(Job))
+                  await session.execute(sa.delete(CaseMembershipRole))
+                  await session.execute(sa.delete(CaseMembership))
+                  await session.execute(sa.delete(AuditEvent))
+                  await session.execute(sa.delete(Case))
+                  await session.execute(sa.delete(AuthSession))
+                  await session.execute(sa.delete(User))
+                  await session.commit()
+
+
+          @pytest.fixture(autouse=True)
+          async def clean() -> None:
+              app.dependency_overrides.clear()
+              await clean_database()
+              yield
+              app.dependency_overrides.clear()
+              await clean_database()
+
+
+          async def seed_case() -> tuple[User, Case]:
+              async with async_session_factory() as session:
+                  suffix = uuid4().hex[:10]
+                  owner = User(
+                      username=f"route-owner-{suffix}",
+                      username_normalized=f"route-owner-{suffix}",
+                      display_name="Synthetic Route Owner",
+                      password_hash="unused",
+                      global_roles=[],
+                      is_active=True,
+                      must_change_password=False,
+                  )
+                  session.add(owner)
+                  await session.flush()
+                  case = Case(
+                      case_code=f"RTE-{suffix.upper()}",
+                      title="Authorized route test",
+                      sensitivity=CaseSensitivity.RESTRICTED,
+                      owner_user_id=owner.id,
+                      source_authority_summary="Authorized synthetic route fixture",
+                  )
+                  session.add(case)
+                  await session.commit()
+                  await session.refresh(owner)
+                  await session.refresh(case)
+                  return owner, case
+
+
+          def source_metadata() -> str:
+              return EvidenceSourceMetadata(
+                  source_class="SYNTHETIC",
+                  source_type="synthetic.route.fixture",
+                  acquisition_method="authorized_test_generation",
+                  captured_at=datetime.now(UTC),
+                  original_timezone="UTC",
+                  source_locator="https://example.invalid/authorized-route-fixture",
+                  notes="Restricted synthetic route note",
+              ).model_dump_json()
+
+
+          def install_overrides(route, *, actor: User, store: LocalObjectStore, limits=None) -> None:
+              async def actor_override():
+                  return actor
+
+              async def session_override():
+                  async with async_session_factory() as session:
+                      yield session
+
+              app.dependency_overrides[route.AUTH_DEPENDENCY] = actor_override
+              app.dependency_overrides[route.SESSION_DEPENDENCY] = session_override
+              app.dependency_overrides[route.OBJECT_STORE_DEPENDENCY] = lambda: store
+              app.dependency_overrides[route.CRYPTO_DEPENDENCY] = lambda: SensitiveFieldCrypto(
+                  field_keys={"v1": b"C" * 32},
+                  active_key_version="v1",
+                  blind_index_key=b"D" * 32,
+              )
+              if limits is not None:
+                  app.dependency_overrides[route.LIMITS_DEPENDENCY] = lambda: limits
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_authorized_multipart_upload_returns_safe_accepted_resource(tmp_path: Path) -> None:
+              route = evidence_route_module()
+              actor, case = await seed_case()
+              store = LocalObjectStore(tmp_path / "vault")
+              install_overrides(route, actor=actor, store=store)
+              payload = b"authorized synthetic route evidence\n"
+
+              transport = httpx.ASGITransport(app=app)
+              async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+                  response = await client.post(
+                      f"/api/v1/cases/{case.id}/evidence",
+                      files={"file": ("evidence.txt", payload, "text/plain")},
+                      data={"metadata_json": source_metadata()},
+                  )
+              assert response.status_code == 202, response.text
+              body = response.json()
+              assert body["evidence"]["case_id"] == str(case.id)
+              assert body["evidence"]["state"] == "PRESERVED"
+              assert body["job_state"] == "PENDING"
+              assert body["delivery_state"] in {"PENDING_PIPELINE", "QUEUED"}
+              serialized = str(body).lower()
+              assert "ciphertext" not in serialized
+              assert "object_key" not in serialized
+              assert "authorized-route-fixture" not in serialized
+              assert response.headers["cache-control"] == "no-store"
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_unknown_case_uses_non_enumerating_not_found_response(tmp_path: Path) -> None:
+              route = evidence_route_module()
+              actor, _case = await seed_case()
+              install_overrides(route, actor=actor, store=LocalObjectStore(tmp_path / "vault"))
+              transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+              async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+                  response = await client.post(
+                      f"/api/v1/cases/{uuid4()}/evidence",
+                      files={"file": ("evidence.txt", b"safe", "text/plain")},
+                      data={"metadata_json": source_metadata()},
+                  )
+              assert response.status_code == 404
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          @pytest.mark.parametrize(
+              ("payload", "declared_type", "expected"),
+              [
+                  (b"", "text/plain", 415),
+                  (b"%PDF-1.7\n", "image/png", 415),
+                  (b"123456789", "text/plain", 413),
+              ],
+          )
+          async def test_policy_failures_are_clear_and_do_not_create_rows(
+              tmp_path: Path, payload: bytes, declared_type: str, expected: int
+          ) -> None:
+              route = evidence_route_module()
+              actor, case = await seed_case()
+              limits = IngestionLimits(max_upload_bytes=8) if expected == 413 else IngestionLimits()
+              install_overrides(
+                  route,
+                  actor=actor,
+                  store=LocalObjectStore(tmp_path / "vault"),
+                  limits=limits,
+              )
+              transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+              async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+                  response = await client.post(
+                      f"/api/v1/cases/{case.id}/evidence",
+                      files={"file": ("evidence.bin", payload, declared_type)},
+                      data={"metadata_json": source_metadata()},
+                  )
+              assert response.status_code == expected, response.text
+              async with async_session_factory() as session:
+                  assert (await session.execute(sa.select(sa.func.count(EvidenceArtifact.id)))).scalar_one() == 0
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_missing_or_invalid_metadata_is_validation_error(tmp_path: Path) -> None:
+              route = evidence_route_module()
+              actor, case = await seed_case()
+              install_overrides(route, actor=actor, store=LocalObjectStore(tmp_path / "vault"))
+              transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+              async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+                  missing = await client.post(
+                      f"/api/v1/cases/{case.id}/evidence",
+                      files={"file": ("evidence.txt", b"safe", "text/plain")},
+                  )
+                  malformed = await client.post(
+                      f"/api/v1/cases/{case.id}/evidence",
+                      files={"file": ("evidence.txt", b"safe", "text/plain")},
+                      data={"metadata_json": "{not-json"},
+                  )
+              assert missing.status_code == 422
+              assert malformed.status_code == 422
+          PY
+
+      - name: Prove RED before implementation
+        run: |
+          set +e
+          uv run pytest -q apps/api/tests/integration/test_evidence_upload_route.py >/tmp/task4-route-red.log 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          grep -q 'evidence upload route is not implemented' /tmp/task4-route-red.log
+
+      - name: Add locked multipart dependency
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("apps/api/pyproject.toml")
+          text = path.read_text(encoding="utf-8")
+          dependency = '    "python-multipart>=0.0.20,<1",\n'
+          if "python-multipart" not in text:
+              marker = "dependencies = [\n"
+              if text.count(marker) != 1:
+                  raise SystemExit("dependency list marker missing or ambiguous")
+              text = text.replace(marker, marker + dependency, 1)
+              path.write_text(text, encoding="utf-8")
+          PY
+          uv lock
+          uv sync --all-packages --dev --frozen
+
+      - name: Make preservation storage write non-blocking
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("apps/api/darknetra_api/services/evidence_ingest.py")
+          text = path.read_text(encoding="utf-8")
+          import_line = "from starlette.concurrency import run_in_threadpool\n"
+          if import_line not in text:
+              marker = "from sqlalchemy.ext.asyncio import AsyncSession\n"
+              if marker not in text:
+                  raise SystemExit("AsyncSession import marker missing")
+              text = text.replace(marker, marker + import_line, 1)
+          old = "              stored = object_store.put_verified(bounded)\n"
+          new = "              stored = await run_in_threadpool(object_store.put_verified, bounded)\n"
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit("object-store invocation marker missing")
+          path.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Discover stable auth and session dependencies and generate route
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import ast
+          import re
+          from pathlib import Path
+
+          cases_source = Path("apps/api/darknetra_api/routes/cases.py").read_text(encoding="utf-8")
+
+          def candidates(path: Path) -> list[tuple[str, str]]:
+              tree = ast.parse(path.read_text(encoding="utf-8"))
+              result = []
+              for node in tree.body:
+                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                      annotation = ast.unparse(node.returns) if node.returns is not None else ""
+                      result.append((node.name, annotation))
+              return result
+
+          auth_candidates = candidates(Path("apps/api/darknetra_api/dependencies/auth.py"))
+          session_candidates = candidates(Path("apps/api/darknetra_api/db/session.py"))
+
+          def auth_score(item: tuple[str, str]) -> int:
+              name, annotation = item
+              lower = name.lower()
+              score = 20 if re.search(rf"\b{re.escape(name)}\b", cases_source) else 0
+              score += 8 if "current" in lower else 0
+              score += 8 if "user" in lower else 0
+              score += 5 if "auth" in lower or "require" in lower else 0
+              score += 5 if "User" in annotation else 0
+              score -= 20 if any(part in lower for part in ("csrf", "login", "optional")) else 0
+              return score
+
+          def session_score(item: tuple[str, str]) -> int:
+              name, annotation = item
+              lower = name.lower()
+              score = 20 if re.search(rf"\b{re.escape(name)}\b", cases_source) else 0
+              score += 10 if "session" in lower else 0
+              score += 5 if "AsyncSession" in annotation else 0
+              score -= 10 if "factory" in lower else 0
+              return score
+
+          auth_name = max(auth_candidates, key=auth_score)[0]
+          session_name = max(session_candidates, key=session_score)[0]
+          if auth_score((auth_name, next(a for n, a in auth_candidates if n == auth_name))) <= 0:
+              raise SystemExit(f"could not identify auth dependency from {auth_candidates}")
+          if session_score((session_name, next(a for n, a in session_candidates if n == session_name))) <= 0:
+              raise SystemExit(f"could not identify session dependency from {session_candidates}")
+
+          route = f'''from __future__ import annotations
+
+          from typing import Annotated, Literal
+          from uuid import UUID, uuid4
+
+          from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
+          from pydantic import BaseModel, ValidationError
+          from sqlalchemy.ext.asyncio import AsyncSession
+
+          from darknetra_api.config import get_settings
+          from darknetra_api.dependencies.auth import {auth_name} as _auth_dependency
+          from darknetra_api.db.session import {session_name} as _session_dependency
+          from darknetra_api.jobs.celery_app import celery_app
+          from darknetra_api.models.job import JobState
+          from darknetra_api.models.user import User
+          from darknetra_api.policy.ingestion import (
+              EvidenceSourceMetadata,
+              IngestionLimits,
+              IngestionPolicyError,
+              InvalidContentLength,
+              MediaTypeMismatch,
+              UnsupportedMediaType,
+              UploadSizeExceeded,
+          )
+          from darknetra_api.schemas.evidence import EvidenceArtifactRead
+          from darknetra_api.security.keyring import SensitiveFieldKeyring
+          from darknetra_api.services.evidence_ingest import preserve_uploaded_evidence
+          from darknetra_api.storage.local import LocalObjectStore
+
+          router = APIRouter(prefix="/api/v1", tags=["evidence"])
+
+          AUTH_DEPENDENCY = _auth_dependency
+          SESSION_DEPENDENCY = _session_dependency
+
+
+          def get_object_store() -> LocalObjectStore:
+              return LocalObjectStore(get_settings().evidence_store_path)
+
+
+          def get_field_crypto():
+              return SensitiveFieldKeyring.from_settings(get_settings()).crypto()
+
+
+          def get_ingestion_limits() -> IngestionLimits:
+              return IngestionLimits()
+
+
+          OBJECT_STORE_DEPENDENCY = get_object_store
+          CRYPTO_DEPENDENCY = get_field_crypto
+          LIMITS_DEPENDENCY = get_ingestion_limits
+
+
+          class EvidenceUploadAccepted(BaseModel):
+              evidence: EvidenceArtifactRead
+              job_id: UUID
+              job_state: JobState
+              delivery_state: Literal["QUEUED", "PENDING_PIPELINE"]
+
+
+          def _publish_if_pipeline_available(*, job_id: UUID, evidence_id: UUID, pipeline_version: str) -> bool:
+              task_name = "darknetra.ingestion.process_evidence"
+              if task_name not in celery_app.tasks:
+                  return False
+              celery_app.send_task(
+                  task_name,
+                  args=[str(evidence_id), pipeline_version],
+                  queue="ingest",
+                  task_id=str(job_id),
+              )
+              return True
+
+
+          @router.post(
+              "/cases/{{case_id}}/evidence",
+              response_model=EvidenceUploadAccepted,
+              status_code=status.HTTP_202_ACCEPTED,
+          )
+          async def upload_evidence(
+              case_id: UUID,
+              request: Request,
+              response: Response,
+              actor: Annotated[User, Depends(AUTH_DEPENDENCY)],
+              session: Annotated[AsyncSession, Depends(SESSION_DEPENDENCY)],
+              file: Annotated[UploadFile, File()],
+              metadata_json: Annotated[str, Form()],
+              object_store: Annotated[LocalObjectStore, Depends(OBJECT_STORE_DEPENDENCY)],
+              crypto=Depends(CRYPTO_DEPENDENCY),
+              limits: Annotated[IngestionLimits, Depends(LIMITS_DEPENDENCY)] = IngestionLimits(),
+          ) -> EvidenceUploadAccepted:
+              try:
+                  metadata = EvidenceSourceMetadata.model_validate_json(metadata_json)
+              except ValidationError as exc:
+                  raise HTTPException(
+                      status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                      detail=exc.errors(include_url=False),
+                  ) from exc
+
+              request_id = getattr(request.state, "request_id", None) or str(uuid4())
+              try:
+                  result = await preserve_uploaded_evidence(
+                      session=session,
+                      actor=actor,
+                      case_id=case_id,
+                      stream=file.file,
+                      metadata=metadata,
+                      declared_media_type=file.content_type,
+                      content_length=file.size,
+                      object_store=object_store,
+                      crypto=crypto,
+                      limits=limits,
+                      request_id=request_id,
+                      pipeline_version="v1",
+                  )
+                  await session.commit()
+              except UploadSizeExceeded as exc:
+                  await session.rollback()
+                  raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=str(exc)) from exc
+              except (UnsupportedMediaType, MediaTypeMismatch) as exc:
+                  await session.rollback()
+                  raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(exc)) from exc
+              except InvalidContentLength as exc:
+                  await session.rollback()
+                  raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+              except IngestionPolicyError as exc:
+                  await session.rollback()
+                  raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+              finally:
+                  await file.close()
+
+              queued = _publish_if_pipeline_available(
+                  job_id=result.job.id,
+                  evidence_id=result.artifact.id,
+                  pipeline_version="v1",
+              )
+              response.headers["Cache-Control"] = "no-store"
+              return EvidenceUploadAccepted(
+                  evidence=EvidenceArtifactRead.model_validate(result.artifact),
+                  job_id=result.job.id,
+                  job_state=result.job.state,
+                  delivery_state="QUEUED" if queued else "PENDING_PIPELINE",
+              )
+          '''
+          route = "\n".join(line[10:] if line.startswith("          ") else line for line in route.splitlines()) + "\n"
+          Path("apps/api/darknetra_api/routes/evidence.py").write_text(route, encoding="utf-8")
+
+          main = Path("apps/api/darknetra_api/main.py")
+          text = main.read_text(encoding="utf-8")
+          import_line = "from darknetra_api.routes.evidence import router as evidence_router\n"
+          if import_line not in text:
+              marker = "app = FastAPI"
+              position = text.find(marker)
+              if position < 0:
+                  raise SystemExit("FastAPI application marker not found")
+              text = text[:position] + import_line + "\n" + text[position:]
+          include = "app.include_router(evidence_router)\n"
+          if include not in text:
+              matches = list(re.finditer(r"(?m)^app\.include_router\([^\n]+\)\n", text))
+              if matches:
+                  position = matches[-1].end()
+                  text = text[:position] + include + text[position:]
+              else:
+                  app_match = re.search(r"(?m)^app = FastAPI[^\n]*\n", text)
+                  if app_match is None:
+                      raise SystemExit("cannot place evidence router")
+                  text = text[:app_match.end()] + include + text[app_match.end():]
+          main.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Verify GREEN route, regression, and images
+        run: |
+          uv run ruff check .
+          uv run pytest -q apps/api/tests/integration/test_evidence_upload_route.py
+          uv run pytest -q
+          uv run alembic -c apps/api/alembic.ini downgrade 3f21c6d4a901
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml build api worker
+
+      - name: Record route checkpoint and commit
+        run: |
+          mkdir -p docs/verification
+          cat > docs/verification/plan03-task4-http-route.md <<EOF
+          # Plan 03 Task 4 — authenticated multipart upload route TDD checkpoint
+
+          - **Source before implementation:** \`$(git rev-parse HEAD)\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          ## RED
+
+          The route contracts were written first and failed with the expected assertion \`evidence upload route is not implemented\`.
+
+          ## GREEN
+
+          | Gate | Outcome |
+          |---|---|
+          | Ruff | success |
+          | Authenticated multipart route tests | success |
+          | Unknown-case anti-enumeration test | success |
+          | Empty, mismatch, and oversize policy tests | success |
+          | Missing/malformed metadata tests | success |
+          | Complete Python suite | success |
+          | Migration downgrade/re-upgrade | success |
+          | Compose validation and image build | success |
+
+          The endpoint returns only safe evidence fields, sets \`Cache-Control: no-store\`, commits immutable preservation before delivery, and leaves a durable \`PENDING_PIPELINE\` job when the later ingestion task is not registered rather than publishing a message the worker would discard.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/api/pyproject.toml uv.lock apps/api/darknetra_api/main.py apps/api/darknetra_api/routes/evidence.py apps/api/darknetra_api/services/evidence_ingest.py apps/api/tests/integration/test_evidence_upload_route.py docs/verification/plan03-task4-http-route.md
+          git rm .github/workflows/plan03-task4-http-route.yml
+          git commit -m 'feat: expose safe evidence preservation endpoint'
+          git push origin HEAD:testing-codex
