@@ -1,0 +1,59 @@
+name: Plan 03 Task 1 durable job boundary
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task1-apply.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-commit:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: test
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task1@127.0.0.1:5432/darknetra_plan03_task1_test
+      DARKNETRA_E2E_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task1@127.0.0.1:5432/darknetra_plan03_task1_test
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task1_test
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task1
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task1_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - name: Execute reviewed Task 1 implementation and release gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d .automation/plan03-task1-run.sh.gz.b64 | gzip -d > /tmp/plan03-task1-run.sh
+          chmod 700 /tmp/plan03-task1-run.sh
+          /tmp/plan03-task1-run.sh
