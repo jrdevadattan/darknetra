@@ -1,0 +1,870 @@
+name: Plan 03 Task 8 idempotent derivative foundation TDD
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task8-derivative-foundation.yml
+
+permissions:
+  contents: write
+
+jobs:
+  red-green:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task8-foundation@127.0.0.1:5432/darknetra_plan03_task8_foundation
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-task8-foundation
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task8_foundation
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task8-foundation
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task8_foundation"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Require completed Task 7
+        run: test -f docs/verification/plan03-task7-final.md
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f"::add-mask::{value}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n")
+              out.write(f"DARKNETRA_FIELD_KEY_V1_B64={field}\n")
+              out.write("DARKNETRA_FIELD_KEYRING_B64_JSON=" + json.dumps({"v1": field}, separators=(",", ":")) + "\n")
+              out.write("DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n")
+              out.write(f"DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n")
+          PY
+
+      - name: Install frozen workspace and migrate existing head
+        run: |
+          uv sync --all-packages --dev --frozen
+          uv run alembic -c apps/api/alembic.ini upgrade head
+
+      - name: Write derivative idempotency contracts before production code
+        run: |
+          cat > apps/api/tests/integration/test_derivative_foundation.py <<'PY'
+          from __future__ import annotations
+
+          import importlib
+          import importlib.util
+          from datetime import UTC, datetime
+          from pathlib import Path
+          from uuid import uuid4
+
+          import pytest
+          import sqlalchemy as sa
+          from darknetra_api.db.session import async_session_factory
+          from darknetra_api.models.audit import AuditEvent
+          from darknetra_api.models.auth_session import AuthSession
+          from darknetra_api.models.case import Case
+          from darknetra_api.models.case_membership import CaseMembership, CaseMembershipRole
+          from darknetra_api.models.custody import CustodyEvent
+          from darknetra_api.models.enums import CaseSensitivity
+          from darknetra_api.models.evidence import EvidenceArtifact, EvidenceDerivation, EvidenceSourceClass, EvidenceState
+          from darknetra_api.models.job import Job
+          from darknetra_api.models.user import User
+          from darknetra_api.services.evidence import preserve_evidence_manifest
+          from darknetra_api.storage.local import LocalObjectStore
+          from sqlalchemy.exc import IntegrityError
+
+
+          def module():
+              spec = importlib.util.find_spec("darknetra_api.services.derivatives")
+              assert spec is not None, "idempotent derivative service is not implemented"
+              return importlib.import_module("darknetra_api.services.derivatives")
+
+
+          async def clean_database() -> None:
+              async with async_session_factory() as session:
+                  await session.execute(sa.delete(CustodyEvent))
+                  await session.execute(sa.delete(EvidenceDerivation))
+                  await session.execute(sa.delete(EvidenceArtifact))
+                  await session.execute(sa.delete(Job))
+                  await session.execute(sa.delete(CaseMembershipRole))
+                  await session.execute(sa.delete(CaseMembership))
+                  await session.execute(sa.delete(AuditEvent))
+                  await session.execute(sa.delete(Case))
+                  await session.execute(sa.delete(AuthSession))
+                  await session.execute(sa.delete(User))
+                  await session.commit()
+
+
+          @pytest.fixture(autouse=True)
+          async def clean() -> None:
+              await clean_database()
+              yield
+              await clean_database()
+
+
+          async def seed_parent(store: LocalObjectStore) -> tuple[User, Case, EvidenceArtifact]:
+              stored = store.put_verified(__import__("io").BytesIO(b"immutable parent bytes"))
+              async with async_session_factory() as session:
+                  suffix = uuid4().hex[:10]
+                  owner = User(
+                      username=f"derivative-owner-{suffix}",
+                      username_normalized=f"derivative-owner-{suffix}",
+                      display_name="Derivative Owner",
+                      password_hash="unused",
+                      global_roles=[],
+                      is_active=True,
+                      must_change_password=False,
+                  )
+                  session.add(owner)
+                  await session.flush()
+                  case = Case(
+                      case_code=f"DRV-{suffix.upper()}",
+                      title="Authorized derivative fixture",
+                      sensitivity=CaseSensitivity.RESTRICTED,
+                      owner_user_id=owner.id,
+                      source_authority_summary="Authorized synthetic fixture",
+                  )
+                  session.add(case)
+                  await session.flush()
+                  parent = EvidenceArtifact(
+                      case_id=case.id,
+                      source_class=EvidenceSourceClass.SYNTHETIC,
+                      source_type="synthetic.parent",
+                      acquisition_method="authorized_test_generation",
+                      collector_user_id=owner.id,
+                      captured_at=datetime.now(UTC),
+                      original_timezone="UTC",
+                      state=EvidenceState.STAGING,
+                  )
+                  preserve_evidence_manifest(
+                      parent,
+                      media_type="text/plain",
+                      size_bytes=stored.size_bytes,
+                      sha256=stored.sha256,
+                      sha512=None,
+                      object_key=stored.object_key,
+                  )
+                  session.add(parent)
+                  await session.commit()
+                  await session.refresh(owner)
+                  await session.refresh(case)
+                  await session.refresh(parent)
+                  return owner, case, parent
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_canonical_parameter_digest_is_order_independent_and_database_unique(tmp_path: Path) -> None:
+              service = module()
+              store = LocalObjectStore(tmp_path / "vault")
+              owner, _case, parent = await seed_parent(store)
+              first = service.canonical_parameters_digest({"b": 2, "a": [1, True]})
+              second = service.canonical_parameters_digest({"a": [1, True], "b": 2})
+              assert first == second
+              assert len(first) == 64
+
+              async with async_session_factory() as session:
+                  children = []
+                  for suffix in ("one", "two"):
+                      stored = store.put_verified(__import__("io").BytesIO(suffix.encode()))
+                      child = EvidenceArtifact(
+                          case_id=parent.case_id,
+                          source_class=parent.source_class,
+                          source_type="derivative.text",
+                          acquisition_method="derived_processing",
+                          collector_user_id=owner.id,
+                          captured_at=parent.captured_at,
+                          original_timezone=parent.original_timezone,
+                          state=EvidenceState.STAGING,
+                      )
+                      preserve_evidence_manifest(
+                          child,
+                          media_type="text/plain",
+                          size_bytes=stored.size_bytes,
+                          sha256=stored.sha256,
+                          sha512=None,
+                          object_key=stored.object_key,
+                      )
+                      session.add(child)
+                      await session.flush()
+                      children.append(child)
+                  session.add_all(
+                      [
+                          EvidenceDerivation(
+                              parent_evidence_id=parent.id,
+                              child_evidence_id=children[0].id,
+                              transformation="normalized_text",
+                              transformer_version="v1",
+                              parameters_json={"a": 1, "b": 2},
+                          ),
+                          EvidenceDerivation(
+                              parent_evidence_id=parent.id,
+                              child_evidence_id=children[1].id,
+                              transformation="normalized_text",
+                              transformer_version="v1",
+                              parameters_json={"b": 2, "a": 1},
+                          ),
+                      ]
+                  )
+                  with pytest.raises(IntegrityError):
+                      await session.commit()
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_duplicate_delivery_returns_existing_child_and_one_derivation(tmp_path: Path) -> None:
+              service = module()
+              store = LocalObjectStore(tmp_path / "vault")
+              owner, _case, parent = await seed_parent(store)
+              payload = service.DerivativePayload(
+                  transformation="normalized_text",
+                  transformer_version="v1",
+                  media_type="text/plain",
+                  data=b"normalized synthetic evidence\n",
+                  source_type="derivative.normalized_text",
+                  parameters={"parser": "text", "normalization": 1},
+              )
+              async with async_session_factory() as session:
+                  first = await service.create_derivative(
+                      session=session,
+                      parent_evidence_id=parent.id,
+                      actor_user_id=owner.id,
+                      payload=payload,
+                      object_store=store,
+                      request_id=str(uuid4()),
+                  )
+                  await session.commit()
+                  first_id = first.child.id
+              async with async_session_factory() as session:
+                  second = await service.create_derivative(
+                      session=session,
+                      parent_evidence_id=parent.id,
+                      actor_user_id=owner.id,
+                      payload=payload,
+                      object_store=store,
+                      request_id=str(uuid4()),
+                  )
+                  await session.commit()
+                  assert second.created is False
+                  assert second.child.id == first_id
+                  assert (
+                      await session.execute(
+                          sa.select(sa.func.count(EvidenceDerivation.id)).where(
+                              EvidenceDerivation.parent_evidence_id == parent.id
+                          )
+                      )
+                  ).scalar_one() == 1
+                  assert (
+                      await session.execute(
+                          sa.select(sa.func.count(EvidenceArtifact.id)).where(
+                              EvidenceArtifact.source_type == "derivative.normalized_text"
+                          )
+                      )
+                  ).scalar_one() == 1
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_new_transformer_version_creates_new_child_without_rewriting_old(tmp_path: Path) -> None:
+              service = module()
+              store = LocalObjectStore(tmp_path / "vault")
+              owner, _case, parent = await seed_parent(store)
+              child_ids = []
+              async with async_session_factory() as session:
+                  for version in ("v1", "v2"):
+                      result = await service.create_derivative(
+                          session=session,
+                          parent_evidence_id=parent.id,
+                          actor_user_id=owner.id,
+                          payload=service.DerivativePayload(
+                              transformation="normalized_text",
+                              transformer_version=version,
+                              media_type="text/plain",
+                              data=f"version {version}".encode(),
+                              source_type="derivative.normalized_text",
+                              parameters={"parser": "text"},
+                          ),
+                          object_store=store,
+                          request_id=str(uuid4()),
+                      )
+                      child_ids.append(result.child.id)
+                  await session.commit()
+              assert child_ids[0] != child_ids[1]
+              async with async_session_factory() as session:
+                  assert (
+                      await session.execute(
+                          sa.select(sa.func.count(EvidenceDerivation.id)).where(
+                              EvidenceDerivation.parent_evidence_id == parent.id
+                          )
+                      )
+                  ).scalar_one() == 2
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_crash_after_object_promotion_is_recoverable_and_deduplicated(tmp_path: Path) -> None:
+              service = module()
+              store = LocalObjectStore(tmp_path / "vault")
+              owner, _case, parent = await seed_parent(store)
+              payload = service.DerivativePayload(
+                  transformation="normalized_text",
+                  transformer_version="v1",
+                  media_type="text/plain",
+                  data=b"recoverable child bytes",
+                  source_type="derivative.normalized_text",
+                  parameters={"parser": "text"},
+              )
+
+              def crash(_stored) -> None:
+                  raise RuntimeError("synthetic crash after promotion")
+
+              async with async_session_factory() as session:
+                  with pytest.raises(RuntimeError, match="synthetic crash"):
+                      await service.create_derivative(
+                          session=session,
+                          parent_evidence_id=parent.id,
+                          actor_user_id=owner.id,
+                          payload=payload,
+                          object_store=store,
+                          request_id=str(uuid4()),
+                          after_object_promotion=crash,
+                      )
+                  await session.rollback()
+              object_files = [
+                  path for path in (tmp_path / "vault" / "sha256").rglob("*") if path.is_file()
+              ]
+              assert len(object_files) == 2  # parent plus unreferenced-but-safe child object
+
+              async with async_session_factory() as session:
+                  recovered = await service.create_derivative(
+                      session=session,
+                      parent_evidence_id=parent.id,
+                      actor_user_id=owner.id,
+                      payload=payload,
+                      object_store=store,
+                      request_id=str(uuid4()),
+                  )
+                  await session.commit()
+                  assert recovered.created is True
+              object_files_after = [
+                  path for path in (tmp_path / "vault" / "sha256").rglob("*") if path.is_file()
+              ]
+              assert len(object_files_after) == 2
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_created_derivative_has_manifest_lineage_custody_and_audit(tmp_path: Path) -> None:
+              service = module()
+              store = LocalObjectStore(tmp_path / "vault")
+              owner, case, parent = await seed_parent(store)
+              async with async_session_factory() as session:
+                  result = await service.create_derivative(
+                      session=session,
+                      parent_evidence_id=parent.id,
+                      actor_user_id=owner.id,
+                      payload=service.DerivativePayload(
+                          transformation="safe_preview",
+                          transformer_version="v1",
+                          media_type="image/png",
+                          data=b"\x89PNG\r\n\x1a\nsynthetic-preview",
+                          source_type="derivative.safe_preview",
+                          parameters={"metadata_stripped": True},
+                      ),
+                      object_store=store,
+                      request_id="request-derivative",
+                  )
+                  await session.commit()
+                  child_id = result.child.id
+              async with async_session_factory() as session:
+                  child = await session.get(EvidenceArtifact, child_id)
+                  derivation = (
+                      await session.execute(
+                          sa.select(EvidenceDerivation).where(
+                              EvidenceDerivation.child_evidence_id == child_id
+                          )
+                      )
+                  ).scalar_one()
+                  custody = (
+                      await session.execute(
+                          sa.select(CustodyEvent).where(CustodyEvent.evidence_id == child_id)
+                      )
+                  ).scalar_one()
+                  audit = (
+                      await session.execute(
+                          sa.select(AuditEvent).where(
+                              AuditEvent.resource_type == "evidence",
+                              AuditEvent.resource_id == str(child_id),
+                          )
+                      )
+                  ).scalar_one()
+                  assert child is not None
+                  assert child.case_id == case.id
+                  assert child.state is EvidenceState.PRESERVED
+                  assert child.object_key and child.object_key.startswith("sha256/")
+                  assert derivation.parameters_digest == service.canonical_parameters_digest(
+                      {"metadata_stripped": True}
+                  )
+                  assert custody.event_type == "DERIVATIVE_CREATED"
+                  assert audit.event_type == "EVIDENCE_DERIVED"
+                  assert audit.request_id == "request-derivative"
+          PY
+
+      - name: Prove RED before implementation
+        run: |
+          set +e
+          uv run pytest -q apps/api/tests/integration/test_derivative_foundation.py >/tmp/task8-foundation-red.log 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          grep -q 'idempotent derivative service is not implemented' /tmp/task8-foundation-red.log
+
+      - name: Add derivation digest to ORM model
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          path = Path("apps/api/darknetra_api/models/evidence.py")
+          text = path.read_text(encoding="utf-8")
+          tree = ast.parse(text)
+          target_class = next(
+              node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "EvidenceDerivation"
+          )
+          if "parameters_digest" not in text:
+              assignment = next(
+                  node
+                  for node in target_class.body
+                  if isinstance(node, ast.AnnAssign)
+                  and isinstance(node.target, ast.Name)
+                  and node.target.id == "parameters_json"
+              )
+              lines = text.splitlines()
+              insertion = assignment.end_lineno
+              lines.insert(
+                  insertion,
+                  "    parameters_digest: Mapped[str] = mapped_column(sa.String(64), nullable=False)",
+              )
+              text = "\n".join(lines) + "\n"
+          if "canonical_derivation_parameters_digest" not in text:
+              addition = '''
+
+          def canonical_derivation_parameters_digest(parameters: dict[str, object]) -> str:
+              import hashlib
+              import json
+
+              canonical = json.dumps(
+                  parameters,
+                  ensure_ascii=False,
+                  sort_keys=True,
+                  separators=(",", ":"),
+                  allow_nan=False,
+              ).encode("utf-8")
+              return hashlib.sha256(canonical).hexdigest()
+
+
+          @event.listens_for(EvidenceDerivation, "before_insert")
+          def _set_derivation_parameters_digest(
+              mapper: Mapper[Any], connection: Any, target: EvidenceDerivation
+          ) -> None:
+              del mapper, connection
+              target.parameters_digest = canonical_derivation_parameters_digest(
+                  target.parameters_json or {}
+              )
+          '''
+              addition = "\n".join(
+                  line[10:] if line.startswith("          ") else line
+                  for line in addition.splitlines()
+              )
+              text = text.rstrip() + addition + "\n"
+          if "from sqlalchemy import event" not in text:
+              marker = "import sqlalchemy as sa\n"
+              text = text.replace(marker, marker + "from sqlalchemy import event\n", 1)
+          if "Mapper" not in text.split("\n", 30)[0:30]:
+              # Add Any and Mapper only if absent from imports.
+              if "from typing import Any" not in text:
+                  text = text.replace("from enum import StrEnum\n", "from enum import StrEnum\nfrom typing import Any\n", 1)
+              text = text.replace(
+                  "from sqlalchemy.orm import Mapped, mapped_column\n",
+                  "from sqlalchemy.orm import Mapped, Mapper, mapped_column\n",
+                  1,
+              )
+          path.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Add reversible derivation-idempotency migration
+        run: |
+          cat > apps/api/alembic/versions/b91d4f20e503_add_derivation_idempotency.py <<'PY'
+          """add derivation idempotency
+
+          Revision ID: b91d4f20e503
+          Revises: 8a7f2d91c402
+          Create Date: 2026-08-18 15:00:00.000000
+          """
+
+          from collections.abc import Sequence
+          import hashlib
+          import json
+
+          import sqlalchemy as sa
+          from alembic import op
+
+          revision: str = "b91d4f20e503"
+          down_revision: str | Sequence[str] | None = "8a7f2d91c402"
+          branch_labels: str | Sequence[str] | None = None
+          depends_on: str | Sequence[str] | None = None
+
+
+          def _digest(value: object) -> str:
+              canonical = json.dumps(
+                  value or {},
+                  ensure_ascii=False,
+                  sort_keys=True,
+                  separators=(",", ":"),
+                  allow_nan=False,
+              ).encode("utf-8")
+              return hashlib.sha256(canonical).hexdigest()
+
+
+          def upgrade() -> None:
+              op.add_column(
+                  "evidence_derivations",
+                  sa.Column("parameters_digest", sa.String(length=64), nullable=True),
+              )
+              connection = op.get_bind()
+              rows = connection.execute(
+                  sa.text("SELECT id, parameters_json FROM evidence_derivations")
+              ).mappings()
+              for row in rows:
+                  connection.execute(
+                      sa.text(
+                          "UPDATE evidence_derivations "
+                          "SET parameters_digest = :digest WHERE id = :id"
+                      ),
+                      {"digest": _digest(row["parameters_json"]), "id": row["id"]},
+                  )
+              op.alter_column(
+                  "evidence_derivations",
+                  "parameters_digest",
+                  existing_type=sa.String(length=64),
+                  nullable=False,
+              )
+              op.create_check_constraint(
+                  "ck_evidence_derivations_parameters_digest_hex",
+                  "evidence_derivations",
+                  "parameters_digest ~ '^[0-9a-f]{64}$'",
+              )
+              op.create_unique_constraint(
+                  "uq_evidence_derivations_pipeline",
+                  "evidence_derivations",
+                  [
+                      "parent_evidence_id",
+                      "transformation",
+                      "transformer_version",
+                      "parameters_digest",
+                  ],
+              )
+
+
+          def downgrade() -> None:
+              op.drop_constraint(
+                  "uq_evidence_derivations_pipeline",
+                  "evidence_derivations",
+                  type_="unique",
+              )
+              op.drop_constraint(
+                  "ck_evidence_derivations_parameters_digest_hex",
+                  "evidence_derivations",
+                  type_="check",
+              )
+              op.drop_column("evidence_derivations", "parameters_digest")
+          PY
+
+      - name: Implement idempotent derivative creation service
+        run: |
+          cat > apps/api/darknetra_api/services/derivatives.py <<'PY'
+          from __future__ import annotations
+
+          import io
+          from collections.abc import Callable
+          from dataclasses import dataclass
+          from datetime import UTC, datetime
+          from typing import Any
+          from uuid import UUID, uuid4
+
+          import sqlalchemy as sa
+          from sqlalchemy.ext.asyncio import AsyncSession
+          from starlette.concurrency import run_in_threadpool
+
+          from darknetra_api.models.custody import CustodyEvent
+          from darknetra_api.models.evidence import (
+              EvidenceArtifact,
+              EvidenceDerivation,
+              EvidenceState,
+              canonical_derivation_parameters_digest,
+          )
+          from darknetra_api.services.audit import append_audit_event
+          from darknetra_api.services.evidence import preserve_evidence_manifest
+          from darknetra_api.storage.base import ObjectStore, StoredObject
+
+
+          class DerivativeError(ValueError):
+              pass
+
+
+          @dataclass(frozen=True, slots=True)
+          class DerivativePayload:
+              transformation: str
+              transformer_version: str
+              media_type: str
+              data: bytes
+              source_type: str
+              parameters: dict[str, Any]
+
+              def __post_init__(self) -> None:
+                  for name, value, maximum in (
+                      ("transformation", self.transformation, 120),
+                      ("transformer_version", self.transformer_version, 80),
+                      ("media_type", self.media_type, 160),
+                      ("source_type", self.source_type, 160),
+                  ):
+                      if not isinstance(value, str) or not value.strip() or len(value) > maximum:
+                          raise DerivativeError(f"{name} is invalid")
+                  if not isinstance(self.data, bytes):
+                      raise TypeError("derivative data must be bytes")
+                  if not self.data:
+                      raise DerivativeError("derivative data must not be empty")
+                  canonical_parameters_digest(self.parameters)
+
+
+          @dataclass(frozen=True, slots=True)
+          class DerivativeResult:
+              child: EvidenceArtifact
+              derivation: EvidenceDerivation
+              stored_object: StoredObject | None
+              created: bool
+
+
+          def canonical_parameters_digest(parameters: dict[str, Any]) -> str:
+              return canonical_derivation_parameters_digest(parameters)
+
+
+          async def _existing(
+              session: AsyncSession,
+              *,
+              parent_evidence_id: UUID,
+              payload: DerivativePayload,
+          ) -> tuple[EvidenceDerivation, EvidenceArtifact] | None:
+              digest = canonical_parameters_digest(payload.parameters)
+              row = (
+                  await session.execute(
+                      sa.select(EvidenceDerivation, EvidenceArtifact)
+                      .join(
+                          EvidenceArtifact,
+                          EvidenceArtifact.id == EvidenceDerivation.child_evidence_id,
+                      )
+                      .where(
+                          EvidenceDerivation.parent_evidence_id == parent_evidence_id,
+                          EvidenceDerivation.transformation == payload.transformation,
+                          EvidenceDerivation.transformer_version == payload.transformer_version,
+                          EvidenceDerivation.parameters_digest == digest,
+                      )
+                  )
+              ).one_or_none()
+              return row
+
+
+          async def create_derivative(
+              *,
+              session: AsyncSession,
+              parent_evidence_id: UUID,
+              actor_user_id: UUID,
+              payload: DerivativePayload,
+              object_store: ObjectStore,
+              request_id: str,
+              after_object_promotion: Callable[[StoredObject], None] | None = None,
+          ) -> DerivativeResult:
+              existing = await _existing(
+                  session,
+                  parent_evidence_id=parent_evidence_id,
+                  payload=payload,
+              )
+              if existing is not None:
+                  derivation, child = existing
+                  return DerivativeResult(
+                      child=child,
+                      derivation=derivation,
+                      stored_object=None,
+                      created=False,
+                  )
+
+              parent = await session.get(EvidenceArtifact, parent_evidence_id)
+              if parent is None:
+                  raise DerivativeError("parent evidence was not found")
+              if parent.state not in {
+                  EvidenceState.PRESERVED,
+                  EvidenceState.PROCESSING,
+                  EvidenceState.READY,
+                  EvidenceState.PARTIAL,
+              }:
+                  raise DerivativeError("parent evidence is not in a derivable state")
+              if parent.case_id is None:
+                  raise DerivativeError("parent evidence is not case scoped")
+
+              stored = await run_in_threadpool(
+                  object_store.put_verified,
+                  io.BytesIO(payload.data),
+              )
+              if after_object_promotion is not None:
+                  after_object_promotion(stored)
+
+              child = EvidenceArtifact(
+                  id=uuid4(),
+                  case_id=parent.case_id,
+                  source_class=parent.source_class,
+                  source_type=payload.source_type,
+                  acquisition_method="derived_processing",
+                  collector_user_id=actor_user_id,
+                  captured_at=parent.captured_at,
+                  original_timezone=parent.original_timezone,
+                  state=EvidenceState.STAGING,
+                  tool_name="darknetra.derivatives",
+                  tool_version=payload.transformer_version,
+              )
+              preserve_evidence_manifest(
+                  child,
+                  media_type=payload.media_type,
+                  size_bytes=stored.size_bytes,
+                  sha256=stored.sha256,
+                  sha512=None,
+                  object_key=stored.object_key,
+                  ingested_at=datetime.now(UTC),
+              )
+              session.add(child)
+              await session.flush()
+
+              derivation = EvidenceDerivation(
+                  parent_evidence_id=parent.id,
+                  child_evidence_id=child.id,
+                  transformation=payload.transformation,
+                  transformer_version=payload.transformer_version,
+                  parameters_json=payload.parameters,
+                  parameters_digest=canonical_parameters_digest(payload.parameters),
+              )
+              session.add(derivation)
+              session.add(
+                  CustodyEvent(
+                      evidence_id=child.id,
+                      case_id=parent.case_id,
+                      actor_user_id=actor_user_id,
+                      event_type="DERIVATIVE_CREATED",
+                      request_id=request_id,
+                      reason="Derivative preserved from immutable parent evidence",
+                      metadata_json={
+                          "parent_evidence_id": str(parent.id),
+                          "transformation": payload.transformation,
+                          "transformer_version": payload.transformer_version,
+                      },
+                  )
+              )
+              append_audit_event(
+                  session,
+                  actor_user_id=actor_user_id,
+                  event_type="EVIDENCE_DERIVED",
+                  resource_type="evidence",
+                  resource_id=str(child.id),
+                  case_id=parent.case_id,
+                  request_id=request_id,
+                  metadata={
+                      "parent_evidence_id": str(parent.id),
+                      "transformation": payload.transformation,
+                      "transformer_version": payload.transformer_version,
+                      "parameters_digest": canonical_parameters_digest(payload.parameters),
+                  },
+              )
+              await session.flush()
+              return DerivativeResult(
+                  child=child,
+                  derivation=derivation,
+                  stored_object=stored,
+                  created=True,
+              )
+          PY
+
+      - name: Verify GREEN migration model and service
+        run: |
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run alembic -c apps/api/alembic.ini downgrade 8a7f2d91c402
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run ruff check .
+          uv run pytest -q apps/api/tests/integration/test_derivative_foundation.py
+          uv run pytest -q
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml build api worker
+
+      - name: Record Task 8 derivative foundation checkpoint
+        run: |
+          mkdir -p docs/verification
+          cat > docs/verification/plan03-task8-derivative-foundation.md <<EOF
+          # Plan 03 Task 8 — idempotent derivative foundation TDD checkpoint
+
+          - **Source before implementation:** \`$(git rev-parse HEAD)\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          ## RED
+
+          Idempotency, crash-recovery and provenance contracts were written first and failed with the expected assertion \`idempotent derivative service is not implemented\`.
+
+          ## GREEN
+
+          | Gate | Outcome |
+          |---|---|
+          | Reversible derivation-idempotency migration | success |
+          | Ruff | success |
+          | Canonical parameter digest and DB uniqueness | success |
+          | Duplicate delivery idempotency | success |
+          | New transformer-version reprocessing | success |
+          | Post-promotion crash recovery and object deduplication | success |
+          | Child manifest, lineage, custody and audit | success |
+          | Complete Python suite | success |
+          | Compose validation and API/worker image build | success |
+
+          Derivation identity is the database-enforced tuple \`(parent, transformation, transformer_version, canonical parameters digest)\`. A worker crash after content promotion may leave a safe unreferenced content-addressed object; retry reuses the same digest and creates exactly one authoritative child/lineage row.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/api/darknetra_api/models/evidence.py apps/api/darknetra_api/services/derivatives.py apps/api/alembic/versions/b91d4f20e503_add_derivation_idempotency.py apps/api/tests/integration/test_derivative_foundation.py docs/verification/plan03-task8-derivative-foundation.md
+          git rm .github/workflows/plan03-task8-derivative-foundation.yml
+          git commit -m 'feat: add idempotent derivative persistence foundation'
+          git push origin HEAD:testing-codex
