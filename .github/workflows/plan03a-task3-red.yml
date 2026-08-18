@@ -1,0 +1,89 @@
+name: Plan 03a Task 3 audited reveal RED gate
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03a-task3-red.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify-red:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-plan03a@127.0.0.1:5432/darknetra_plan03a_test
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03a_test
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-plan03a
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03a_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - id: prepare
+        continue-on-error: true
+        run: uv sync --all-packages --dev --frozen
+      - id: migrate
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: uv run alembic -c apps/api/alembic.ini upgrade head
+      - id: tests
+        if: steps.migrate.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run pytest apps/api/tests/integration/test_sensitive_value_reveal.py -v 2>&1 | tee /tmp/plan03a-task3-red.log
+      - name: Record RED result
+        if: always()
+        env:
+          PREPARE: ${{ steps.prepare.outcome }}
+          MIGRATE: ${{ steps.migrate.outcome }}
+          TESTS: ${{ steps.tests.outcome }}
+        run: |
+          mkdir -p docs/verification
+          {
+            echo '# Plan 03a Task 3 RED verification'
+            echo
+            echo "- preparation: ${PREPARE}"
+            echo "- migration: ${MIGRATE}"
+            echo "- reveal contract: ${TESTS}"
+            echo '```text'
+            tail -n 140 /tmp/plan03a-task3-red.log 2>/dev/null || true
+            echo '```'
+          } > docs/verification/plan03a-task3-red.md
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/verification/plan03a-task3-red.md
+          if ! git diff --cached --quiet; then
+            git commit -m 'docs: record Plan 03a Task 3 RED outcome [skip ci]'
+            git push origin HEAD:testing-codex
+          fi
+      - name: Require RED
+        if: always()
+        env:
+          PREPARE: ${{ steps.prepare.outcome }}
+          MIGRATE: ${{ steps.migrate.outcome }}
+          TESTS: ${{ steps.tests.outcome }}
+        run: |
+          test "$PREPARE" = success
+          test "$MIGRATE" = success
+          test "$TESTS" = failure
