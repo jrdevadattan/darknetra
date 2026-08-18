@@ -80,6 +80,16 @@ jobs:
       - uses: astral-sh/setup-uv@v10.0.1
         with:
           version: '0.12.4'
+      - name: Configure the service Redis as an explicitly transient broker
+        shell: bash
+        run: |
+          set -euo pipefail
+          REDIS_CONTAINER="$(docker ps --filter ancestor=redis:7.4-alpine --format '{{.ID}}' | head -n 1)"
+          test -n "$REDIS_CONTAINER"
+          docker exec "$REDIS_CONTAINER" redis-cli FLUSHALL | grep -q OK
+          docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET save "" | grep -q OK
+          docker exec "$REDIS_CONTAINER" redis-cli CONFIG SET appendonly no | grep -q OK
+          docker exec "$REDIS_CONTAINER" rm -f /data/dump.rdb /data/appendonly.aof
       - id: task
         name: Execute reviewed Task 1 implementation and release gate
         shell: bash
