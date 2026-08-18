@@ -32,7 +32,7 @@ apps/api/tests/unit/test_encrypted_fields.py::test_redaction_is_kind_specific[ge
 apps/api/tests/unit/test_encrypted_fields.py::test_empty_sensitive_value_redacts_to_empty_string PASSED [ 91%]
 apps/api/tests/unit/test_encrypted_fields.py::test_ordinary_pydantic_serialization_omits_envelope_internals PASSED [100%]
 
-============================== 12 passed in 0.78s ==============================
+============================== 12 passed in 0.84s ==============================
 ```
 
 ## Ruff output
@@ -50,5 +50,5 @@ All checks passed!
     from starlette.testclient import TestClient as TestClient  # noqa
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-77 passed, 1 warning in 8.40s
+77 passed, 1 warning in 8.58s
 ```
