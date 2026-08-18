@@ -1,0 +1,151 @@
+name: Plan 03 Task 5 final archive and chat gate
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task5-final.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task5-final@127.0.0.1:5432/darknetra_plan03_task5_final
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-task5-final
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task5_final
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task5-final
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task5_final"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - name: Require Task 5 checkpoints
+        run: |
+          test -f docs/verification/plan03-task5-archive-safety.md
+          test -f docs/verification/plan03-task5-chat-lineage.md
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f"::add-mask::{value}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n")
+              out.write(f"DARKNETRA_FIELD_KEY_V1_B64={field}\n")
+              out.write("DARKNETRA_FIELD_KEYRING_B64_JSON=" + json.dumps({"v1": field}, separators=(",", ":")) + "\n")
+              out.write("DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n")
+              out.write(f"DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n")
+          PY
+      - name: Verify migrations and suites
+        run: |
+          uv sync --all-packages --dev --frozen
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run alembic -c apps/api/alembic.ini downgrade 3f21c6d4a901
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run ruff check .
+          uv run pytest -q \
+            apps/api/tests/unit/test_archive_safety.py \
+            apps/api/tests/unit/test_chat_export.py \
+            apps/api/tests/integration/test_archive_member_lineage.py
+          uv run pytest -q
+      - name: Static safety inspection
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          archive = Path("apps/api/darknetra_api/parsers/archive.py").read_text(encoding="utf-8")
+          chat = Path("apps/api/darknetra_api/parsers/chat_export.py").read_text(encoding="utf-8")
+          lineage = Path("apps/api/darknetra_api/services/archive_ingest.py").read_text(encoding="utf-8")
+          for forbidden in ("extractall(", "extract(", "subprocess", "requests.", "httpx.", "urllib.request"):
+              assert forbidden not in archive
+          assert "platform: None" in chat
+          assert "source_locator_ciphertext" in lineage
+          assert "QUARANTINED" in lineage
+          assert "original_path" not in archive.split("object_store.put_verified", 1)[-1]
+          PY
+      - name: Validate and build containers
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml build api worker
+      - name: Record Task 5 completion
+        run: |
+          mkdir -p docs/architecture docs/verification
+          cat > docs/architecture/archive-and-chat-ingestion.md <<'EOF'
+          # Archive and authorized chat-export ingestion
+
+          ZIP content is treated as an untrusted container, never as a directory tree. DARKNETRA validates every member before promoting any child: path normalization, Unicode-equivalent duplicate detection, member count, expanded bytes, per-member ratio, special file type, encryption and nested archive checks are fail-closed. Approved members stream directly into the content-addressed object store. No `extract` or `extractall` call writes attacker-controlled paths.
+
+          Each retained member becomes a separate evidence artifact with its own digest, custody event and derivation edge. The original member path is protected application metadata, not a storage key. Unsupported executable-like bytes remain preserved and quarantined rather than executed or silently discarded.
+
+          The chat adapter is intentionally generic and read-only. It accepts authorized JSON, HTML and TXT exports based on their content structure, strips active HTML elements, applies record/size limits and produces normalized records. It does not authenticate to a platform, decrypt a private service, join a group or identify a platform merely from a file layout.
+          EOF
+          cat > docs/verification/plan03-task5-final.md <<EOF
+          # Plan 03 Task 5 — final verification
+
+          - **Verified source commit:** \`$(git rev-parse HEAD)\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          | Gate | Outcome |
+          |---|---|
+          | Frozen dependencies and reversible migrations | success |
+          | Ruff | success |
+          | Adversarial ZIP tests | success |
+          | Generic chat adapter tests | success |
+          | Archive child lineage/custody tests | success |
+          | Complete Python suite | success |
+          | Static no-extract/no-network inspection | success |
+          | Compose validation and image build | success |
+          EOF
+          python - <<'PY'
+          from pathlib import Path
+          ledger = Path("docs/verification/plan03-execution-ledger.md")
+          if ledger.exists():
+              lines = ledger.read_text(encoding="utf-8").splitlines()
+              value = "- Task 5: complete — adversarial ZIP safety, content-addressed child preservation, derivation/custody lineage, quarantine and generic authorized chat-export parsing verified."
+              for index, line in enumerate(lines):
+                  if line.startswith("- Task 5:"):
+                      lines[index] = value
+                      break
+              else:
+                  lines += ["", value]
+              ledger.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/architecture/archive-and-chat-ingestion.md docs/verification/plan03-task5-final.md
+          if test -f docs/verification/plan03-execution-ledger.md; then git add docs/verification/plan03-execution-ledger.md; fi
+          git rm .github/workflows/plan03-task5-final.yml
+          git commit -m 'docs: verify secure archive and chat ingestion [skip ci]'
+          git push origin HEAD:testing-codex
