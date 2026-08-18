@@ -1,6 +1,6 @@
 name: Plan 03 Task 1 durable job boundary
 
-# Canonicalize and verify the staged runner before executing the TDD and release gates.
+# Repair the two-byte staging insertion by matching the reviewed payload hash, then run all gates.
 on:
   push:
     branches: [testing-codex]
@@ -81,20 +81,24 @@ jobs:
           import hashlib
           from pathlib import Path
 
-          source = Path('.automation/plan03-task1-run.sh.gz.b64')
-          raw = source.read_text(encoding='ascii')
-          compact = ''.join(raw.split())
-          padding = compact.find('=')
-          if padding >= 0:
-              compact = compact[:padding] + ('==' if compact[padding:padding + 2] == '==' else '=')
+          raw = Path('.automation/plan03-task1-run.sh.gz.b64').read_text(encoding='ascii')
           expected = 'e4cf8f5bf83f2af00acf07fe1f3c4c99bc3c730d7d78646c45f09468b7b50935'
-          observed = hashlib.sha256(compact.encode('ascii')).hexdigest()
-          if observed != expected:
+          candidate = None
+          if hashlib.sha256(raw.encode('ascii')).hexdigest() == expected:
+              candidate = raw
+          else:
+              for index in range(len(raw) - 1):
+                  attempt = raw[:index] + raw[index + 2:]
+                  if hashlib.sha256(attempt.encode('ascii')).hexdigest() == expected:
+                      print(f'Removed verified adjacent staging bytes at offset {index}: {raw[index:index + 2]!r}')
+                      candidate = attempt
+                      break
+          if candidate is None:
               raise SystemExit(
-                  f'canonical runner payload mismatch: raw_length={len(raw)} '
-                  f'canonical_length={len(compact)} sha256={observed} tail={raw[-16:]!r}'
+                  f'runner payload could not be reconciled: length={len(raw)} '
+                  f'sha256={hashlib.sha256(raw.encode("ascii")).hexdigest()}'
               )
-          Path('/tmp/plan03-task1-run.b64').write_text(compact, encoding='ascii')
+          Path('/tmp/plan03-task1-run.b64').write_text(candidate, encoding='ascii')
           PY
           base64 --decode /tmp/plan03-task1-run.b64 | gzip --decompress > /tmp/plan03-task1-run.sh
           chmod 700 /tmp/plan03-task1-run.sh
