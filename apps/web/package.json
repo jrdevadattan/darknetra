@@ -14,6 +14,7 @@
     "test:watch": "vitest",
     "test:e2e:online": "playwright test --config playwright.config.ts",
     "test:e2e:offline": "playwright test --config playwright-offline.config.ts",
+    "test:e2e:real": "playwright test --config playwright-real.config.ts",
     "test:e2e": "pnpm test:e2e:online && pnpm test:e2e:offline"
   },
   "dependencies": {
