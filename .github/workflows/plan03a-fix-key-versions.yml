@@ -1,0 +1,66 @@
+name: Repair Plan 03a key-version introspection
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03a-fix-key-versions.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - name: Add key-version property and retrigger final verification
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          encryption = Path('apps/api/darknetra_api/security/encryption.py')
+          text = encryption.read_text(encoding='utf-8')
+          old = '''    @property
+          def active_key_version(self) -> str:
+              return self._active_key_version
+
+          def _aad(self, *, purpose: str, resource_id: str, key_version: str) -> bytes:
+          '''.replace('          ', '')
+          new = '''    @property
+          def active_key_version(self) -> str:
+              return self._active_key_version
+
+          @property
+          def key_versions(self) -> frozenset[str]:
+              return frozenset(self._field_keys)
+
+          def _aad(self, *, purpose: str, resource_id: str, key_version: str) -> bytes:
+          '''.replace('          ', '')
+          if old not in text:
+              if 'def key_versions(self) -> frozenset[str]:' not in text:
+                  raise SystemExit('expected SensitiveFieldCrypto property anchor was not found')
+          else:
+              encryption.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          workflow = Path('.github/workflows/plan03a-final.yml')
+          workflow_text = workflow.read_text(encoding='utf-8')
+          marker = '# Rerun after exposing the validated runtime key versions.\n'
+          if marker not in workflow_text:
+              workflow.write_text(
+                  workflow_text.replace(
+                      'name: Plan 03a final sensitive-field encryption verification\n\n',
+                      'name: Plan 03a final sensitive-field encryption verification\n\n' + marker,
+                      1,
+                  ),
+                  encoding='utf-8',
+              )
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/api/darknetra_api/security/encryption.py .github/workflows/plan03a-final.yml
+          git commit -m 'fix: expose sensitive-field key versions'
+          git push origin HEAD:testing-codex
