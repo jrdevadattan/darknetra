@@ -1,4 +1,4 @@
-name: Plan 03 Task 2 RED gate
+name: Plan 03 Task 2 GREEN gate
 
 on:
   push:
@@ -11,24 +11,24 @@ permissions:
   statuses: write
 
 jobs:
-  red:
+  green:
     runs-on: ubuntu-latest
     env:
       DARKNETRA_ENVIRONMENT: development
-      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task2-red@127.0.0.1:5432/darknetra_plan03_task2_red
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task2-green@127.0.0.1:5432/darknetra_plan03_task2_green
       DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
       DARKNETRA_WEB_ORIGIN: http://localhost:3000
     services:
       postgres:
         image: postgres:18
         env:
-          POSTGRES_DB: darknetra_plan03_task2_red
+          POSTGRES_DB: darknetra_plan03_task2_green
           POSTGRES_USER: darknetra
-          POSTGRES_PASSWORD: darknetra-task2-red
+          POSTGRES_PASSWORD: darknetra-task2-green
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task2_red"
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task2_green"
           --health-interval 5s
           --health-timeout 3s
           --health-retries 15
@@ -55,11 +55,9 @@ jobs:
         run: |
           python - <<'PY'
           import base64, json, os, secrets
-          def key():
-              return base64.b64encode(secrets.token_bytes(32)).decode('ascii')
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode('ascii')
           jwt = key(); field = key(); blind = key()
-          for value in (jwt, field, blind):
-              print(f'::add-mask::{value}')
+          for value in (jwt, field, blind): print(f'::add-mask::{value}')
           with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as out:
               out.write(f'DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n')
               out.write(f'DARKNETRA_FIELD_KEY_V1_B64={field}\n')
@@ -69,15 +67,19 @@ jobs:
           PY
       - name: Install locked workspace
         run: uv sync --all-packages --dev --frozen
-      - name: Migrate current schema
-        run: uv run alembic -c apps/api/alembic.ini upgrade head
-      - id: focused
-        name: Execute Task 2 focused contract suite
-        continue-on-error: true
+      - name: Verify migrations
+        run: |
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run alembic -c apps/api/alembic.ini downgrade 3f21c6d4a901
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run alembic -c apps/api/alembic.ini current
+      - name: Ruff
+        run: uv run ruff check .
+      - name: Focused Task 2 suite
         run: uv run pytest -q apps/api/tests/integration/test_evidence_provenance.py
-      - name: Assert RED failure is real
-        run: test "${{ steps.focused.outcome }}" = "failure"
-      - name: Publish RED confirmation
+      - name: Complete Python suite
+        run: uv run pytest -q
+      - name: Publish GREEN confirmation
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -85,8 +87,8 @@ jobs:
           import json, os
           print(json.dumps({
               "state": "success",
-              "context": "plan03/task2-red",
-              "description": "Task 2 contract suite failed as expected before implementation",
+              "context": "plan03/task2-green",
+              "description": "Task 2 provenance schema and regression gates passed",
               "target_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
           }))
           PY
