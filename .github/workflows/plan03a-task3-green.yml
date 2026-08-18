@@ -1,5 +1,6 @@
 name: Plan 03a Task 3 audited reveal GREEN gate
 
+# Rerun after removing the final Ruff violation in the reveal integration test.
 on:
   push:
     branches: [testing-codex]
