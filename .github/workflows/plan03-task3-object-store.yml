@@ -1,0 +1,291 @@
+name: Plan 03 Task 3 content-addressed object store
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task3-object-store.yml
+
+permissions:
+  contents: write
+  statuses: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task3@127.0.0.1:5432/darknetra_plan03_task3_test
+      DARKNETRA_E2E_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task3@127.0.0.1:5432/darknetra_plan03_task3_test
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_EVIDENCE_STORE_PATH: .darknetra/task3-test-store
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task3_test
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task3
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task3_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Publish run locator
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY' > /tmp/status.json
+          import json
+          import os
+
+          print(json.dumps({
+              "state": "pending",
+              "context": "plan03/task3",
+              "description": f"GitHub Actions run {os.environ['GITHUB_RUN_ID']}",
+              "target_url": (
+                  f"{os.environ['GITHUB_SERVER_URL']}/"
+                  f"{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
+                  f"{os.environ['GITHUB_RUN_ID']}"
+              ),
+          }))
+          PY
+          curl --fail --silent --show-error --request POST \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data @/tmp/status.json \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" >/dev/null
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64
+          import json
+          import os
+          import secrets
+
+          def key() -> str:
+              return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+
+          jwt = key()
+          field = key()
+          blind = key()
+          for value in (jwt, field, blind):
+              print(f"::add-mask::{value}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write(f"DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n")
+              output.write(f"DARKNETRA_FIELD_KEY_V1_B64={field}\n")
+              output.write(
+                  "DARKNETRA_FIELD_KEYRING_B64_JSON="
+                  + json.dumps({"v1": field}, separators=(",", ":"))
+                  + "\n"
+              )
+              output.write("DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n")
+              output.write(f"DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n")
+          PY
+
+      - name: Install locked Python workspace
+        run: uv sync --all-packages --dev --frozen
+
+      - name: Focused object-store tests
+        run: uv run pytest -q apps/api/tests/unit/test_local_object_store.py
+
+      - name: Ruff
+        run: uv run ruff check .
+
+      - name: Complete Python regression suite
+        run: uv run pytest -q
+
+      - name: Validate Compose volume isolation
+        run: |
+          docker compose -f docker-compose.yml config --format json > /tmp/darknetra-compose.json
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          config = json.loads(Path("/tmp/darknetra-compose.json").read_text(encoding="utf-8"))
+          services = config["services"]
+          expected_target = "/var/lib/darknetra/evidence-store"
+
+          def mounts(service: str) -> list[dict[str, object]]:
+              return list(services[service].get("volumes", []))
+
+          for service in ("api", "worker"):
+              evidence_mounts = [
+                  mount
+                  for mount in mounts(service)
+                  if mount.get("target") == expected_target
+              ]
+              assert len(evidence_mounts) == 1, (service, evidence_mounts)
+              assert evidence_mounts[0].get("type") == "volume"
+              assert evidence_mounts[0].get("source") == "evidence-store"
+              assert services[service]["environment"]["DARKNETRA_EVIDENCE_STORE_PATH"] == expected_target
+
+          assert all(
+              mount.get("target") != expected_target
+              for mount in mounts("web")
+          )
+          assert "evidence-store" in config["volumes"]
+          PY
+
+      - id: docker_smoke
+        name: Build and verify shared evidence volume
+        run: |
+          set -euo pipefail
+          docker compose -p darknetra-task3 -f docker-compose.yml build api worker
+          docker compose -p darknetra-task3 -f docker-compose.yml \
+            up -d --no-build --wait --wait-timeout 180 postgres redis api worker
+          docker compose -p darknetra-task3 -f docker-compose.yml \
+            exec -T api sh -lc \
+            'uv run --no-sync python - <<'"'"'PY'"'"'
+          import io
+          import os
+
+          from darknetra_api.storage.local import LocalObjectStore
+
+          payload = b"plan03-task3-shared-volume"
+          stored = LocalObjectStore(os.environ["DARKNETRA_EVIDENCE_STORE_PATH"]).put_verified(
+              io.BytesIO(payload)
+          )
+          assert stored.created is True
+          print(stored.object_key)
+          PY'
+          docker compose -p darknetra-task3 -f docker-compose.yml \
+            exec -T worker sh -lc \
+            'uv run --no-sync python - <<'"'"'PY'"'"'
+          import hashlib
+          import os
+
+          from darknetra_api.storage.local import LocalObjectStore
+
+          payload = b"plan03-task3-shared-volume"
+          digest = hashlib.sha256(payload).hexdigest()
+          key = f"sha256/{digest[:2]}/{digest[2:4]}/{digest}"
+          store = LocalObjectStore(os.environ["DARKNETRA_EVIDENCE_STORE_PATH"])
+          assert store.verify(key, digest) is True
+          with store.open(key) as handle:
+              assert handle.read() == payload
+          print(key)
+          PY'
+
+      - name: Tear down Task 3 stack
+        if: always()
+        run: |
+          docker compose -p darknetra-task3 -f docker-compose.yml \
+            down -v --remove-orphans
+
+      - name: Record Task 3 verification and remove one-shot workflow
+        if: success()
+        run: |
+          mkdir -p docs/verification
+          cat > docs/verification/plan03-task3-object-store.md <<EOF
+          # Plan 03 Task 3 — content-addressed object-store verification
+
+          - **Verified commit:** \`$(git rev-parse HEAD)\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          | Gate | Outcome |
+          |---|---|
+          | Frozen Python workspace | success |
+          | Focused object-store tests, including Hypothesis | success |
+          | Ruff | success |
+          | Complete Python regression suite | success |
+          | Base and development Compose validation | success |
+          | Named \`evidence-store\` volume on API and worker only | success |
+          | API writes a content-addressed object as non-root user | success |
+          | Worker verifies and reads the same object | success |
+          | Stack and volume teardown | success |
+
+          ## Verified boundary
+
+          - Original bytes are streamed to a random staging file, hashed with SHA-256, fsynced, checked against an optional expected digest, and atomically promoted.
+          - Final keys follow \`sha256/<first2>/<next2>/<fullhex>\`; caller filenames are never used as paths.
+          - Duplicate content reuses the existing verified object; failed writes leave no staged or promoted object.
+          - Object keys are grammar validated and cannot traverse outside the configured root.
+          - The browser service has no evidence-store mount or credentials.
+          EOF
+          python - <<'PY'
+          from pathlib import Path
+
+          ledger = Path("docs/verification/plan03-execution-ledger.md")
+          text = ledger.read_text(encoding="utf-8")
+          old = "- Task 3: pending."
+          new = (
+              "- Task 3: complete — content-addressed local storage, verified staging, "
+              "atomic promotion, deduplication, key validation, shared API/worker volume, "
+              "and mount isolation verified; record: "
+              "`docs/verification/plan03-task3-object-store.md`."
+          )
+          if text.count(old) != 1:
+              raise SystemExit("Task 3 ledger marker was not found exactly once")
+          ledger.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/verification/plan03-task3-object-store.md docs/verification/plan03-execution-ledger.md
+          git rm .github/workflows/plan03-task3-object-store.yml
+          git commit -m 'docs: verify Plan 03 Task 3 object store [skip ci]'
+          git push origin HEAD:testing-codex
+
+      - name: Publish terminal status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          python - <<'PY' > /tmp/status.json
+          import json
+          import os
+
+          success = os.environ["JOB_STATUS"] == "success"
+          print(json.dumps({
+              "state": "success" if success else "failure",
+              "context": "plan03/task3",
+              "description": (
+                  "Task 3 object-store gate passed"
+                  if success
+                  else "Task 3 object-store gate failed"
+              ),
+              "target_url": (
+                  f"{os.environ['GITHUB_SERVER_URL']}/"
+                  f"{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
+                  f"{os.environ['GITHUB_RUN_ID']}"
+              ),
+          }))
+          PY
+          curl --fail --silent --show-error --request POST \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data @/tmp/status.json \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" >/dev/null
