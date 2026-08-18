@@ -1,6 +1,6 @@
 name: Plan 02 Task 14 final verification
 
-# Preflight GREEN gate for the documented Docker authentication configuration.
+# RED diagnostic for the local SameSite hostname contract.
 on:
   push:
     branches: [testing-codex]
@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 jobs:
-  verify-compose:
+  verify-local-origin-red:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,45 +33,35 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          uv run pytest tests/repo/test_compose_contract.py -q 2>&1 | tee /tmp/task14-compose.log
-      - id: compose_config
-        continue-on-error: true
-        env:
-          DARKNETRA_JWT_SIGNING_KEY_B64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
-        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
-      - name: Record Task 14 Compose preflight
+          uv run pytest tests/repo/test_compose_contract.py -q 2>&1 | tee /tmp/task14-origin-red.log
+      - name: Record SameSite RED outcome
         if: always()
         env:
           PREPARE: ${{ steps.prepare.outcome }}
           COMPOSE_TEST: ${{ steps.compose_test.outcome }}
-          COMPOSE_CONFIG: ${{ steps.compose_config.outcome }}
         run: |
-          mkdir -p docs/verification
           {
             echo '# Plan 02 Task 14 preflight'
             echo
             echo "- prepare: ${PREPARE}"
-            echo "- Docker auth configuration contract: ${COMPOSE_TEST}"
-            echo "- effective Compose configuration: ${COMPOSE_CONFIG}"
+            echo "- local SameSite hostname contract: ${COMPOSE_TEST}"
             echo
             echo '```text'
-            cat /tmp/task14-compose.log 2>/dev/null || true
+            cat /tmp/task14-origin-red.log 2>/dev/null || true
             echo '```'
           } > docs/verification/plan02-task14-preflight.md
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add docs/verification/plan02-task14-preflight.md
           if ! git diff --cached --quiet; then
-            git commit -m 'docs: record Plan 02 Task 14 Compose preflight [skip ci]'
+            git commit -m 'docs: record Plan 02 Task 14 SameSite RED outcome [skip ci]'
             git push origin HEAD:testing-codex
           fi
-      - name: Enforce Compose preflight
+      - name: Require SameSite RED before example fix
         if: always()
         env:
           PREPARE: ${{ steps.prepare.outcome }}
           COMPOSE_TEST: ${{ steps.compose_test.outcome }}
-          COMPOSE_CONFIG: ${{ steps.compose_config.outcome }}
         run: |
           test "$PREPARE" = success
-          test "$COMPOSE_TEST" = success
-          test "$COMPOSE_CONFIG" = success
+          test "$COMPOSE_TEST" = failure
