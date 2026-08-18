@@ -5,7 +5,7 @@
 DARKNETRA is being developed for the **Chandigarh Police National Hackathon 2026 — Problem Statement 3**. The product direction is to preserve source evidence, extract structured narcotics indicators, correlate cross-platform aliases, visualize investigation graphs, detect emerging trends, and generate evidence-linked investigation packs.
 
 > [!IMPORTANT]
-> **Current implementation status:** Plan 02 — PostgreSQL, authentication, global/case RBAC, auditable case lifecycle, live case queries, administration reads, and authenticated frontend session UX — is implemented on `testing-codex`. Evidence ingestion and analytic features remain later-plan work. No page should be interpreted as containing real illicit-market or suspect data unless an authorized deployment has deliberately supplied it.
+> **Current implementation status:** Plans 01–02 and mandatory Plan 03a are implemented on `testing-codex`: the authenticated case foundation now includes versioned AES-256-GCM sensitive-field encryption, purpose-scoped blind indexes, explicit redaction, audited reveal, and key-rotation primitives. Evidence Vault ingestion begins in Plan 03. No page should be interpreted as containing real illicit-market or suspect data unless an authorized deployment has deliberately supplied it.
 
 <p align="center">
   <img src="docs/screenshots/dashboard-overview.png" alt="DARKNETRA investigator overview dashboard" width="100%" />
@@ -30,6 +30,9 @@ The committed screenshot preserves the approved investigator-shell design. Runti
 | Case lifecycle API | ✅ Implemented | Create, list, read, update, close, reopen, stable pagination |
 | Case membership API | ✅ Implemented | Add/update/remove roles with last-owner and ADMIN-role invariants |
 | Transactional audit | ✅ Implemented | Business mutation and append-only audit event commit together |
+| Sensitive-field encryption | ✅ Plan 03a | AES-256-GCM envelopes, resource/purpose AAD and separate HMAC blind indexes |
+| Audited sensitive reveal | ✅ Plan 03a | Case permission, bounded reason, no-store endpoint contract and plaintext-free audit metadata |
+| Versioned key rotation | ✅ Plan 03a | Old-version decrypt, active-version re-encryption and fail-closed unknown versions |
 | Live case frontend | ✅ Implemented | Typed API client, explicit mapper, loading/empty/offline/access-denied states |
 | Authenticated session UX | ✅ Implemented | Login, forced password change, logout, cache clearing, backend-unavailable state |
 | Administration reads | ✅ Implemented | User list and role matrix sourced from backend policy truth |
@@ -48,7 +51,7 @@ The committed screenshot preserves the approved investigator-shell design. Runti
 
 > **The evidence is the source of truth. AI may help explain evidence, but it must never silently become the evidence.**
 
-Plan 02 does not ingest evidence or produce analytic findings. It establishes the authenticated, case-scoped, auditable foundation later plans must reuse.
+Plan 03a does not ingest evidence or produce analytic findings. It extends the Plan 02 authenticated case foundation with the mandatory encryption and audited-reveal boundary that Evidence Vault metadata must reuse.
 
 ```text
 Authorized source material                         Later plans
@@ -113,6 +116,7 @@ Full details are in [Authentication, authorization, and auditable case access](d
 
 ### Architecture decisions
 
+- [Sensitive-field encryption and audited reveal](docs/architecture/sensitive-field-encryption.md)
 - [ADR-0001: Frontend template baseline](docs/decisions/0001-frontend-template-baseline.md)
 - [ADR-0002: UUID4 until an approved UUIDv7 implementation](docs/decisions/0002-use-uuid4-until-approved-uuidv7.md)
 
@@ -141,6 +145,7 @@ Full details are in [Authentication, authorization, and auditable case access](d
 - PostgreSQL 18
 - Argon2id
 - PyJWT/HS256
+- `cryptography` AES-256-GCM and HMAC-SHA-256 blind indexes
 - pytest + pytest-asyncio
 - Ruff
 
@@ -376,6 +381,10 @@ Use `http://localhost:3000/auth/v2/login` when `DARKNETRA_WEB_ORIGIN` is `http:/
 | `DARKNETRA_DATABASE_URL` | Yes | PostgreSQL SQLAlchemy URL |
 | `DARKNETRA_WEB_ORIGIN` | Yes | Exact browser origin for CORS and origin validation |
 | `DARKNETRA_JWT_SIGNING_KEY_B64` | Auth required | Secret base64 value decoding to exactly 32 random bytes |
+| `DARKNETRA_FIELD_KEY_V1_B64` | Protected metadata | Initial 32-byte envelope-encryption key; runtime secret only |
+| `DARKNETRA_FIELD_KEYRING_B64_JSON` | Rotation | Optional secret JSON version-to-key map; replaces single-v1 input |
+| `DARKNETRA_FIELD_ACTIVE_KEY_VERSION` | Protected metadata | Key version used for new/rotated ciphertext |
+| `DARKNETRA_FIELD_BLIND_INDEX_KEY_B64` | Protected metadata | Independent 32-byte HMAC key for purpose-scoped equality indexes |
 | `DARKNETRA_POSTGRES_PASSWORD` | Docker | PostgreSQL development password interpolation |
 | `DARKNETRA_API_BASE_URL` | Web server | Next.js server-to-API URL |
 | `NEXT_PUBLIC_DARKNETRA_API_BASE_URL` | Browser | Browser-visible API URL; never a secret |
