@@ -1,0 +1,442 @@
+name: Plan 03 Task 7 safe image derivative TDD
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task7-image.yml
+
+permissions:
+  contents: write
+
+jobs:
+  red-green:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task7-image@127.0.0.1:5432/darknetra_plan03_task7_image
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-task7-image
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task7_image
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task7-image
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task7_image"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Require completed Task 6 parser boundary
+        run: test -f docs/verification/plan03-task6-final.md
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f"::add-mask::{value}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n")
+              out.write(f"DARKNETRA_FIELD_KEY_V1_B64={field}\n")
+              out.write("DARKNETRA_FIELD_KEYRING_B64_JSON=" + json.dumps({"v1": field}, separators=(",", ":")) + "\n")
+              out.write("DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n")
+              out.write(f"DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n")
+          PY
+
+      - name: Install frozen workspace
+        run: uv sync --all-packages --dev --frozen
+
+      - name: Write image contracts before production code
+        run: |
+          cat > apps/api/tests/unit/test_image_parser.py <<'PY'
+          from __future__ import annotations
+
+          import importlib
+          import importlib.util
+          import io
+
+          import pytest
+
+
+          def module():
+              spec = importlib.util.find_spec("darknetra_api.parsers.image")
+              assert spec is not None, "safe image parser is not implemented"
+              return importlib.import_module("darknetra_api.parsers.image")
+
+
+          def image_bytes(fmt: str, *, size=(12, 8), mode="RGB", exif_orientation=None) -> bytes:
+              from PIL import Image
+
+              image = Image.new(mode, size, (20, 40, 60, 128) if mode == "RGBA" else (20, 40, 60))
+              output = io.BytesIO()
+              kwargs = {}
+              if exif_orientation is not None:
+                  exif = Image.Exif()
+                  exif[274] = exif_orientation
+                  kwargs["exif"] = exif
+              image.save(output, format=fmt, **kwargs)
+              return output.getvalue()
+
+
+          @pytest.mark.parametrize(
+              ("fmt", "expected"),
+              [("PNG", "PNG"), ("JPEG", "JPEG"), ("WEBP", "WEBP")],
+          )
+          def test_valid_image_formats_create_metadata_free_png_preview(fmt: str, expected: str) -> None:
+              parser = module()
+              data = image_bytes(fmt)
+              result = parser.parse_image(data)
+              assert result.metadata["source_format"] == expected
+              assert result.metadata["original_width"] == 12
+              assert result.metadata["original_height"] == 8
+              assert result.preview_media_type == "image/png"
+              assert result.preview_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+              from PIL import Image
+
+              preview = Image.open(io.BytesIO(result.preview_bytes))
+              assert preview.size == (12, 8)
+              assert not preview.getexif()
+              assert result.metadata["metadata_copied_to_preview"] is False
+
+
+          def test_exif_orientation_is_applied_but_private_values_are_not_exposed() -> None:
+              parser = module()
+              data = image_bytes("JPEG", size=(10, 20), exif_orientation=6)
+              result = parser.parse_image(data)
+              assert result.metadata["exif_present"] is True
+              assert result.metadata["orientation_applied"] is True
+              assert result.metadata["oriented_width"] == 20
+              assert result.metadata["oriented_height"] == 10
+              serialized = repr(result.metadata).lower()
+              assert "gps" not in serialized
+              assert "make" not in serialized
+              assert "model" not in serialized
+              from PIL import Image
+
+              preview = Image.open(io.BytesIO(result.preview_bytes))
+              assert preview.size == (20, 10)
+              assert not preview.getexif()
+
+
+          def test_transparent_image_preserves_alpha_in_safe_preview() -> None:
+              parser = module()
+              result = parser.parse_image(image_bytes("PNG", mode="RGBA"))
+              from PIL import Image
+
+              preview = Image.open(io.BytesIO(result.preview_bytes))
+              assert preview.mode == "RGBA"
+              assert result.metadata["alpha_preserved"] is True
+
+
+          def test_custom_pixel_warning_and_hard_pixel_limit_are_distinct() -> None:
+              parser = module()
+              data = image_bytes("PNG", size=(20, 20))
+              warned = parser.parse_image(
+                  data,
+                  limits=parser.ImageParseLimits(
+                      decompression_warning_pixels=100,
+                      max_pixels=1_000,
+                  ),
+              )
+              assert "DECOMPRESSION_BOMB_RISK" in warned.warnings
+              with pytest.raises(parser.ImageLimitExceeded, match="pixel"):
+                  parser.parse_image(
+                      data,
+                      limits=parser.ImageParseLimits(
+                          decompression_warning_pixels=50,
+                          max_pixels=399,
+                      ),
+                  )
+
+
+          def test_max_dimension_and_input_byte_limits_fail_closed() -> None:
+              parser = module()
+              data = image_bytes("PNG", size=(30, 4))
+              with pytest.raises(parser.ImageLimitExceeded, match="dimension"):
+                  parser.parse_image(
+                      data,
+                      limits=parser.ImageParseLimits(max_dimension=29),
+                  )
+              with pytest.raises(parser.ImageLimitExceeded, match="byte"):
+                  parser.parse_image(
+                      data,
+                      limits=parser.ImageParseLimits(max_input_bytes=len(data) - 1),
+                  )
+
+
+          @pytest.mark.parametrize("payload", [b"", b"not an image", b"\x89PNG\r\n\x1a\ntruncated"])
+          def test_empty_malformed_and_truncated_images_are_rejected(payload: bytes) -> None:
+              parser = module()
+              with pytest.raises(parser.ImageParseError):
+                  parser.parse_image(payload)
+
+
+          def test_preview_is_bounded_and_never_upscaled() -> None:
+              parser = module()
+              data = image_bytes("PNG", size=(100, 50))
+              result = parser.parse_image(
+                  data,
+                  limits=parser.ImageParseLimits(max_preview_dimension=32),
+              )
+              assert result.metadata["preview_width"] == 32
+              assert result.metadata["preview_height"] == 16
+              small = parser.parse_image(
+                  image_bytes("PNG", size=(8, 4)),
+                  limits=parser.ImageParseLimits(max_preview_dimension=32),
+              )
+              assert small.metadata["preview_width"] == 8
+              assert small.metadata["preview_height"] == 4
+          PY
+
+      - name: Prove RED before implementation
+        run: |
+          set +e
+          uv run pytest -q apps/api/tests/unit/test_image_parser.py >/tmp/task7-image-red.log 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          grep -q 'safe image parser is not implemented' /tmp/task7-image-red.log
+
+      - name: Add locked Pillow dependency
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("apps/api/pyproject.toml")
+          text = path.read_text(encoding="utf-8")
+          dependency = '    "pillow>=11,<13",\n'
+          if "pillow" not in text.casefold():
+              marker = "dependencies = [\n"
+              if text.count(marker) != 1:
+                  raise SystemExit("dependency list marker missing or ambiguous")
+              text = text.replace(marker, marker + dependency, 1)
+              path.write_text(text, encoding="utf-8")
+          PY
+          uv lock
+          uv sync --all-packages --dev --frozen
+
+      - name: Implement bounded metadata-stripping image derivative
+        run: |
+          cat > apps/api/darknetra_api/parsers/image.py <<'PY'
+          from __future__ import annotations
+
+          import io
+          import warnings
+          from dataclasses import dataclass
+
+          from PIL import Image as PILImage
+          from PIL import ImageOps, UnidentifiedImageError
+
+
+          class ImageParseError(ValueError):
+              pass
+
+
+          class ImageLimitExceeded(ImageParseError):
+              pass
+
+
+          @dataclass(frozen=True, slots=True)
+          class ImageParseLimits:
+              max_input_bytes: int = 100 * 1024 * 1024
+              max_dimension: int = 32_768
+              max_pixels: int = 100_000_000
+              decompression_warning_pixels: int = 50_000_000
+              max_preview_dimension: int = 2_048
+              max_preview_bytes: int = 25 * 1024 * 1024
+
+              def __post_init__(self) -> None:
+                  if min(
+                      self.max_input_bytes,
+                      self.max_dimension,
+                      self.max_pixels,
+                      self.decompression_warning_pixels,
+                      self.max_preview_dimension,
+                      self.max_preview_bytes,
+                  ) <= 0:
+                      raise ValueError("image limits must be positive")
+                  if self.decompression_warning_pixels > self.max_pixels:
+                      raise ValueError("decompression warning threshold cannot exceed max pixels")
+
+
+          @dataclass(frozen=True, slots=True)
+          class ImageParseResult:
+              preview_bytes: bytes
+              preview_media_type: str
+              metadata: dict[str, int | str | bool]
+              warnings: tuple[str, ...] = ()
+
+
+          _ALLOWED_FORMATS = {"PNG", "JPEG", "WEBP"}
+
+
+          def _has_alpha(image: PILImage.Image) -> bool:
+              return image.mode in {"RGBA", "LA"} or (
+                  image.mode == "P" and "transparency" in image.info
+              )
+
+
+          def parse_image(
+              data: bytes,
+              *,
+              limits: ImageParseLimits | None = None,
+          ) -> ImageParseResult:
+              active = limits or ImageParseLimits()
+              if not isinstance(data, bytes):
+                  raise TypeError("image evidence must be bytes")
+              if not data:
+                  raise ImageParseError("image evidence is empty")
+              if len(data) > active.max_input_bytes:
+                  raise ImageLimitExceeded("image evidence exceeds the byte limit")
+
+              try:
+                  with warnings.catch_warnings():
+                      warnings.simplefilter("error", PILImage.DecompressionBombWarning)
+                      with PILImage.open(io.BytesIO(data)) as probe:
+                          source_format = (probe.format or "").upper()
+                          width, height = probe.size
+                          exif_present = bool(probe.getexif())
+                          probe.verify()
+              except PILImage.DecompressionBombError as exc:
+                  raise ImageLimitExceeded("image exceeds Pillow decompression-bomb limits") from exc
+              except PILImage.DecompressionBombWarning as exc:
+                  raise ImageLimitExceeded("image triggered Pillow decompression-bomb warning") from exc
+              except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
+                  raise ImageParseError("image is malformed or truncated") from exc
+
+              if source_format not in _ALLOWED_FORMATS:
+                  raise ImageParseError(f"unsupported image format {source_format!r}")
+              if width <= 0 or height <= 0:
+                  raise ImageParseError("image dimensions are invalid")
+              if width > active.max_dimension or height > active.max_dimension:
+                  raise ImageLimitExceeded("image exceeds the maximum dimension")
+              pixels = width * height
+              if pixels > active.max_pixels:
+                  raise ImageLimitExceeded("image exceeds the maximum pixel count")
+
+              result_warnings: list[str] = []
+              if pixels > active.decompression_warning_pixels:
+                  result_warnings.append("DECOMPRESSION_BOMB_RISK")
+
+              try:
+                  with PILImage.open(io.BytesIO(data)) as source:
+                      source.load()
+                      orientation = source.getexif().get(274)
+                      oriented = ImageOps.exif_transpose(source)
+                      orientation_applied = orientation not in {None, 1}
+                      oriented_width, oriented_height = oriented.size
+                      alpha = _has_alpha(oriented)
+                      if alpha:
+                          preview = oriented.convert("RGBA")
+                      else:
+                          preview = oriented.convert("RGB")
+                      preview.thumbnail(
+                          (active.max_preview_dimension, active.max_preview_dimension),
+                          PILImage.Resampling.LANCZOS,
+                      )
+                      preview_width, preview_height = preview.size
+                      output = io.BytesIO()
+                      preview.save(
+                          output,
+                          format="PNG",
+                          optimize=True,
+                          compress_level=9,
+                      )
+                      preview_bytes = output.getvalue()
+              except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
+                  raise ImageParseError("image pixels could not be decoded safely") from exc
+
+              if len(preview_bytes) > active.max_preview_bytes:
+                  raise ImageLimitExceeded("safe image preview exceeds the byte limit")
+              return ImageParseResult(
+                  preview_bytes=preview_bytes,
+                  preview_media_type="image/png",
+                  metadata={
+                      "source_format": source_format,
+                      "original_width": width,
+                      "original_height": height,
+                      "oriented_width": oriented_width,
+                      "oriented_height": oriented_height,
+                      "preview_width": preview_width,
+                      "preview_height": preview_height,
+                      "pixel_count": pixels,
+                      "exif_present": exif_present,
+                      "orientation_applied": orientation_applied,
+                      "alpha_preserved": alpha,
+                      "metadata_copied_to_preview": False,
+                      "active_content_executed": False,
+                  },
+                  warnings=tuple(result_warnings),
+              )
+          PY
+
+      - name: Verify GREEN and complete regression
+        run: |
+          uv run ruff check .
+          uv run pytest -q apps/api/tests/unit/test_image_parser.py
+          uv run pytest -q
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml build api worker
+
+      - name: Record Task 7 image checkpoint
+        run: |
+          mkdir -p docs/verification
+          cat > docs/verification/plan03-task7-image.md <<EOF
+          # Plan 03 Task 7 — safe image derivative TDD checkpoint
+
+          - **Source before implementation:** \`$(git rev-parse HEAD)\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          ## RED
+
+          Image contracts were written before production code and failed with the expected assertion \`safe image parser is not implemented\`.
+
+          ## GREEN
+
+          | Gate | Outcome |
+          |---|---|
+          | Ruff | success |
+          | PNG/JPEG/WebP decode tests | success |
+          | EXIF orientation and metadata-stripping tests | success |
+          | Alpha-preserving preview test | success |
+          | Pixel, dimension, input and preview bounds | success |
+          | Malformed/truncated image rejection | success |
+          | Complete Python suite | success |
+          | Compose validation and API/worker image build | success |
+
+          Originals remain untouched. The derivative is a newly encoded, bounded PNG with EXIF and private metadata removed. Only the presence of EXIF and whether orientation was applied are recorded; EXIF values such as GPS, device make and model are not exposed by this parser.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/api/pyproject.toml uv.lock apps/api/darknetra_api/parsers/image.py apps/api/tests/unit/test_image_parser.py docs/verification/plan03-task7-image.md
+          git rm .github/workflows/plan03-task7-image.yml
+          git commit -m 'feat: add safe metadata stripping image derivatives'
+          git push origin HEAD:testing-codex
