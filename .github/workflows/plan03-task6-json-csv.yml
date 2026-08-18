@@ -1,0 +1,437 @@
+name: Plan 03 Task 6 JSON and CSV derivative TDD
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task6-json-csv.yml
+
+permissions:
+  contents: write
+
+jobs:
+  red-green:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task6-tabular@127.0.0.1:5432/darknetra_plan03_task6_tabular
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-task6-tabular
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task6_tabular
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task6-tabular
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task6_tabular"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - name: Require Task 6 parser base
+        run: test -f docs/verification/plan03-task6-text-html.md
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f"::add-mask::{value}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n")
+              out.write(f"DARKNETRA_FIELD_KEY_V1_B64={field}\n")
+              out.write("DARKNETRA_FIELD_KEYRING_B64_JSON=" + json.dumps({"v1": field}, separators=(",", ":")) + "\n")
+              out.write("DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n")
+              out.write(f"DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n")
+          PY
+      - name: Install frozen workspace
+        run: uv sync --all-packages --dev --frozen
+      - name: Write JSON and CSV contracts first
+        run: |
+          cat > apps/api/tests/unit/test_tabular_parsers.py <<'PY'
+          from __future__ import annotations
+
+          import importlib
+          import importlib.util
+
+          import pytest
+
+
+          def module():
+              spec = importlib.util.find_spec("darknetra_api.parsers.tabular")
+              assert spec is not None, "bounded JSON and CSV parsers are not implemented"
+              return importlib.import_module("darknetra_api.parsers.tabular")
+
+
+          def test_json_object_and_array_are_flattened_deterministically() -> None:
+              parser = module()
+              result = parser.parse_json(
+                  b'{"vendor":"Alias A","offers":[{"item":"synthetic","price":10},{"item":"fixture","price":20}]}'
+              )
+              assert result.metadata["root_type"] == "object"
+              assert result.metadata["scalar_count"] == 6
+              assert "vendor=Alias A" in result.text
+              assert "offers[0].item=synthetic" in result.text
+              assert "offers[1].price=20" in result.text
+
+
+          def test_json_rejects_malformed_excess_depth_and_excess_nodes() -> None:
+              parser = module()
+              with pytest.raises(parser.TabularParseError):
+                  parser.parse_json(b"{bad-json")
+              deep = ("[" * 8 + "0" + "]" * 8).encode()
+              with pytest.raises(parser.TabularLimitExceeded):
+                  parser.parse_json(deep, limits=parser.TabularLimits(max_json_depth=4))
+              with pytest.raises(parser.TabularLimitExceeded):
+                  parser.parse_json(b"[1,2,3]", limits=parser.TabularLimits(max_nodes=2))
+
+
+          def test_csv_detects_comma_tab_semicolon_and_pipe_delimiters() -> None:
+              parser = module()
+              fixtures = [
+                  (b"vendor,price\nA,10\n", ","),
+                  (b"vendor\tprice\nA\t10\n", "\t"),
+                  (b"vendor;price\nA;10\n", ";"),
+                  (b"vendor|price\nA|10\n", "|"),
+              ]
+              for data, delimiter in fixtures:
+                  result = parser.parse_csv(data, has_header=True)
+                  assert result.metadata["delimiter"] == delimiter
+                  assert result.metadata["headers"] == ["vendor", "price"]
+                  assert '"vendor":"A"' in result.text
+
+
+          def test_csv_headerless_rows_receive_stable_column_names() -> None:
+              parser = module()
+              result = parser.parse_csv(b"A,10\nB,20\n", has_header=False)
+              assert result.metadata["headers"] == ["column_1", "column_2"]
+              assert result.metadata["row_count"] == 2
+              assert '"column_1":"A"' in result.text
+
+
+          def test_formula_like_cells_are_preserved_as_text_and_flagged() -> None:
+              parser = module()
+              result = parser.parse_csv(
+                  b"vendor,note\nA,=HYPERLINK(\"http://bad.invalid\")\nB,+1+1\n",
+                  has_header=True,
+              )
+              assert '=HYPERLINK("http://bad.invalid")' in result.text
+              assert "+1+1" in result.text
+              assert "FORMULA_LIKE_CELL" in result.warnings
+              assert result.metadata["formula_like_cells"] == 2
+
+
+          def test_csv_limits_rows_columns_and_cell_size() -> None:
+              parser = module()
+              with pytest.raises(parser.TabularLimitExceeded):
+                  parser.parse_csv(
+                      b"a\n1\n2\n",
+                      has_header=True,
+                      limits=parser.TabularLimits(max_rows=1),
+                  )
+              with pytest.raises(parser.TabularLimitExceeded):
+                  parser.parse_csv(
+                      b"a,b,c\n1,2,3\n",
+                      has_header=True,
+                      limits=parser.TabularLimits(max_columns=2),
+                  )
+              with pytest.raises(parser.TabularLimitExceeded):
+                  parser.parse_csv(
+                      b"a\n12345\n",
+                      has_header=True,
+                      limits=parser.TabularLimits(max_cell_chars=4),
+                  )
+
+
+          def test_invalid_utf8_and_nul_bytes_are_reported_by_shared_text_boundary() -> None:
+              parser = module()
+              result = parser.parse_csv(b"a\nvalue\xff\n", has_header=True)
+              assert "INVALID_UTF8_REPLACED" in result.warnings
+              with pytest.raises(parser.TabularParseError):
+                  parser.parse_csv(b"a\x00b\n", has_header=False)
+          PY
+      - name: Prove RED before implementation
+        run: |
+          set +e
+          uv run pytest -q apps/api/tests/unit/test_tabular_parsers.py >/tmp/task6-tabular-red.log 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          grep -q 'bounded JSON and CSV parsers are not implemented' /tmp/task6-tabular-red.log
+      - name: Implement bounded deterministic JSON and CSV parsers
+        run: |
+          cat > apps/api/darknetra_api/parsers/tabular.py <<'PY'
+          from __future__ import annotations
+
+          import csv
+          import json
+          from dataclasses import dataclass
+          from io import StringIO
+          from typing import Any
+
+          from darknetra_api.parsers.base import ParsedDerivative
+          from darknetra_api.parsers.text import TextParseError, parse_text
+
+
+          class TabularParseError(ValueError):
+              pass
+
+
+          class TabularLimitExceeded(TabularParseError):
+              pass
+
+
+          @dataclass(frozen=True, slots=True)
+          class TabularLimits:
+              max_input_bytes: int = 50 * 1024 * 1024
+              max_rows: int = 100_000
+              max_columns: int = 512
+              max_cell_chars: int = 64 * 1024
+              max_output_chars: int = 100 * 1024 * 1024
+              max_json_depth: int = 32
+              max_nodes: int = 1_000_000
+
+              def __post_init__(self) -> None:
+                  if min(
+                      self.max_input_bytes,
+                      self.max_rows,
+                      self.max_columns,
+                      self.max_cell_chars,
+                      self.max_output_chars,
+                      self.max_json_depth,
+                      self.max_nodes,
+                  ) <= 0:
+                      raise ValueError("tabular parser limits must be positive")
+
+
+          def _decode(data: bytes, limits: TabularLimits) -> tuple[str, tuple[str, ...]]:
+              if len(data) > limits.max_input_bytes:
+                  raise TabularLimitExceeded("tabular evidence exceeds the input byte limit")
+              try:
+                  result = parse_text(data)
+              except TextParseError as exc:
+                  raise TabularParseError(str(exc)) from exc
+              return result.text, result.warnings
+
+
+          def _scalar(value: Any) -> str:
+              if value is None:
+                  return "null"
+              if isinstance(value, bool):
+                  return "true" if value else "false"
+              if isinstance(value, (str, int, float)):
+                  return str(value)
+              raise TypeError("value is not scalar")
+
+
+          def parse_json(
+              data: bytes,
+              *,
+              limits: TabularLimits | None = None,
+          ) -> ParsedDerivative:
+              active = limits or TabularLimits()
+              text, warnings = _decode(data, active)
+              try:
+                  root = json.loads(text)
+              except (json.JSONDecodeError, RecursionError) as exc:
+                  raise TabularParseError("JSON evidence is malformed") from exc
+
+              lines: list[str] = []
+              node_count = 0
+              scalar_count = 0
+
+              def walk(value: Any, path: str, depth: int) -> None:
+                  nonlocal node_count, scalar_count
+                  node_count += 1
+                  if node_count > active.max_nodes:
+                      raise TabularLimitExceeded("JSON exceeds the node limit")
+                  if depth > active.max_json_depth:
+                      raise TabularLimitExceeded("JSON exceeds the nesting-depth limit")
+                  if isinstance(value, dict):
+                      for key in sorted(value, key=lambda item: str(item)):
+                          child = f"{path}.{key}" if path else str(key)
+                          walk(value[key], child, depth + 1)
+                  elif isinstance(value, list):
+                      for index, child_value in enumerate(value):
+                          child = f"{path}[{index}]" if path else f"[{index}]"
+                          walk(child_value, child, depth + 1)
+                  else:
+                      rendered = _scalar(value)
+                      if len(rendered) > active.max_cell_chars:
+                          raise TabularLimitExceeded("JSON scalar exceeds the cell limit")
+                      lines.append(f"{path or '$'}={rendered}")
+                      scalar_count += 1
+
+              walk(root, "", 0)
+              output = "\n".join(lines)
+              if len(output) > active.max_output_chars:
+                  raise TabularLimitExceeded("normalized JSON exceeds the output limit")
+              return ParsedDerivative(
+                  text=output,
+                  metadata={
+                      "root_type": "object" if isinstance(root, dict) else "array" if isinstance(root, list) else "scalar",
+                      "node_count": node_count,
+                      "scalar_count": scalar_count,
+                  },
+                  warnings=warnings,
+              )
+
+
+          _DELIMITERS = (",", "\t", ";", "|")
+          _FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+          def _detect_delimiter(text: str) -> str:
+              sample_lines = [line for line in text.splitlines()[:20] if line]
+              if not sample_lines:
+                  raise TabularParseError("CSV evidence is empty")
+              scores: list[tuple[int, int, str]] = []
+              for order, delimiter in enumerate(_DELIMITERS):
+                  counts = [line.count(delimiter) for line in sample_lines]
+                  nonzero = [count for count in counts if count > 0]
+                  consistent = len(nonzero) if nonzero and len(set(nonzero)) == 1 else 0
+                  scores.append((consistent, sum(counts), chr(255 - order) + delimiter))
+              best = max(scores)
+              if best[0] == 0 and best[1] == 0:
+                  return ","
+              return best[2][1:]
+
+
+          def parse_csv(
+              data: bytes,
+              *,
+              has_header: bool | None = None,
+              delimiter: str | None = None,
+              limits: TabularLimits | None = None,
+          ) -> ParsedDerivative:
+              active = limits or TabularLimits()
+              text, inherited_warnings = _decode(data, active)
+              selected = delimiter or _detect_delimiter(text)
+              if selected not in _DELIMITERS:
+                  raise TabularParseError("CSV delimiter is not allowlisted")
+              stream = StringIO(text, newline="")
+              try:
+                  rows = list(csv.reader(stream, delimiter=selected, strict=True))
+              except csv.Error as exc:
+                  raise TabularParseError("CSV evidence is malformed") from exc
+              if not rows:
+                  raise TabularParseError("CSV evidence is empty")
+              width = max(len(row) for row in rows)
+              if width > active.max_columns:
+                  raise TabularLimitExceeded("CSV exceeds the column limit")
+              if has_header is None:
+                  try:
+                      has_header = csv.Sniffer().has_header(text[:8192])
+                  except csv.Error:
+                      has_header = False
+              if has_header:
+                  raw_headers = rows[0]
+                  body = rows[1:]
+                  headers = [header.strip() or f"column_{index + 1}" for index, header in enumerate(raw_headers)]
+              else:
+                  body = rows
+                  headers = [f"column_{index + 1}" for index in range(width)]
+              if len(body) > active.max_rows:
+                  raise TabularLimitExceeded("CSV exceeds the row limit")
+              while len(headers) < width:
+                  headers.append(f"column_{len(headers) + 1}")
+              if len(set(headers)) != len(headers):
+                  headers = [f"{header}_{index + 1}" for index, header in enumerate(headers)]
+
+              formula_like = 0
+              normalized_rows: list[str] = []
+              for row in body:
+                  padded = row + [""] * (width - len(row))
+                  record: dict[str, str] = {}
+                  for index, value in enumerate(padded):
+                      if len(value) > active.max_cell_chars:
+                          raise TabularLimitExceeded("CSV cell exceeds the character limit")
+                      if value.lstrip().startswith(_FORMULA_PREFIXES):
+                          formula_like += 1
+                      record[headers[index]] = value
+                  normalized_rows.append(
+                      json.dumps(record, ensure_ascii=False, sort_keys=False, separators=(",", ":"))
+                  )
+              output = "\n".join(normalized_rows)
+              if len(output) > active.max_output_chars:
+                  raise TabularLimitExceeded("normalized CSV exceeds the output limit")
+              warnings = list(inherited_warnings)
+              if formula_like:
+                  warnings.append("FORMULA_LIKE_CELL")
+              return ParsedDerivative(
+                  text=output,
+                  metadata={
+                      "delimiter": selected,
+                      "has_header": bool(has_header),
+                      "headers": headers,
+                      "row_count": len(body),
+                      "column_count": width,
+                      "formula_like_cells": formula_like,
+                      "cells_executed": False,
+                  },
+                  warnings=tuple(warnings),
+              )
+          PY
+      - name: Verify GREEN and full regression
+        run: |
+          uv run ruff check .
+          uv run pytest -q apps/api/tests/unit/test_tabular_parsers.py
+          uv run pytest -q
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml build api worker
+      - name: Record Task 6 JSON/CSV checkpoint
+        run: |
+          mkdir -p docs/verification
+          cat > docs/verification/plan03-task6-json-csv.md <<EOF
+          # Plan 03 Task 6 — bounded JSON and CSV derivatives
+
+          - **Source before implementation:** \`$(git rev-parse HEAD)\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          ## RED
+
+          JSON/CSV contracts were authored first and failed with the expected missing-parser assertion.
+
+          ## GREEN
+
+          | Gate | Outcome |
+          |---|---|
+          | Ruff | success |
+          | Deterministic JSON flattening and bounds | success |
+          | CSV delimiter/header/row/column/cell tests | success |
+          | Formula-like content preservation without execution | success |
+          | Shared invalid-UTF-8/NUL handling | success |
+          | Complete Python suite | success |
+          | Compose validation and image build | success |
+
+          Formula-looking spreadsheet cells are retained as evidence text and explicitly flagged; no formula is evaluated, prefixed, rewritten or exported into an executable spreadsheet context.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/api/darknetra_api/parsers/tabular.py apps/api/tests/unit/test_tabular_parsers.py docs/verification/plan03-task6-json-csv.md
+          git rm .github/workflows/plan03-task6-json-csv.yml
+          git commit -m 'feat: add bounded JSON and CSV derivatives'
+          git push origin HEAD:testing-codex
