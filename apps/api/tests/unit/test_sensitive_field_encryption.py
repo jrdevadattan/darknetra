@@ -1,7 +1,6 @@
 import base64
 
 import pytest
-from hypothesis import given, strategies as st
 
 from darknetra_api.security.encryption import (
     EncryptedValue,
@@ -10,6 +9,8 @@ from darknetra_api.security.encryption import (
     SensitiveFieldDecryptionError,
     decode_key_b64,
 )
+from hypothesis import given
+from hypothesis import strategies as st
 
 
 def key(byte: int) -> bytes:
