@@ -1,0 +1,166 @@
+name: Plan 03 Task 6 final web and text parser gate
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task6-final.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task6-final@127.0.0.1:5432/darknetra_plan03_task6_final
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-task6-final
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task6_final
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task6-final
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task6_final"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - name: Require Task 6 checkpoints
+        run: |
+          test -f docs/verification/plan03-task6-text-html.md
+          test -f docs/verification/plan03-task6-json-csv.md
+          test -f docs/verification/plan03-task6-warc.md
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f"::add-mask::{value}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n")
+              out.write(f"DARKNETRA_FIELD_KEY_V1_B64={field}\n")
+              out.write("DARKNETRA_FIELD_KEYRING_B64_JSON=" + json.dumps({"v1": field}, separators=(",", ":")) + "\n")
+              out.write("DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n")
+              out.write(f"DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n")
+          PY
+      - name: Full parser and regression verification
+        run: |
+          uv sync --all-packages --dev --frozen
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run alembic -c apps/api/alembic.ini downgrade 3f21c6d4a901
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run ruff check .
+          uv run pytest -q \
+            apps/api/tests/unit/test_text_html_parsers.py \
+            apps/api/tests/unit/test_tabular_parsers.py \
+            apps/api/tests/unit/test_warc_parser.py
+          uv run pytest -q
+      - name: Static no-network and no-execution inspection
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          paths = [
+              Path("apps/api/darknetra_api/parsers/html.py"),
+              Path("apps/api/darknetra_api/parsers/text.py"),
+              Path("apps/api/darknetra_api/parsers/tabular.py"),
+              Path("apps/api/darknetra_api/parsers/warc.py"),
+          ]
+          combined = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+          for forbidden in (
+              "requests.", "httpx.", "urllib.request", "socket.", "subprocess",
+              "eval(", "exec(", "openpyxl", "pandas.read_",
+          ):
+              assert forbidden not in combined
+          html = paths[0].read_text(encoding="utf-8")
+          assert "url_schemes=set()" in html
+          assert "attributes={}" in html
+          tabular = paths[2].read_text(encoding="utf-8")
+          assert '"cells_executed": False' in tabular
+          warc = paths[3].read_text(encoding="utf-8")
+          assert "Target URIs are intentionally excluded" in warc
+          PY
+      - name: Validate and build images
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml build api worker
+      - name: Record Task 6 completion
+        run: |
+          mkdir -p docs/architecture docs/verification
+          cat > docs/architecture/safe-derivative-parsers.md <<'EOF'
+          # Safe text, web and tabular derivative parsers
+
+          The parser layer is deterministic and network-disabled. It treats source bytes as evidence, not instructions.
+
+          - Plain text uses UTF-8 first. Invalid sequences are replaced and counted rather than silently dropped; explicitly allowlisted legacy encodings are tagged with a warning.
+          - HTML removes active and embedded content before extraction. Sanitized preview markup has a narrow tag allowlist, no attributes and no URL schemes.
+          - JSON is flattened with stable paths under depth, node, scalar and output limits.
+          - CSV supports four explicit delimiters, bounded rows/columns/cells and retains formula-looking values as text while flagging them. It never evaluates spreadsheet syntax.
+          - WARC and WARC.GZ parsing extracts bounded response bodies without fetching a target. Target URIs stay structured for protected metadata and do not enter normalized text.
+
+          Parser failures do not alter the preserved original. The later orchestration task decides whether useful derivatives produce `READY` or `PARTIAL`, while malformed or policy-violating content is kept preserved and appropriately failed or quarantined.
+          EOF
+          cat > docs/verification/plan03-task6-final.md <<EOF
+          # Plan 03 Task 6 — final verification
+
+          - **Verified source commit:** \`$(git rev-parse HEAD)\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          | Gate | Outcome |
+          |---|---|
+          | Frozen dependencies and reversible migrations | success |
+          | Ruff | success |
+          | Text and HTML parser suite | success |
+          | JSON and CSV parser suite | success |
+          | WARC/WARC.GZ parser suite | success |
+          | Complete Python suite | success |
+          | Static no-network/no-execution inspection | success |
+          | Compose validation and image build | success |
+          EOF
+          python - <<'PY'
+          from pathlib import Path
+          ledger = Path("docs/verification/plan03-execution-ledger.md")
+          if ledger.exists():
+              lines = ledger.read_text(encoding="utf-8").splitlines()
+              value = "- Task 6: complete — bounded WARC/WARC.GZ, HTML, text, JSON and CSV derivatives with no-network/no-execution safeguards verified."
+              for index, line in enumerate(lines):
+                  if line.startswith("- Task 6:"):
+                      lines[index] = value
+                      break
+              else:
+                  lines += ["", value]
+              ledger.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/architecture/safe-derivative-parsers.md docs/verification/plan03-task6-final.md
+          if test -f docs/verification/plan03-execution-ledger.md; then git add docs/verification/plan03-execution-ledger.md; fi
+          git rm .github/workflows/plan03-task6-final.yml
+          git commit -m 'docs: verify safe web and text derivatives [skip ci]'
+          git push origin HEAD:testing-codex
