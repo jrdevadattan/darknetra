@@ -1,7 +1,7 @@
 # Plan 03a — sensitive-field encryption verification
 
-- **Verified commit:** `481af753ec43d22be075886abd8037907669f92c`
-- **Observed at (UTC):** `2026-08-18T09:16:24Z`
+- **Verified commit:** `f9d6d942ea871f373422b1494dbe95dbde0abfb7`
+- **Observed at (UTC):** `2026-08-18T10:15:31Z`
 - **Runner:** GitHub Actions `ubuntu-latest`
 
 | Gate | Outcome |
@@ -10,7 +10,7 @@
 | README + architecture preflight | success |
 | Locked workspace installation | success |
 | Disposable PostgreSQL migration | success |
-| Active-v2 runtime probe | failure |
+| Active-v2 runtime probe | success |
 | `uv run ruff check .` | success |
 | `uv run pytest -q` | success |
 | Authentication/case regression | success |
@@ -28,13 +28,13 @@
     from starlette.testclient import TestClient as TestClient  # noqa
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-89 passed, 1 warning in 9.25s
+89 passed, 1 warning in 9.80s
 ```
 
 ## Authentication and case regression
 ```text
 ................                                                         [100%]
-16 passed in 3.02s
+16 passed in 2.95s
 ```
 
 ## Secret scan
@@ -69,12 +69,12 @@ No committed sensitive-field key literal detected.
  Container darknetra-api-1  Healthy
  Container darknetra-web-1  Starting
  Container darknetra-web-1  Started
+ Container darknetra-postgres-1  Waiting
  Container darknetra-api-1  Waiting
  Container darknetra-web-1  Waiting
- Container darknetra-postgres-1  Waiting
+ Container darknetra-web-1  Healthy
  Container darknetra-api-1  Healthy
  Container darknetra-postgres-1  Healthy
- Container darknetra-web-1  Healthy
 NAME                   IMAGE           COMMAND                  SERVICE    CREATED          STATUS                    PORTS
 darknetra-api-1        darknetra-api   "uv run --no-sync uv…"   api        12 seconds ago   Up 6 seconds (healthy)    127.0.0.1:8000->8000/tcp
 darknetra-postgres-1   postgres:18     "docker-entrypoint.s…"   postgres   12 seconds ago   Up 12 seconds (healthy)   127.0.0.1:5432->5432/tcp
