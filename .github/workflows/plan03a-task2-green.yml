@@ -1,5 +1,6 @@
 name: Plan 03a Task 2 encrypted fields GREEN gate
 
+# Final rerun after encrypted-field test import ordering was corrected.
 on:
   push:
     branches: [testing-codex]
@@ -48,7 +49,6 @@ jobs:
           import base64
           import os
           from pathlib import Path
-
           names = (
               "DARKNETRA_JWT_SIGNING_KEY_B64",
               "DARKNETRA_FIELD_KEY_V1_B64",
@@ -114,19 +114,16 @@ jobs:
             echo "- complete Python regression: ${REGRESSION}"
             echo
             echo '## Focused test tail'
-            echo
             echo '```text'
             tail -n 100 /tmp/plan03a-task2-focused.log 2>/dev/null || true
             echo '```'
             echo
             echo '## Ruff output'
-            echo
             echo '```text'
             cat /tmp/plan03a-task2-ruff.log 2>/dev/null || true
             echo '```'
             echo
             echo '## Regression tail'
-            echo
             echo '```text'
             tail -n 45 /tmp/plan03a-task2-regression.log 2>/dev/null || true
             echo '```'
