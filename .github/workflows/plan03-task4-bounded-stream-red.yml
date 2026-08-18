@@ -1,0 +1,152 @@
+name: Plan 03 Task 4 bounded upload stream RED gate
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task4-bounded-stream-red.yml
+
+permissions:
+  contents: write
+
+jobs:
+  red:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-bounded-red@127.0.0.1:5432/darknetra_bounded_red
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_bounded_red
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-bounded-red
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_bounded_red"
+          --health-interval 5s --health-timeout 3s --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode('ascii')
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f'::add-mask::{value}')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              output.write(f'DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n')
+              output.write(f'DARKNETRA_FIELD_KEY_V1_B64={field}\n')
+              output.write('DARKNETRA_FIELD_KEYRING_B64_JSON=' + json.dumps({'v1': field}, separators=(',', ':')) + '\n')
+              output.write('DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n')
+              output.write(f'DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n')
+          PY
+      - name: Require the preservation service GREEN gate
+        run: |
+          test -f docs/verification/plan03-task4-preservation-green.md
+          test -f apps/api/darknetra_api/services/evidence_ingest.py
+      - name: Install workspace and migrate
+        run: |
+          uv sync --all-packages --dev --frozen
+          uv run alembic -c apps/api/alembic.ini upgrade head
+      - name: Add bounded stream contract
+        run: |
+          cat > apps/api/tests/unit/test_bounded_evidence_stream.py <<'PYTEST'
+          from __future__ import annotations
+
+          import io
+
+          import pytest
+
+          from darknetra_api.policy.ingestion import (
+              BoundedEvidenceStream,
+              EvidenceUploadPolicy,
+              IngestionPolicyError,
+          )
+
+
+          def test_stream_enforces_actual_bytes_without_buffering_the_body() -> None:
+              wrapped = BoundedEvidenceStream(io.BytesIO(b'abcdefgh'), max_bytes=8)
+              assert wrapped.read(3) == b'abc'
+              assert wrapped.read(3) == b'def'
+              assert wrapped.read(3) == b'gh'
+              assert wrapped.read(3) == b''
+              assert wrapped.bytes_read == 8
+              wrapped.validate_complete()
+
+
+          def test_stream_rejects_actual_bytes_beyond_configured_maximum() -> None:
+              wrapped = BoundedEvidenceStream(io.BytesIO(b'abcdefghi'), max_bytes=8)
+              assert wrapped.read(8) == b'abcdefgh'
+              with pytest.raises(IngestionPolicyError, match='maximum'):
+                  wrapped.read(1)
+
+
+          def test_stream_rejects_understated_and_truncated_declared_lengths() -> None:
+              understated = BoundedEvidenceStream(
+                  io.BytesIO(b'abcdef'),
+                  max_bytes=8,
+                  declared_size_bytes=5,
+              )
+              assert understated.read(5) == b'abcde'
+              with pytest.raises(IngestionPolicyError, match='declared'):
+                  understated.read(1)
+
+              truncated = BoundedEvidenceStream(
+                  io.BytesIO(b'abc'),
+                  max_bytes=8,
+                  declared_size_bytes=5,
+              )
+              assert truncated.read(8) == b'abc'
+              assert truncated.read(8) == b''
+              with pytest.raises(IngestionPolicyError, match='declared'):
+                  truncated.validate_complete()
+
+
+          def test_policy_wrap_validates_declared_length_before_reading() -> None:
+              policy = EvidenceUploadPolicy(max_upload_bytes=8)
+              source = io.BytesIO(b'never-read')
+              with pytest.raises(IngestionPolicyError, match='maximum'):
+                  policy.wrap_stream(source, declared_size_bytes=9)
+              assert source.tell() == 0
+
+              wrapped = policy.wrap_stream(io.BytesIO(b'12345678'), declared_size_bytes=8)
+              assert wrapped.read(64) == b'12345678'
+              assert wrapped.read(64) == b''
+              wrapped.validate_complete()
+          PYTEST
+      - name: Prove RED
+        run: |
+          set +e
+          uv run pytest -q apps/api/tests/unit/test_bounded_evidence_stream.py > /tmp/red.txt 2>&1
+          code=$?
+          set -e
+          cat /tmp/red.txt
+          test "$code" -ne 0
+          grep -Eq 'BoundedEvidenceStream|ImportError|cannot import name' /tmp/red.txt
+      - name: Commit RED contract
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          cat > docs/verification/plan03-task4-bounded-stream-red.md <<EOF
+          # Plan 03 Task 4 — bounded upload stream RED verification
+
+          The contract was observed failing before production implementation. It requires streaming enforcement of configured and declared byte limits, rejection of understated/truncated bodies, and pre-read Content-Length validation.
+          EOF
+          git add apps/api/tests/unit/test_bounded_evidence_stream.py docs/verification/plan03-task4-bounded-stream-red.md
+          git rm .github/workflows/plan03-task4-bounded-stream-red.yml
+          git commit -m 'test: define bounded evidence stream contract [skip ci]'
+          git push origin HEAD:testing-codex
