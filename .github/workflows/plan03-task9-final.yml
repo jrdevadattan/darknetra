@@ -1,0 +1,209 @@
+name: Plan 03 Task 9 final integrity gate
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task9-final.yml
+
+permissions:
+  contents: write
+  statuses: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task9-final@127.0.0.1:5432/darknetra_plan03_task9_final
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-task9-final
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task9_final
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task9-final
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task9_final"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Require Task 9 checkpoints
+        run: |
+          test -f docs/verification/plan03-task9-integrity-service.md
+          test -f docs/verification/plan03-task9-api-pipeline.md
+
+      - name: Publish run locator
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY' >/tmp/status.json
+          import json, os
+          print(json.dumps({
+            "state": "pending",
+            "context": "plan03/task9-final",
+            "description": f"GitHub Actions run {os.environ['GITHUB_RUN_ID']}",
+            "target_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+          }))
+          PY
+          curl --fail --silent --show-error --request POST \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data @/tmp/status.json \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" >/dev/null
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f"::add-mask::{value}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n")
+              out.write(f"DARKNETRA_FIELD_KEY_V1_B64={field}\n")
+              out.write("DARKNETRA_FIELD_KEYRING_B64_JSON=" + json.dumps({"v1": field}, separators=(",", ":")) + "\n")
+              out.write("DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n")
+              out.write(f"DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n")
+          PY
+
+      - name: Verify dependencies migrations and complete suite
+        run: |
+          uv sync --all-packages --dev --frozen
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run alembic -c apps/api/alembic.ini downgrade 8a7f2d91c402
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run ruff check .
+          uv run pytest -q \
+            apps/api/tests/integration/test_evidence_integrity.py \
+            apps/api/tests/integration/test_evidence_integrity_route.py \
+            apps/api/tests/integration/test_pipeline_integrity_guard.py
+          uv run pytest -q
+
+      - name: Static tamper-evidence contract inspection
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          integrity = Path("apps/api/darknetra_api/services/integrity.py").read_text(encoding="utf-8")
+          pipeline = Path("apps/api/darknetra_api/services/ingestion_pipeline.py").read_text(encoding="utf-8")
+          route = Path("apps/api/darknetra_api/routes/evidence.py").read_text(encoding="utf-8")
+          assert "artifact.sha256 =" not in integrity
+          assert "artifact.sha512 =" not in integrity
+          assert "artifact.object_key =" not in integrity
+          assert "VERIFIED_PREVIOUS_MISMATCH" in integrity
+          assert "INTEGRITY_MISMATCH" in pipeline
+          assert "verify-integrity" in route
+          for forbidden in ("resolve()", "absolute()", "object_key" + "}" ):
+              assert forbidden not in route
+          PY
+
+      - name: Validate and build images
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml build api worker
+
+      - name: Record Task 9 completion
+        run: |
+          mkdir -p docs/architecture docs/verification
+          cat > docs/architecture/evidence-integrity-and-tamper-response.md <<'EOF'
+          # Evidence integrity and tamper response
+
+          Integrity re-verification streams the stored object and independently computes SHA-256, SHA-512 and byte length. The result is compared with the immutable manifest. A match records custody and audit events without changing a normal processing state. A modified or missing object moves the artifact to `INTEGRITY_MISMATCH`, records a bounded reason and append-only custody/audit events, and leaves every expected digest and object key unchanged.
+
+          A later byte-for-byte match does not silently clear a previous mismatch. The mismatch is a forensic fact that requires a future explicit adjudication workflow rather than automatic state restoration.
+
+          The authenticated verification endpoint uses existing case-scoped authorization and identical not-found behaviour for inaccessible and unknown resources. It returns hashes, outcome and state with `Cache-Control: no-store`; it never returns an object key, storage credential or filesystem path.
+
+          The processing worker independently verifies the original before parser dispatch. Tampered evidence is not parsed, no child derivative is created and the durable job is failed with `INTEGRITY_MISMATCH`.
+          EOF
+          cat > docs/verification/plan03-task9-final.md <<EOF
+          # Plan 03 Task 9 — final verification
+
+          - **Verified source commit:** \`$(git rev-parse HEAD)\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          | Gate | Outcome |
+          |---|---|
+          | Frozen dependencies and reversible migrations | success |
+          | Ruff | success |
+          | Streaming SHA-256/SHA-512/size verification | success |
+          | Mutation and missing-object response tests | success |
+          | Prior mismatch non-clearing test | success |
+          | Authenticated safe API and anti-enumeration tests | success |
+          | Worker pre-parse tamper guard | success |
+          | Complete Python suite | success |
+          | Static immutable-manifest inspection | success |
+          | Compose validation and API/worker image build | success |
+          EOF
+          python - <<'PY'
+          from pathlib import Path
+          ledger = Path("docs/verification/plan03-execution-ledger.md")
+          if ledger.exists():
+              lines = ledger.read_text(encoding="utf-8").splitlines()
+              value = "- Task 9: complete — streaming integrity re-verification, immutable mismatch response, authenticated safe API and pre-parser tamper blocking verified."
+              for index, line in enumerate(lines):
+                  if line.startswith("- Task 9:"):
+                      lines[index] = value
+                      break
+              else:
+                  lines += ["", value]
+              ledger.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/architecture/evidence-integrity-and-tamper-response.md docs/verification/plan03-task9-final.md
+          if test -f docs/verification/plan03-execution-ledger.md; then git add docs/verification/plan03-execution-ledger.md; fi
+          git rm .github/workflows/plan03-task9-final.yml
+          git commit -m 'docs: verify evidence integrity and tamper response [skip ci]'
+          git push origin HEAD:testing-codex
+
+      - name: Publish terminal status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          python - <<'PY' >/tmp/status.json
+          import json, os
+          success = os.environ["JOB_STATUS"] == "success"
+          print(json.dumps({
+            "state": "success" if success else "failure",
+            "context": "plan03/task9-final",
+            "description": "Task 9 final gate passed" if success else "Task 9 final gate failed",
+            "target_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+          }))
+          PY
+          curl --fail --silent --show-error --request POST \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data @/tmp/status.json \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" >/dev/null
