@@ -1,6 +1,6 @@
 name: Plan 03a final sensitive-field encryption verification
 
-# Rerun after exposing loaded key versions to the runtime probe.
+# Rerun after fixing the API workspace import in the runtime probe.
 on:
   push:
     branches: [testing-codex]
@@ -167,7 +167,7 @@ jobs:
         if: steps.prepare.outcome == 'success'
         continue-on-error: true
         run: |
-          uv run python - <<'PY'
+          PYTHONPATH=apps/api uv run python - <<'PY'
           from darknetra_api.config import Settings
           from darknetra_api.security.encryption import crypto_from_settings
           service = crypto_from_settings(Settings())
