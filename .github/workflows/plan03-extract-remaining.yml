@@ -1,0 +1,49 @@
+name: Extract remaining Plan 03 task specifications
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-extract-remaining.yml
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - name: Extract Tasks 10 through 14 into reviewable files
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          source = Path("docs/superpowers/plans/2026-08-17-03-evidence-vault-ingestion.md")
+          text = source.read_text(encoding="utf-8")
+          matches = list(re.finditer(r"(?m)^### Task (\d+):.*$", text))
+          out_dir = Path("docs/verification/plan03-remaining")
+          out_dir.mkdir(parents=True, exist_ok=True)
+          found = []
+          for index, match in enumerate(matches):
+              number = int(match.group(1))
+              if number < 10 or number > 14:
+                  continue
+              end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+              section = text[match.start():end].rstrip() + "\n"
+              path = out_dir / f"task-{number:02d}.md"
+              path.write_text(section, encoding="utf-8")
+              found.append(number)
+          if found != list(range(10, 15)):
+              raise SystemExit(f"Expected Tasks 10-14, found {found}")
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/verification/plan03-remaining
+          git rm .github/workflows/plan03-extract-remaining.yml
+          git commit -m 'docs: extract remaining Plan 03 task specifications [skip ci]'
+          git push origin HEAD:testing-codex
