@@ -1,5 +1,6 @@
 name: Rerun Plan 03a final verification
 
+# Patch the runtime probe to import the API workspace explicitly, then retrigger the final gate.
 on:
   push:
     branches: [testing-codex]
@@ -17,26 +18,33 @@ jobs:
         with:
           ref: testing-codex
           fetch-depth: 0
-      - name: Touch the final verification workflow after the key-version fix
+      - name: Repair and touch the final verification workflow
         run: |
           python - <<'PY'
           from pathlib import Path
 
           path = Path('.github/workflows/plan03a-final.yml')
           text = path.read_text(encoding='utf-8')
-          marker = '# Rerun after exposing loaded key versions to the runtime probe.\n'
+          old = "          uv run python - <<'PY'\n          from darknetra_api.config import Settings\n"
+          new = "          PYTHONPATH=apps/api uv run python - <<'PY'\n          from darknetra_api.config import Settings\n"
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit('runtime-probe command was not found')
+
+          marker = '# Rerun after fixing API workspace import for the runtime probe.\n'
           if marker not in text:
               text = text.replace(
                   'name: Plan 03a final sensitive-field encryption verification\n\n',
                   'name: Plan 03a final sensitive-field encryption verification\n\n' + marker,
                   1,
               )
-              path.write_text(text, encoding='utf-8')
+          path.write_text(text, encoding='utf-8')
           PY
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add .github/workflows/plan03a-final.yml
           if ! git diff --cached --quiet; then
-            git commit -m 'ci: rerun complete Plan 03a verification'
+            git commit -m 'ci: fix and rerun complete Plan 03a verification'
             git push origin HEAD:testing-codex
           fi
