@@ -76,5 +76,23 @@ jobs:
         continue-on-error: true
         run: uv run pytest -q apps/api/tests/integration/test_evidence_provenance.py
       - name: Assert RED failure is real
+        run: test "${{ steps.focused.outcome }}" = "failure"
+      - name: Publish RED confirmation
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          test "${{ steps.focused.outcome }}" = "failure"
+          python - <<'PY' > /tmp/status.json
+          import json, os
+          print(json.dumps({
+              "state": "success",
+              "context": "plan03/task2-red",
+              "description": "Task 2 contract suite failed as expected before implementation",
+              "target_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+          }))
+          PY
+          curl --fail --silent --show-error --request POST \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data @/tmp/status.json \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" >/dev/null
