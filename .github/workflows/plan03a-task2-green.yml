@@ -1,6 +1,6 @@
 name: Plan 03a Task 2 encrypted fields GREEN gate
 
-# Final rerun after encrypted-field test import ordering was corrected.
+# Rerun after exact Ruff import grouping was corrected.
 on:
   push:
     branches: [testing-codex]
