@@ -4,7 +4,7 @@
 - locked installation: success
 - disposable DB migration: success
 - focused reveal/policy tests: success
-- Ruff: failure
+- Ruff: success
 - complete Python regression: success
 
 ## Focused tests
@@ -29,41 +29,23 @@ apps/api/tests/unit/test_policy.py::test_role_permission_map_is_explicit_and_imm
 apps/api/tests/unit/test_policy.py::test_global_authorization_uses_current_role_state PASSED [ 88%]
 apps/api/tests/unit/test_policy.py::test_forced_password_change_blocks_normal_mutations_and_sensitive_reveals PASSED [100%]
 
-============================== 9 passed in 1.07s ===============================
+============================== 9 passed in 1.49s ===============================
 ```
 
 ## Ruff
 ```text
-F401 [*] `uuid.uuid4` imported but unused
- --> apps/api/tests/integration/test_sensitive_value_reveal.py:4:24
-  |
-3 | from dataclasses import dataclass
-4 | from uuid import UUID, uuid4
-  |                        ^^^^^
-5 |
-6 | import pytest
-  |
-help: Remove unused import: `uuid.uuid4`
-  |
-3 | from dataclasses import dataclass
-  - from uuid import UUID, uuid4
-4 + from uuid import UUID
-5 |
-  |
-
-Found 1 error.
-[*] 1 fixable with the `--fix` option.
+All checks passed!
 ```
 
 ## Full suite
 ```text
-........................................................................ [ 86%]
-...........                                                              [100%]
+........................................................................ [ 81%]
+................                                                         [100%]
 =============================== warnings summary ===============================
 .venv/lib/python3.12/site-packages/fastapi/testclient.py:1
   /home/runner/work/darknetra/darknetra/.venv/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
     from starlette.testclient import TestClient as TestClient  # noqa
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-83 passed, 1 warning in 7.01s
+88 passed, 1 warning in 9.28s
 ```
