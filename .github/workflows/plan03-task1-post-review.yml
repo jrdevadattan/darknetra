@@ -1,5 +1,6 @@
 name: Plan 03 Task 1 post-review verification
 
+# The host-side test database and Compose worker stack are separate; base Compose avoids host-port collisions.
 on:
   push:
     branches: [testing-codex]
@@ -107,22 +108,18 @@ jobs:
       - id: compose
         name: Build and verify committed worker image
         run: |
-          docker compose -p darknetra-task1-post-review \
-            -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
-          docker compose -p darknetra-task1-post-review \
-            -f docker-compose.yml -f docker-compose.dev.yml build api worker
-          docker compose -p darknetra-task1-post-review \
-            -f docker-compose.yml -f docker-compose.dev.yml \
+          docker compose -p darknetra-task1-post-review -f docker-compose.yml config >/dev/null
+          docker compose -p darknetra-task1-post-review -f docker-compose.yml build api worker
+          docker compose -p darknetra-task1-post-review -f docker-compose.yml \
             up -d --no-build --wait --wait-timeout 180 postgres redis worker
-          docker compose -p darknetra-task1-post-review \
-            -f docker-compose.yml -f docker-compose.dev.yml \
+          docker compose -p darknetra-task1-post-review -f docker-compose.yml \
             exec -T worker sh -lc \
             'python -c "import darknetra_api; print(darknetra_api.__name__)" && uv run --no-sync celery -A darknetra_api.jobs.celery_app:celery_app inspect ping -d "ingest@$HOSTNAME" --timeout=10 | grep -q pong'
       - name: Teardown worker stack
         if: always()
         run: |
-          docker compose -p darknetra-task1-post-review \
-            -f docker-compose.yml -f docker-compose.dev.yml down -v --remove-orphans
+          docker compose -p darknetra-task1-post-review -f docker-compose.yml \
+            down -v --remove-orphans
       - name: Record verified outcome and clean one-shot workflows
         if: success()
         run: |
@@ -140,7 +137,7 @@ jobs:
           | Alembic upgrade/downgrade/upgrade | success |
           | Ruff | success |
           | Complete Python suite | success |
-          | Compose configuration | success |
+          | Base Compose configuration | success |
           | API/worker image build | success |
           | Worker can import \`darknetra_api\` | success |
           | Real Celery worker inspect ping | success |
