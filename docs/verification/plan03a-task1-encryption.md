@@ -4,7 +4,7 @@
 - locked installation: success
 - disposable DB migration: success
 - focused encryption tests: success
-- Ruff: failure
+- Ruff: success
 - complete Python regression: failure
 
 ## Focused test tail
@@ -28,38 +28,13 @@ apps/api/tests/unit/test_sensitive_field_encryption.py::test_tampered_nonce_or_c
 apps/api/tests/unit/test_sensitive_field_encryption.py::test_blind_index_is_stable_and_purpose_scoped PASSED [ 85%]
 apps/api/tests/unit/test_sensitive_field_encryption.py::test_runtime_keys_must_decode_to_exactly_32_bytes PASSED [100%]
 
-============================== 7 passed in 2.68s ===============================
+============================== 7 passed in 2.31s ===============================
 ```
 
 ## Ruff output
 
 ```text
-I001 [*] Import block is un-sorted or un-formatted
-  --> apps/api/tests/unit/test_sensitive_field_encryption.py:1:1
-   |
- 1 | / import base64
- 2 | |
- 3 | | import pytest
- 4 | |
- 5 | | from darknetra_api.security.encryption import (
- 6 | |     EncryptedValue,
- 7 | |     SensitiveFieldConfigurationError,
- 8 | |     SensitiveFieldCrypto,
- 9 | |     SensitiveFieldDecryptionError,
-10 | |     decode_key_b64,
-11 | | )
-12 | | from hypothesis import given
-13 | | from hypothesis import strategies as st
-   | |_______________________________________^
-help: Organize imports
-  |
-3 | import pytest
-  -
-4 | from darknetra_api.security.encryption import (
-  |
-
-Found 1 error.
-[*] 1 fixable with the `--fix` option.
+All checks passed!
 ```
 
 ## Regression tail
@@ -114,5 +89,5 @@ FAILED apps/api/tests/integration/test_case_memberships.py::test_case_owner_can_
 FAILED apps/api/tests/integration/test_case_memberships.py::test_admin_can_repair_membership_and_last_case_owner_cannot_be_removed - RuntimeError: DARKNETRA_JWT_SIGNING_KEY_B64 must be configured
 FAILED apps/api/tests/integration/test_case_memberships.py::test_inaccessible_membership_case_matches_unknown_case_404 - RuntimeError: DARKNETRA_JWT_SIGNING_KEY_B64 must be configured
 FAILED apps/api/tests/integration/test_cross_case_authorization.py::test_inaccessible_case_and_unknown_case_have_identical_404_shape - RuntimeError: DARKNETRA_JWT_SIGNING_KEY_B64 must be configured
-13 failed, 52 passed, 1 warning in 7.25s
+13 failed, 52 passed, 1 warning in 7.38s
 ```
