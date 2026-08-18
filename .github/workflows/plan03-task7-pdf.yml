@@ -1,0 +1,471 @@
+name: Plan 03 Task 7 safe PDF derivative TDD
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task7-pdf.yml
+
+permissions:
+  contents: write
+
+jobs:
+  red-green:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task7-pdf@127.0.0.1:5432/darknetra_plan03_task7_pdf
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-task7-pdf
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task7_pdf
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task7-pdf
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task7_pdf"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Require image checkpoint
+        run: test -f docs/verification/plan03-task7-image.md
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f"::add-mask::{value}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n")
+              out.write(f"DARKNETRA_FIELD_KEY_V1_B64={field}\n")
+              out.write("DARKNETRA_FIELD_KEYRING_B64_JSON=" + json.dumps({"v1": field}, separators=(",", ":")) + "\n")
+              out.write("DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n")
+              out.write(f"DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n")
+          PY
+
+      - name: Install frozen workspace
+        run: uv sync --all-packages --dev --frozen
+
+      - name: Write PDF contracts before production code
+        run: |
+          cat > apps/api/tests/unit/test_pdf_parser.py <<'PY'
+          from __future__ import annotations
+
+          import importlib
+          import importlib.util
+          import io
+
+          import pytest
+
+
+          def module():
+              spec = importlib.util.find_spec("darknetra_api.parsers.pdf")
+              assert spec is not None, "safe text-bearing PDF parser is not implemented"
+              return importlib.import_module("darknetra_api.parsers.pdf")
+
+
+          def pdf_bytes(
+              texts: list[str | None],
+              *,
+              password: str | None = None,
+              javascript: str | None = None,
+          ) -> bytes:
+              from pypdf import PdfWriter
+              from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+              writer = PdfWriter()
+              for text in texts:
+                  page = writer.add_blank_page(width=300, height=300)
+                  if text is None:
+                      continue
+                  font = DictionaryObject(
+                      {
+                          NameObject("/Type"): NameObject("/Font"),
+                          NameObject("/Subtype"): NameObject("/Type1"),
+                          NameObject("/BaseFont"): NameObject("/Helvetica"),
+                      }
+                  )
+                  font_ref = writer._add_object(font)
+                  resources = DictionaryObject(
+                      {
+                          NameObject("/Font"): DictionaryObject(
+                              {NameObject("/F1"): font_ref}
+                          )
+                      }
+                  )
+                  page[NameObject("/Resources")] = resources
+                  stream = DecodedStreamObject()
+                  encoded = text.encode("latin-1", errors="replace").hex().upper()
+                  stream.set_data(
+                      f"BT /F1 12 Tf 72 200 Td <{encoded}> Tj ET".encode("ascii")
+                  )
+                  page[NameObject("/Contents")] = writer._add_object(stream)
+              if javascript is not None:
+                  writer.add_js(javascript)
+              if password is not None:
+                  writer.encrypt(password)
+              output = io.BytesIO()
+              writer.write(output)
+              return output.getvalue()
+
+
+          def test_text_bearing_pdf_extracts_page_text_without_rendering() -> None:
+              parser = module()
+              result = parser.parse_pdf(
+                  pdf_bytes(["Authorized synthetic PDF text", "Second evidence page"])
+              )
+              assert result.text_status == "TEXT_AVAILABLE"
+              assert "Authorized synthetic PDF text" in result.text
+              assert "Second evidence page" in result.text
+              assert result.metadata["page_count"] == 2
+              assert result.metadata["text_pages"] == 2
+              assert result.metadata["rendered"] is False
+              assert result.metadata["ocr_used"] is False
+              assert result.metadata["javascript_executed"] is False
+              assert result.metadata["actions_executed"] is False
+
+
+          def test_image_only_or_blank_pdf_is_not_misrepresented_as_parsed_text() -> None:
+              parser = module()
+              result = parser.parse_pdf(pdf_bytes([None]))
+              assert result.text_status == "TEXT_NOT_AVAILABLE"
+              assert result.text == ""
+              assert result.metadata["page_count"] == 1
+              assert result.metadata["text_pages"] == 0
+              assert result.metadata["ocr_used"] is False
+              assert "PDF_TEXT_NOT_AVAILABLE" in result.warnings
+
+
+          def test_encrypted_pdf_is_not_bruteforced_or_decrypted() -> None:
+              parser = module()
+              result = parser.parse_pdf(
+                  pdf_bytes(["Secret text must not be read"], password="correct horse")
+              )
+              assert result.text_status == "TEXT_NOT_AVAILABLE"
+              assert result.text == ""
+              assert result.metadata["encrypted"] is True
+              assert result.metadata["password_attempted"] is False
+              assert result.metadata["ocr_used"] is False
+              assert "PDF_ENCRYPTED" in result.warnings
+
+
+          def test_javascript_and_document_actions_are_detected_but_never_executed() -> None:
+              parser = module()
+              script = "app.alert('must never execute')"
+              result = parser.parse_pdf(
+                  pdf_bytes(["Safe visible text"], javascript=script)
+              )
+              assert result.text_status == "TEXT_AVAILABLE"
+              assert "Safe visible text" in result.text
+              assert "must never execute" not in result.text
+              assert result.metadata["active_features_present"] is True
+              assert result.metadata["javascript_executed"] is False
+              assert result.metadata["actions_executed"] is False
+              assert "PDF_ACTIVE_FEATURES_PRESENT" in result.warnings
+
+
+          def test_input_page_and_output_limits_fail_closed() -> None:
+              parser = module()
+              data = pdf_bytes(["one", "two"])
+              with pytest.raises(parser.PdfLimitExceeded, match="byte"):
+                  parser.parse_pdf(
+                      data,
+                      limits=parser.PdfParseLimits(max_input_bytes=len(data) - 1),
+                  )
+              with pytest.raises(parser.PdfLimitExceeded, match="page"):
+                  parser.parse_pdf(
+                      data,
+                      limits=parser.PdfParseLimits(max_pages=1),
+                  )
+              with pytest.raises(parser.PdfLimitExceeded, match="text"):
+                  parser.parse_pdf(
+                      pdf_bytes(["123456789"]),
+                      limits=parser.PdfParseLimits(max_output_chars=4),
+                  )
+
+
+          @pytest.mark.parametrize(
+              "payload",
+              [b"", b"not a PDF", b"%PDF-1.7\nnot a valid object graph"],
+          )
+          def test_empty_non_pdf_and_malformed_pdf_are_rejected(payload: bytes) -> None:
+              parser = module()
+              with pytest.raises(parser.PdfParseError):
+                  parser.parse_pdf(payload)
+
+
+          def test_metadata_does_not_include_document_javascript_or_embedded_payloads() -> None:
+              parser = module()
+              secret_script = "private-script-value-123"
+              result = parser.parse_pdf(
+                  pdf_bytes(["Visible evidence"], javascript=secret_script)
+              )
+              assert secret_script not in repr(result.metadata)
+              assert secret_script not in result.text
+              assert set(result.metadata["active_feature_markers"]).issubset(
+                  {"AA", "EmbeddedFiles", "JS", "JavaScript", "Launch", "OpenAction"}
+              )
+          PY
+
+      - name: Prove RED before implementation
+        run: |
+          set +e
+          uv run pytest -q apps/api/tests/unit/test_pdf_parser.py >/tmp/task7-pdf-red.log 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          grep -q 'safe text-bearing PDF parser is not implemented' /tmp/task7-pdf-red.log
+
+      - name: Add locked pypdf dependency
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("apps/api/pyproject.toml")
+          text = path.read_text(encoding="utf-8")
+          dependency = '    "pypdf>=6,<7",\n'
+          if "pypdf" not in text.casefold():
+              marker = "dependencies = [\n"
+              if text.count(marker) != 1:
+                  raise SystemExit("dependency list marker missing or ambiguous")
+              text = text.replace(marker, marker + dependency, 1)
+              path.write_text(text, encoding="utf-8")
+          PY
+          uv lock
+          uv sync --all-packages --dev --frozen
+
+      - name: Implement non-rendering, no-OCR PDF text derivative
+        run: |
+          cat > apps/api/darknetra_api/parsers/pdf.py <<'PY'
+          from __future__ import annotations
+
+          import io
+          from dataclasses import dataclass
+          from typing import Literal
+
+          from pypdf import PdfReader
+          from pypdf.errors import PdfReadError
+
+
+          class PdfParseError(ValueError):
+              pass
+
+
+          class PdfLimitExceeded(PdfParseError):
+              pass
+
+
+          @dataclass(frozen=True, slots=True)
+          class PdfParseLimits:
+              max_input_bytes: int = 100 * 1024 * 1024
+              max_pages: int = 2_000
+              max_output_chars: int = 100 * 1024 * 1024
+              max_page_chars: int = 5 * 1024 * 1024
+
+              def __post_init__(self) -> None:
+                  if min(
+                      self.max_input_bytes,
+                      self.max_pages,
+                      self.max_output_chars,
+                      self.max_page_chars,
+                  ) <= 0:
+                      raise ValueError("PDF limits must be positive")
+
+
+          @dataclass(frozen=True, slots=True)
+          class PdfParseResult:
+              text: str
+              text_status: Literal["TEXT_AVAILABLE", "TEXT_NOT_AVAILABLE"]
+              metadata: dict[str, object]
+              warnings: tuple[str, ...] = ()
+
+
+          _ACTIVE_MARKERS = {
+              "AA": b"/AA",
+              "EmbeddedFiles": b"/EmbeddedFiles",
+              "JS": b"/JS",
+              "JavaScript": b"/JavaScript",
+              "Launch": b"/Launch",
+              "OpenAction": b"/OpenAction",
+          }
+
+
+          def _active_markers(data: bytes) -> tuple[str, ...]:
+              return tuple(
+                  name for name, marker in sorted(_ACTIVE_MARKERS.items()) if marker in data
+              )
+
+
+          def parse_pdf(
+              data: bytes,
+              *,
+              limits: PdfParseLimits | None = None,
+          ) -> PdfParseResult:
+              active = limits or PdfParseLimits()
+              if not isinstance(data, bytes):
+                  raise TypeError("PDF evidence must be bytes")
+              if not data:
+                  raise PdfParseError("PDF evidence is empty")
+              if len(data) > active.max_input_bytes:
+                  raise PdfLimitExceeded("PDF evidence exceeds the byte limit")
+              if not data.lstrip().startswith(b"%PDF-"):
+                  raise PdfParseError("artifact does not contain a PDF header")
+
+              markers = _active_markers(data)
+              warnings: list[str] = []
+              if markers:
+                  warnings.append("PDF_ACTIVE_FEATURES_PRESENT")
+              try:
+                  reader = PdfReader(io.BytesIO(data), strict=True)
+              except (PdfReadError, OSError, ValueError, TypeError) as exc:
+                  raise PdfParseError("PDF object graph is malformed") from exc
+
+              common_metadata: dict[str, object] = {
+                  "encrypted": bool(reader.is_encrypted),
+                  "password_attempted": False,
+                  "rendered": False,
+                  "ocr_used": False,
+                  "javascript_executed": False,
+                  "actions_executed": False,
+                  "embedded_files_executed": False,
+                  "active_features_present": bool(markers),
+                  "active_feature_markers": list(markers),
+              }
+              if reader.is_encrypted:
+                  warnings.append("PDF_ENCRYPTED")
+                  common_metadata.update(
+                      {
+                          "page_count": 0,
+                          "text_pages": 0,
+                          "failed_pages": 0,
+                      }
+                  )
+                  return PdfParseResult(
+                      text="",
+                      text_status="TEXT_NOT_AVAILABLE",
+                      metadata=common_metadata,
+                      warnings=tuple(warnings),
+                  )
+
+              try:
+                  page_count = len(reader.pages)
+              except (PdfReadError, OSError, ValueError, TypeError) as exc:
+                  raise PdfParseError("PDF page tree is malformed") from exc
+              if page_count > active.max_pages:
+                  raise PdfLimitExceeded("PDF exceeds the page limit")
+
+              page_texts: list[str] = []
+              failed_pages = 0
+              text_pages = 0
+              total_chars = 0
+              for index, page in enumerate(reader.pages):
+                  try:
+                      extracted = page.extract_text() or ""
+                  except Exception:
+                      failed_pages += 1
+                      warnings.append(f"PDF_PAGE_TEXT_FAILED:{index + 1}")
+                      continue
+                  normalized = "\n".join(
+                      line.rstrip() for line in extracted.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+                  ).strip()
+                  if len(normalized) > active.max_page_chars:
+                      raise PdfLimitExceeded("PDF page text exceeds the per-page text limit")
+                  if normalized:
+                      text_pages += 1
+                      page_texts.append(normalized)
+                      total_chars += len(normalized)
+                      if total_chars + max(len(page_texts) - 1, 0) > active.max_output_chars:
+                          raise PdfLimitExceeded("PDF text exceeds the output text limit")
+
+              text = "\n\n".join(page_texts)
+              if text:
+                  status: Literal["TEXT_AVAILABLE", "TEXT_NOT_AVAILABLE"] = "TEXT_AVAILABLE"
+              else:
+                  status = "TEXT_NOT_AVAILABLE"
+                  warnings.append("PDF_TEXT_NOT_AVAILABLE")
+              common_metadata.update(
+                  {
+                      "page_count": page_count,
+                      "text_pages": text_pages,
+                      "failed_pages": failed_pages,
+                  }
+              )
+              return PdfParseResult(
+                  text=text,
+                  text_status=status,
+                  metadata=common_metadata,
+                  warnings=tuple(dict.fromkeys(warnings)),
+              )
+          PY
+
+      - name: Verify GREEN and complete regression
+        run: |
+          uv run ruff check .
+          uv run pytest -q apps/api/tests/unit/test_pdf_parser.py
+          uv run pytest -q
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml build api worker
+
+      - name: Record Task 7 PDF checkpoint
+        run: |
+          mkdir -p docs/verification
+          cat > docs/verification/plan03-task7-pdf.md <<EOF
+          # Plan 03 Task 7 — safe text-bearing PDF derivative TDD checkpoint
+
+          - **Source before implementation:** \`$(git rev-parse HEAD)\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          ## RED
+
+          PDF contracts were written before production code and failed with the expected assertion \`safe text-bearing PDF parser is not implemented\`.
+
+          ## GREEN
+
+          | Gate | Outcome |
+          |---|---|
+          | Ruff | success |
+          | Text-bearing and multi-page extraction | success |
+          | Image-only/blank TEXT_NOT_AVAILABLE result | success |
+          | Encrypted PDF no-password/no-bruteforce result | success |
+          | JavaScript/action detection without execution | success |
+          | Input, page, page-text and output bounds | success |
+          | Malformed PDF rejection | success |
+          | Complete Python suite | success |
+          | Compose validation and API/worker image build | success |
+
+          PDF processing does not render pages, execute JavaScript or actions, open embedded files, attempt passwords or invoke OCR. Image-only PDFs are explicitly marked \`TEXT_NOT_AVAILABLE\` rather than represented as successfully parsed text.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/api/pyproject.toml uv.lock apps/api/darknetra_api/parsers/pdf.py apps/api/tests/unit/test_pdf_parser.py docs/verification/plan03-task7-pdf.md
+          git rm .github/workflows/plan03-task7-pdf.yml
+          git commit -m 'feat: add non rendering no OCR PDF text derivatives'
+          git push origin HEAD:testing-codex
