@@ -1,6 +1,6 @@
 name: Plan 03a Task 1 encryption GREEN gate
 
-# Final rerun after lint fixes with a disposable PostgreSQL service for the complete regression suite.
+# Final rerun after lint fixes with runtime-only secrets and disposable PostgreSQL.
 on:
   push:
     branches: [testing-codex]
@@ -41,8 +41,28 @@ jobs:
       - uses: astral-sh/setup-uv@v10.0.1
         with:
           version: '0.12.4'
+      - id: runtime_keys
+        name: Generate runtime-only test keys
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+
+          values = {
+              "DARKNETRA_JWT_SIGNING_KEY_B64": base64.b64encode(os.urandom(32)).decode("ascii"),
+              "DARKNETRA_FIELD_KEY_V1_B64": base64.b64encode(os.urandom(32)).decode("ascii"),
+              "DARKNETRA_FIELD_BLIND_INDEX_KEY_B64": base64.b64encode(os.urandom(32)).decode("ascii"),
+          }
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as target:
+              for name, value in values.items():
+                  print(f"::add-mask::{value}")
+                  target.write(f"{name}={value}\n")
+          PY
       - id: lock
         name: Resolve and lock cryptographic dependencies
+        if: steps.runtime_keys.outcome == 'success'
         continue-on-error: true
         run: uv lock
       - id: prepare
@@ -82,6 +102,7 @@ jobs:
       - name: Persist lock and observed verification
         if: always()
         env:
+          RUNTIME_KEYS: ${{ steps.runtime_keys.outcome }}
           LOCK: ${{ steps.lock.outcome }}
           PREPARE: ${{ steps.prepare.outcome }}
           MIGRATE: ${{ steps.migrate.outcome }}
@@ -93,6 +114,7 @@ jobs:
           {
             echo '# Plan 03a Task 1 encryption verification'
             echo
+            echo "- runtime-only key generation: ${RUNTIME_KEYS}"
             echo "- dependency lock: ${LOCK}"
             echo "- locked installation: ${PREPARE}"
             echo "- disposable DB migration: ${MIGRATE}"
@@ -128,6 +150,7 @@ jobs:
       - name: Enforce GREEN gate
         if: always()
         env:
+          RUNTIME_KEYS: ${{ steps.runtime_keys.outcome }}
           LOCK: ${{ steps.lock.outcome }}
           PREPARE: ${{ steps.prepare.outcome }}
           MIGRATE: ${{ steps.migrate.outcome }}
@@ -135,6 +158,7 @@ jobs:
           RUFF: ${{ steps.ruff.outcome }}
           REGRESSION: ${{ steps.regression.outcome }}
         run: |
+          test "$RUNTIME_KEYS" = success
           test "$LOCK" = success
           test "$PREPARE" = success
           test "$MIGRATE" = success
