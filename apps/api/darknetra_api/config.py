@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     web_origin: str = "http://localhost:3000"
     jwt_signing_key_b64: str = ""
     field_key_v1_b64: str = ""
+    field_keyring_b64_json: str = ""
     field_blind_index_key_b64: str = ""
     field_active_key_version: str = "v1"
 
