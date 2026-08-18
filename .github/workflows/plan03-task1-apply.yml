@@ -1,6 +1,6 @@
 name: Plan 03 Task 1 durable job boundary
 
-# Execute the already-staged TDD patch and record fresh release evidence.
+# Decode the staged runner defensively, then execute the TDD and release gates.
 on:
   push:
     branches: [testing-codex]
@@ -77,6 +77,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          base64 -d .automation/plan03-task1-run.sh.gz.b64 | gzip -d > /tmp/plan03-task1-run.sh
+          base64 --decode --ignore-garbage .automation/plan03-task1-run.sh.gz.b64 \
+            | gzip --decompress > /tmp/plan03-task1-run.sh
           chmod 700 /tmp/plan03-task1-run.sh
           /tmp/plan03-task1-run.sh
