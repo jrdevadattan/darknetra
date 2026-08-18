@@ -4,7 +4,7 @@
 
 - Plan 01 verification: complete.
 - Plan 02 verification: complete.
-- Mandatory Plan 03a encryption boundary: final rerun in progress; Plan 03 production implementation does not begin until every Plan 03a gate is green.
+- Mandatory Plan 03a encryption boundary: complete and green.
 - Working branch: `testing-codex`; `main` remains stable.
 
 ## Pre-flight interface scan
@@ -26,7 +26,7 @@
 
 ## Task status
 
-- Task 1: pending Plan 03a final green gate.
+- Task 1: complete — durable PostgreSQL job boundary, Redis/Celery delivery, migration, and worker smoke verified at `5bd0f473fee8a7d2279025a18f43eb306e265e42`.
 - Task 2: pending.
 - Task 3: pending.
 - Task 4: pending.
