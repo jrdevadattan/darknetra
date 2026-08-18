@@ -1,6 +1,6 @@
 name: Plan 02 Task 13 real auth E2E
 
-# Fixture GREEN gate before real browser authentication tests; capture Ruff diagnostics precisely.
+# Fixture GREEN rerun after import, async-subprocess, and exception-scope Ruff fixes.
 on:
   push:
     branches: [testing-codex]
