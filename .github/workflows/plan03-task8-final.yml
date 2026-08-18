@@ -1,0 +1,350 @@
+name: Plan 03 Task 8 final ingestion pipeline gate
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task8-final.yml
+
+permissions:
+  contents: write
+  statuses: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task8-final@127.0.0.1:5432/darknetra_plan03_task8_final
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-task8-final
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task8_final
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task8-final
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task8_final"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Require all Task 8 checkpoints
+        run: |
+          test -f docs/verification/plan03-task8-derivative-foundation.md
+          test -f docs/verification/plan03-task8-pipeline.md
+          test -f docs/verification/plan03-task8-celery.md
+
+      - name: Publish run locator
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY' >/tmp/status.json
+          import json, os
+          print(json.dumps({
+            "state": "pending",
+            "context": "plan03/task8-final",
+            "description": f"GitHub Actions run {os.environ['GITHUB_RUN_ID']}",
+            "target_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+          }))
+          PY
+          curl --fail --silent --show-error --request POST \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data @/tmp/status.json \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" >/dev/null
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f"::add-mask::{value}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n")
+              out.write(f"DARKNETRA_FIELD_KEY_V1_B64={field}\n")
+              out.write("DARKNETRA_FIELD_KEYRING_B64_JSON=" + json.dumps({"v1": field}, separators=(",", ":")) + "\n")
+              out.write("DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n")
+              out.write(f"DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n")
+          PY
+
+      - name: Verify locked dependencies and full migration cycle
+        run: |
+          uv sync --all-packages --dev --frozen
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run alembic -c apps/api/alembic.ini downgrade 8a7f2d91c402
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run alembic -c apps/api/alembic.ini current | grep -q b91d4f20e503
+
+      - name: Static and complete test verification
+        run: |
+          uv run ruff check .
+          uv run pytest -q \
+            apps/api/tests/integration/test_derivative_foundation.py \
+            apps/api/tests/integration/test_ingestion_pipeline.py \
+            apps/api/tests/integration/test_ingestion_celery.py
+          uv run pytest -q
+
+      - name: Verify immutable/idempotent task architecture statically
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          model = Path("apps/api/darknetra_api/models/evidence.py").read_text(encoding="utf-8")
+          derivatives = Path("apps/api/darknetra_api/services/derivatives.py").read_text(encoding="utf-8")
+          pipeline = Path("apps/api/darknetra_api/services/ingestion_pipeline.py").read_text(encoding="utf-8")
+          task = Path("apps/api/darknetra_api/jobs/tasks/ingestion.py").read_text(encoding="utf-8")
+          delivery = Path("apps/api/darknetra_api/services/job_delivery.py").read_text(encoding="utf-8")
+          celery = Path("apps/api/darknetra_api/jobs/celery_app.py").read_text(encoding="utf-8")
+          assert "parameters_digest" in model
+          assert "canonical_derivation_parameters_digest" in model
+          assert "object_store.put_verified" in derivatives
+          assert "parent.sha256 =" not in pipeline
+          assert "parent.object_key =" not in pipeline
+          assert 'name=TASK_NAME' in task
+          assert "MAX_RETRIES = 3" in task
+          assert "publish_pending_ingestion_jobs" in delivery
+          assert 'accept_content=["json"]' in celery
+          assert 'task_serializer="json"' in celery
+          for forbidden in ("pickle", "yaml", "eval(", "exec("):
+              assert forbidden not in task + delivery
+          PY
+
+      - name: Validate and build committed images
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml build api worker
+
+      - name: Run real Redis Celery PostgreSQL and shared-vault end-to-end task
+        run: |
+          set -euo pipefail
+          PROJECT=darknetra-task8-final
+          trap 'docker compose -p "$PROJECT" -f docker-compose.yml down -v --remove-orphans >/dev/null 2>&1 || true' EXIT
+          docker compose -p "$PROJECT" -f docker-compose.yml \
+            up -d --no-build --wait --wait-timeout 180 postgres redis worker
+          docker compose -p "$PROJECT" -f docker-compose.yml run --rm api \
+            uv run --no-sync alembic -c apps/api/alembic.ini upgrade head
+
+          IDS="$(docker compose -p "$PROJECT" -f docker-compose.yml exec -T worker sh -lc 'uv run --no-sync python - <<'"'"'PY'"'"'
+          import asyncio
+          import io
+          from datetime import UTC, datetime
+          from uuid import uuid4
+
+          from darknetra_api.config import get_settings
+          from darknetra_api.db.session import async_session_factory
+          from darknetra_api.models.case import Case
+          from darknetra_api.models.enums import CaseSensitivity
+          from darknetra_api.models.evidence import EvidenceArtifact, EvidenceSourceClass, EvidenceState
+          from darknetra_api.models.job import Job, JobState
+          from darknetra_api.models.user import User
+          from darknetra_api.services.evidence import preserve_evidence_manifest
+          from darknetra_api.storage.local import LocalObjectStore
+
+          async def main():
+              settings = get_settings()
+              store = LocalObjectStore(settings.evidence_store_path)
+              stored = store.put_verified(io.BytesIO(b"real broker authorized synthetic evidence"))
+              async with async_session_factory() as session:
+                  suffix = uuid4().hex[:10]
+                  owner = User(
+                      username=f"real-worker-{suffix}",
+                      username_normalized=f"real-worker-{suffix}",
+                      display_name="Real Worker Fixture",
+                      password_hash="unused",
+                      global_roles=[],
+                      is_active=True,
+                      must_change_password=False,
+                  )
+                  session.add(owner)
+                  await session.flush()
+                  case = Case(
+                      case_code=f"RWK-{suffix.upper()}",
+                      title="Real worker authorized synthetic fixture",
+                      sensitivity=CaseSensitivity.RESTRICTED,
+                      owner_user_id=owner.id,
+                      source_authority_summary="Authorized synthetic CI fixture",
+                  )
+                  session.add(case)
+                  await session.flush()
+                  artifact = EvidenceArtifact(
+                      case_id=case.id,
+                      source_class=EvidenceSourceClass.SYNTHETIC,
+                      source_type="synthetic.real_worker",
+                      acquisition_method="authorized_test_generation",
+                      collector_user_id=owner.id,
+                      captured_at=datetime.now(UTC),
+                      original_timezone="UTC",
+                      state=EvidenceState.STAGING,
+                  )
+                  preserve_evidence_manifest(
+                      artifact,
+                      media_type="text/plain",
+                      size_bytes=stored.size_bytes,
+                      sha256=stored.sha256,
+                      sha512=None,
+                      object_key=stored.object_key,
+                  )
+                  session.add(artifact)
+                  await session.flush()
+                  job = Job(
+                      case_id=case.id,
+                      resource_type="evidence",
+                      resource_id=str(artifact.id),
+                      task_name="darknetra.ingestion.process_evidence",
+                      queue="ingest",
+                      idempotency_key=f"ingest:{artifact.id}:v1",
+                      state=JobState.PENDING,
+                  )
+                  session.add(job)
+                  await session.commit()
+                  print(f"{artifact.id} {job.id}")
+
+          asyncio.run(main())
+          PY')"
+          EVIDENCE_ID="${IDS%% *}"
+          JOB_ID="${IDS##* }"
+          test -n "$EVIDENCE_ID"
+          test -n "$JOB_ID"
+
+          docker compose -p "$PROJECT" -f docker-compose.yml exec -T worker sh -lc \
+            "uv run --no-sync python -c 'from darknetra_api.jobs.celery_app import celery_app; celery_app.send_task(\"darknetra.ingestion.process_evidence\", args=[\"$EVIDENCE_ID\", \"v1\"], queue=\"ingest\", task_id=\"$JOB_ID\")'"
+
+          docker compose -p "$PROJECT" -f docker-compose.yml exec -T worker sh -lc \
+            "EVIDENCE_ID=$EVIDENCE_ID JOB_ID=$JOB_ID uv run --no-sync python - <<'PY'
+          import asyncio
+          import os
+          from uuid import UUID
+
+          import sqlalchemy as sa
+          from darknetra_api.db.session import async_session_factory
+          from darknetra_api.models.evidence import EvidenceArtifact, EvidenceDerivation, EvidenceState
+          from darknetra_api.models.job import Job, JobState
+
+          async def main():
+              evidence_id = UUID(os.environ['EVIDENCE_ID'])
+              job_id = UUID(os.environ['JOB_ID'])
+              for _ in range(60):
+                  async with async_session_factory() as session:
+                      artifact = await session.get(EvidenceArtifact, evidence_id)
+                      job = await session.get(Job, job_id)
+                      if job and job.state is JobState.SUCCEEDED:
+                          count = (
+                              await session.execute(
+                                  sa.select(sa.func.count(EvidenceDerivation.id)).where(
+                                      EvidenceDerivation.parent_evidence_id == evidence_id
+                                  )
+                              )
+                          ).scalar_one()
+                          assert artifact is not None and artifact.state is EvidenceState.READY
+                          assert count == 1
+                          print('real-worker-pipeline-ok')
+                          return
+                  await asyncio.sleep(1)
+              raise SystemExit('timed out waiting for real Celery ingestion')
+
+          asyncio.run(main())
+          PY"
+
+      - name: Record Task 8 completion
+        run: |
+          mkdir -p docs/architecture docs/verification
+          cat > docs/architecture/idempotent-ingestion-pipeline.md <<'EOF'
+          # Idempotent evidence-processing pipeline
+
+          PostgreSQL is authoritative for every asynchronous job. Redis transports messages only. A job key is `ingest:<evidence-id>:<pipeline-version>`; the derivative identity is `(parent evidence, transformation, transformer version, canonical parameters digest)` and is enforced by a unique database constraint.
+
+          The worker verifies the original content digest before parsing and never rewrites the original manifest. Successful parser outputs are persisted as separate content-addressed child evidence objects with derivation, custody and audit records. Duplicate messages return the same children. A new pipeline version creates a new traceable derivative set without changing earlier output.
+
+          Parser exceptions move the durable job to `RETRYING` and restore the original to `PRESERVED`. The Celery task performs at most three bounded retries; exhaustion marks the job and processing state `FAILED`. Unsupported media is preserved and quarantined. Useful output with warnings, quarantined archive members or a text-unavailable PDF produces `PARTIAL`. Fully successful output produces `READY`.
+
+          The API commits the original and job before publishing. Broker failure leaves the job pending, and a bounded `FOR UPDATE SKIP LOCKED` reconciliation service can publish pending/retrying ingestion jobs later. No pickle or executable serializer is accepted.
+          EOF
+          cat > docs/verification/plan03-task8-final.md <<EOF
+          # Plan 03 Task 8 — final verification
+
+          - **Verified source commit:** \`$(git rev-parse HEAD)\`
+          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          | Gate | Outcome |
+          |---|---|
+          | Frozen dependencies and reversible idempotency migration | success |
+          | Ruff and focused Task 8 suites | success |
+          | Complete Python suite | success |
+          | Original-manifest immutability/static architecture checks | success |
+          | JSON-only bounded-retry task checks | success |
+          | Compose validation and image build | success |
+          | Real Redis/Celery/PostgreSQL/shared-vault end-to-end processing | success |
+          | Duplicate/version/retry/quarantine/partial state contracts | success |
+          EOF
+          python - <<'PY'
+          from pathlib import Path
+          ledger = Path("docs/verification/plan03-execution-ledger.md")
+          if ledger.exists():
+              lines = ledger.read_text(encoding="utf-8").splitlines()
+              value = "- Task 8: complete — idempotent parser orchestration, derivative persistence, state/retry semantics, durable delivery reconciliation and real Celery end-to-end processing verified."
+              for index, line in enumerate(lines):
+                  if line.startswith("- Task 8:"):
+                      lines[index] = value
+                      break
+              else:
+                  lines += ["", value]
+              ledger.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/architecture/idempotent-ingestion-pipeline.md docs/verification/plan03-task8-final.md
+          if test -f docs/verification/plan03-execution-ledger.md; then git add docs/verification/plan03-execution-ledger.md; fi
+          git rm .github/workflows/plan03-task8-final.yml
+          git commit -m 'docs: verify idempotent ingestion pipeline [skip ci]'
+          git push origin HEAD:testing-codex
+
+      - name: Publish terminal status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          python - <<'PY' >/tmp/status.json
+          import json, os
+          success = os.environ["JOB_STATUS"] == "success"
+          print(json.dumps({
+            "state": "success" if success else "failure",
+            "context": "plan03/task8-final",
+            "description": "Task 8 final gate passed" if success else "Task 8 final gate failed",
+            "target_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+          }))
+          PY
+          curl --fail --silent --show-error --request POST \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data @/tmp/status.json \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" >/dev/null
