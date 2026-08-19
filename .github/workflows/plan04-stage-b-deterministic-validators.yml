@@ -1,0 +1,600 @@
+name: Plan 04 Stage B deterministic indicators and validators
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - docs/verification/plan04-stage-a-schema-language.md
+
+permissions:
+  contents: write
+  statuses: write
+
+jobs:
+  red-green:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-plan04-b@127.0.0.1:5432/darknetra_plan04_b
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan04-b
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan04_b
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-plan04-b
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan04_b"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Require Stage A handoff
+        run: test -f docs/verification/plan04-stage-a-schema-language.md
+
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode('ascii')
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f'::add-mask::{value}')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as out:
+              out.write(f'DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n')
+              out.write(f'DARKNETRA_FIELD_KEY_V1_B64={field}\n')
+              out.write('DARKNETRA_FIELD_KEYRING_B64_JSON=' + json.dumps({'v1': field}, separators=(',', ':')) + '\n')
+              out.write('DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n')
+              out.write(f'DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n')
+          PY
+
+      - name: Install baseline
+        run: |
+          uv sync --all-packages --dev --frozen
+          uv run alembic -c apps/api/alembic.ini upgrade head
+
+      - name: Write Tasks 4-6 contracts first
+        run: |
+          mkdir -p apps/api/tests/unit/extractors apps/api/tests/unit/validators
+          cat > apps/api/tests/unit/extractors/test_plan04_commercial.py <<'PY'
+          from __future__ import annotations
+
+          import importlib
+          import importlib.util
+
+          import pytest
+
+
+          def commercial():
+              spec = importlib.util.find_spec('darknetra_api.extractors.commercial')
+              assert spec is not None, 'commercial indicator extractors are not implemented'
+              return importlib.import_module('darknetra_api.extractors.commercial')
+
+
+          def test_extracts_prices_quantities_contacts_urls_and_onion_locators_with_spans() -> None:
+              module = commercial()
+              text = 'Offer: 2.5 kg for ₹12,500; contact vendor_alpha@example.invalid or @vendor_alpha. Mirror http://abcdefghijklmnop.onion/list.'
+              items = module.extract_commercial_candidates(text, default_phone_region='IN')
+              types = {item.entity_type.value for item in items}
+              assert {'PRICE','QUANTITY','EMAIL','CONTACT_HANDLE','ONION_LOCATOR'} <= types
+              for item in items:
+                  assert text[item.start:item.end] == item.raw_value
+                  assert 0 <= item.confidence <= 1
+                  assert len(item.raw_value) <= module.MAX_CANDIDATE_LENGTH
+
+
+          @pytest.mark.parametrize('text', [
+              'Published on 2026-08-17, version 2.5.1, citation [12].',
+              'The scientific sample measured 5 mg/L in a laboratory report.',
+              'IPv6 example 2001:db8::1 and hash ' + 'a' * 64,
+              'Contact us at ordinary prose without a handle.',
+          ])
+          def test_negative_contexts_do_not_become_transactional_prices_or_handles(text: str) -> None:
+              module = commercial()
+              items = module.extract_commercial_candidates(text)
+              assert not any(item.entity_type.value == 'PRICE' for item in items)
+              if 'ordinary prose' in text:
+                  assert not any(item.entity_type.value == 'CONTACT_HANDLE' for item in items)
+
+
+          def test_input_is_bounded_to_prevent_regex_dos() -> None:
+              module = commercial()
+              with pytest.raises(ValueError, match='maximum'):
+                  module.extract_commercial_candidates('x' * (module.MAX_INPUT_CHARS + 1))
+
+
+          def test_phone_validation_does_not_invent_region() -> None:
+              module = commercial()
+              text = 'Call 9876543210'
+              without_region = module.extract_commercial_candidates(text)
+              assert not any(item.entity_type.value == 'PHONE' for item in without_region)
+              with_region = module.extract_commercial_candidates(text, default_phone_region='IN')
+              assert any(item.entity_type.value == 'PHONE' for item in with_region)
+          PY
+
+          cat > apps/api/tests/unit/validators/test_plan04_pgp.py <<'PY'
+          from __future__ import annotations
+
+          import importlib
+          import importlib.util
+          import os
+          import shutil
+          import subprocess
+          from pathlib import Path
+
+          import pytest
+
+
+          def pgp():
+              spec = importlib.util.find_spec('darknetra_api.validators.pgp')
+              assert spec is not None, 'OpenPGP validator is not implemented'
+              return importlib.import_module('darknetra_api.validators.pgp')
+
+
+          @pytest.fixture(scope='module')
+          def generated_key(tmp_path_factory):
+              if not shutil.which('gpg'):
+                  pytest.skip('gpg is not installed')
+              home = tmp_path_factory.mktemp('gnupg')
+              home.chmod(0o700)
+              env = {**os.environ, 'GNUPGHOME': str(home)}
+              subprocess.run([
+                  'gpg','--batch','--yes','--passphrase','','--quick-generate-key',
+                  'DARKNETRA Test <test@example.invalid>','ed25519','sign','0'
+              ], check=True, env=env, timeout=30, capture_output=True)
+              public = subprocess.run(['gpg','--batch','--armor','--export','test@example.invalid'], check=True, env=env, timeout=20, capture_output=True, text=True).stdout
+              secret = subprocess.run(['gpg','--batch','--yes','--passphrase','','--armor','--export-secret-keys','test@example.invalid'], check=True, env=env, timeout=20, capture_output=True, text=True).stdout
+              return public, secret
+
+
+          def test_computes_fingerprint_from_public_key_in_isolated_home(generated_key) -> None:
+              module = pgp()
+              inspection = module.inspect_public_key(generated_key[0])
+              assert inspection.fingerprints
+              assert all(len(value) in {40,64} for value in inspection.fingerprints)
+              assert all(value == value.upper() for value in inspection.fingerprints)
+              assert inspection.contains_secret_material is False
+              assert 'PRIVATE KEY' not in repr(inspection)
+
+
+          def test_rejects_secret_key_malformed_armor_and_oversize(generated_key) -> None:
+              module = pgp()
+              with pytest.raises(module.PgpInspectionError, match='secret'):
+                  module.inspect_public_key(generated_key[1])
+              with pytest.raises(module.PgpInspectionError):
+                  module.inspect_public_key('-----BEGIN PGP PUBLIC KEY BLOCK-----\ninvalid\n')
+              with pytest.raises(module.PgpInspectionError, match='size'):
+                  module.inspect_public_key('x' * (module.MAX_ARMORED_BYTES + 1))
+          PY
+
+          cat > apps/api/tests/unit/validators/test_plan04_crypto.py <<'PY'
+          from __future__ import annotations
+
+          import importlib
+          import importlib.util
+
+
+          def crypto():
+              spec = importlib.util.find_spec('darknetra_api.validators.crypto')
+              assert spec is not None, 'cryptocurrency validators are not implemented'
+              return importlib.import_module('darknetra_api.validators.crypto')
+
+
+          def test_bitcoin_base58_checksum_and_network_are_validated() -> None:
+              module = crypto()
+              valid = module.validate_crypto_candidate('1BoatSLRHtKNngkdXEeobR76b53LETtpyT')
+              assert valid and valid.chain == 'BITCOIN' and valid.network == 'mainnet'
+              assert module.validate_crypto_candidate('1BoatSLRHtKNngkdXEeobR76b53LETtpyU') is None
+
+
+          def test_ethereum_checksum_states_are_preserved_without_correction() -> None:
+              module = crypto()
+              checksummed = module.validate_crypto_candidate('0x52908400098527886E0F7030069857D2E4169EE7')
+              assert checksummed and checksummed.checksum_status == 'valid_checksum'
+              lower = module.validate_crypto_candidate('0xde709f2102306220921060314715629080e2fb77')
+              assert lower and lower.checksum_status == 'all_lower_no_checksum'
+              assert module.validate_crypto_candidate('0x52908400098527886E0F7030069857D2E4169Ee7') is None
+
+
+          def test_monero_public_address_checksum_is_validated_without_private_keys() -> None:
+              module = crypto()
+              address = module.build_test_monero_address(bytes(range(64)), network='mainnet')
+              valid = module.validate_crypto_candidate(address)
+              assert valid and valid.chain == 'MONERO' and valid.network == 'mainnet'
+              replacement = '1' if address[-1] != '1' else '2'
+              assert module.validate_crypto_candidate(address[:-1] + replacement) is None
+              assert module.validate_crypto_candidate('a' * 64) is None
+          PY
+
+      - name: Prove RED
+        run: |
+          set +e
+          uv run pytest -q apps/api/tests/unit/extractors/test_plan04_commercial.py apps/api/tests/unit/validators/test_plan04_pgp.py apps/api/tests/unit/validators/test_plan04_crypto.py >/tmp/plan04-b-red.log 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          grep -Eqi 'not implemented|ModuleNotFoundError' /tmp/plan04-b-red.log
+
+      - name: Add deterministic-validator dependencies
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('apps/api/pyproject.toml')
+          text = path.read_text(encoding='utf-8')
+          marker = 'dependencies = [\n'
+          additions = [
+              '    "phonenumbers>=9.0.0,<10",\n',
+              '    "rapidfuzz>=3.14,<4",\n',
+              '    "pycryptodome>=3.23,<4",\n',
+          ]
+          if marker not in text: raise SystemExit('dependency marker not found')
+          for line in reversed(additions):
+              package = line.split('"',2)[1].split('>',1)[0]
+              if package not in text:
+                  text = text.replace(marker, marker + line, 1)
+          path.write_text(text,encoding='utf-8')
+          PY
+          uv lock
+          uv sync --all-packages --dev --frozen
+
+      - name: Implement bounded deterministic commercial extractors
+        run: |
+          mkdir -p apps/api/darknetra_api/extractors apps/api/darknetra_api/validators
+          cat > apps/api/darknetra_api/extractors/__init__.py <<'PY'
+          """Deterministic, span-preserving extraction candidates."""
+          PY
+          cat > apps/api/darknetra_api/extractors/patterns.py <<'PY'
+          from __future__ import annotations
+
+          import re
+
+          EMAIL = re.compile(r'(?<![\w.+-])([A-Z0-9._%+-]{1,64}@[A-Z0-9.-]{1,190}\.[A-Z]{2,63})(?![\w.-])', re.I)
+          HANDLE = re.compile(r'(?<![\w@])@([A-Za-z0-9_][A-Za-z0-9_.-]{2,31})(?![\w.-])')
+          URL = re.compile(r'(?i)\bhttps?://[^\s<>{}\[\]"\']{4,2048}')
+          ONION = re.compile(r'(?i)\b(?:https?://)?([a-z2-7]{16}|[a-z2-7]{56})\.onion(?:/[^\s<>{}\[\]"\']*)?')
+          PRICE = re.compile(r'(?<!\w)(?:(₹|Rs\.?|INR|US\$|USD|€|EUR|£|GBP)\s*([0-9]{1,9}(?:[,.][0-9]{1,3})*)|([0-9]{1,9}(?:[,.][0-9]{1,3})*)\s*(INR|USD|EUR|GBP))(?!\w)', re.I)
+          QUANTITY = re.compile(r'(?<![\w.])([0-9]+(?:[.,][0-9]+)?)(?:\s*[-–]\s*([0-9]+(?:[.,][0-9]+)?))?\s*(kg|g|mg|lb|oz|ml|l|pieces?|pcs?|tabs?|units?)(?!\w)', re.I)
+          PY
+
+          cat > apps/api/darknetra_api/extractors/commercial.py <<'PY'
+          from __future__ import annotations
+
+          from dataclasses import dataclass, field
+          from typing import Any
+
+          import phonenumbers
+
+          from darknetra_api.extractors import patterns
+          from darknetra_api.models.entity import EntityType
+
+          MAX_INPUT_CHARS = 200_000
+          MAX_CANDIDATE_LENGTH = 4096
+
+
+          @dataclass(frozen=True, slots=True)
+          class EntityCandidate:
+              entity_type: EntityType
+              raw_value: str
+              normalized_value: str | None
+              start: int
+              end: int
+              confidence: float
+              metadata: dict[str, Any] = field(default_factory=dict)
+
+
+          _CURRENCY = {'₹':'INR','RS.':'INR','RS':'INR','INR':'INR','US$':'USD','USD':'USD','€':'EUR','EUR':'EUR','£':'GBP','GBP':'GBP'}
+          _UNITS = {'kilogram':'kg','kilograms':'kg','grams':'g','gram':'g','kgs':'kg','kg':'kg','g':'g','mg':'mg','lb':'lb','oz':'oz','ml':'ml','l':'l','piece':'piece','pieces':'piece','pc':'piece','pcs':'piece','tab':'tablet','tabs':'tablet','unit':'unit','units':'unit'}
+
+
+          def _add(items: list[EntityCandidate], entity_type: EntityType, text: str, start: int, end: int, normalized: str | None, confidence: float, **metadata: Any) -> None:
+              raw = text[start:end]
+              if 0 < len(raw) <= MAX_CANDIDATE_LENGTH:
+                  items.append(EntityCandidate(entity_type, raw, normalized, start, end, confidence, metadata))
+
+
+          def extract_commercial_candidates(text: str, *, default_phone_region: str | None = None) -> list[EntityCandidate]:
+              if len(text) > MAX_INPUT_CHARS: raise ValueError(f'input exceeds maximum {MAX_INPUT_CHARS} characters')
+              items: list[EntityCandidate] = []
+              for match in patterns.EMAIL.finditer(text):
+                  _add(items,EntityType.EMAIL,text,*match.span(1),match.group(1).casefold(),0.99,validator='syntax')
+              for match in patterns.ONION.finditer(text):
+                  _add(items,EntityType.ONION_LOCATOR,text,*match.span(0),match.group(0).casefold().rstrip('.,;'),0.99,validator='onion_syntax')
+              onion_spans = {(item.start,item.end) for item in items if item.entity_type is EntityType.ONION_LOCATOR}
+              for match in patterns.URL.finditer(text):
+                  if any(match.start() >= start and match.end() <= end for start,end in onion_spans): continue
+                  _add(items,EntityType.URL,text,*match.span(0),match.group(0).rstrip('.,;'),0.97,validator='url_syntax')
+              for match in patterns.HANDLE.finditer(text):
+                  if match.start() and text[match.start()-1].isalnum(): continue
+                  _add(items,EntityType.CONTACT_HANDLE,text,*match.span(0),'@'+match.group(1).casefold(),0.92)
+              for match in patterns.PRICE.finditer(text):
+                  nearby = text[max(0,match.start()-20):min(len(text),match.end()+20)].casefold()
+                  if any(token in nearby for token in ('version','published','citation','mg/l','laboratory')): continue
+                  symbol = (match.group(1) or match.group(4) or '').upper()
+                  amount = match.group(2) or match.group(3)
+                  currency = _CURRENCY.get(symbol,symbol)
+                  normalized_amount = amount.replace(',','') if amount and amount.count(',') and '.' not in amount else (amount or '').replace(',','.')
+                  _add(items,EntityType.PRICE,text,*match.span(0),f'{currency} {normalized_amount}'.strip(),0.96,currency=currency,amount=normalized_amount)
+                  if currency: _add(items,EntityType.CURRENCY,text,*match.span(0),currency,0.99,currency=currency)
+              for match in patterns.QUANTITY.finditer(text):
+                  nearby = text[max(0,match.start()-25):min(len(text),match.end()+25)].casefold()
+                  if any(token in nearby for token in ('mg/l','laboratory','scientific','concentration')): continue
+                  first = match.group(1).replace(',','.')
+                  second = match.group(2).replace(',','.') if match.group(2) else None
+                  unit = _UNITS.get(match.group(3).casefold(),match.group(3).casefold())
+                  normalized = f'{first}-{second} {unit}' if second else f'{first} {unit}'
+                  _add(items,EntityType.QUANTITY,text,*match.span(0),normalized,0.94,unit=unit)
+              if default_phone_region:
+                  for match in phonenumbers.PhoneNumberMatcher(text, default_phone_region):
+                      number = match.number
+                      if phonenumbers.is_valid_number(number):
+                          normalized = phonenumbers.format_number(number, phonenumbers.PhoneNumberFormat.E164)
+                          _add(items,EntityType.PHONE,text,match.start,match.end,normalized,0.99,region=phonenumbers.region_code_for_number(number))
+              return sorted(items,key=lambda item:(item.start,item.end,item.entity_type.value))
+          PY
+
+      - name: Implement isolated OpenPGP validator
+        run: |
+          cat > apps/api/darknetra_api/validators/__init__.py <<'PY'
+          """Protocol validators for observed public indicators."""
+          PY
+          cat > apps/api/darknetra_api/validators/pgp.py <<'PY'
+          from __future__ import annotations
+
+          import os
+          import shutil
+          import subprocess
+          import tempfile
+          from dataclasses import dataclass
+          from pathlib import Path
+
+          MAX_ARMORED_BYTES = 512 * 1024
+
+
+          class PgpInspectionError(ValueError): pass
+
+
+          @dataclass(frozen=True, slots=True)
+          class PgpInspection:
+              fingerprints: tuple[str,...]
+              algorithms: tuple[str,...]
+              user_ids: tuple[str,...]
+              contains_secret_material: bool = False
+
+
+          def inspect_public_key(armored: str) -> PgpInspection:
+              if not isinstance(armored,str): raise TypeError('armored key must be text')
+              encoded = armored.encode('utf-8')
+              if len(encoded) > MAX_ARMORED_BYTES: raise PgpInspectionError('armored key exceeds size limit')
+              if 'PRIVATE KEY BLOCK' in armored or 'SECRET KEY BLOCK' in armored: raise PgpInspectionError('secret key material is forbidden')
+              if 'BEGIN PGP PUBLIC KEY BLOCK' not in armored: raise PgpInspectionError('not an armored public key')
+              executable = shutil.which('gpg')
+              if not executable: raise PgpInspectionError('gpg is unavailable')
+              with tempfile.TemporaryDirectory(prefix='darknetra-gnupg-') as directory:
+                  home = Path(directory); home.chmod(0o700)
+                  env = {**os.environ,'GNUPGHOME':str(home),'LC_ALL':'C'}
+                  try:
+                      result = subprocess.run([
+                          executable,'--batch','--no-options','--no-auto-key-retrieve','--no-autostart',
+                          '--import-options','show-only','--dry-run','--with-colons','--import'
+                      ],input=encoded,capture_output=True,env=env,timeout=15,check=False)
+                  except subprocess.TimeoutExpired as exc:
+                      raise PgpInspectionError('OpenPGP inspection timed out') from exc
+                  if result.returncode != 0: raise PgpInspectionError('OpenPGP public key is malformed or unsupported')
+                  fingerprints=[]; algorithms=[]; user_ids=[]
+                  for line in result.stdout.decode('utf-8','replace').splitlines():
+                      fields=line.split(':')
+                      if fields[0]=='fpr' and len(fields)>9 and fields[9]: fingerprints.append(fields[9].upper())
+                      elif fields[0] in {'pub','sub'} and len(fields)>3: algorithms.append(fields[3])
+                      elif fields[0]=='uid' and len(fields)>9: user_ids.append(fields[9])
+                  if not fingerprints: raise PgpInspectionError('OpenPGP fingerprint could not be computed')
+                  return PgpInspection(tuple(dict.fromkeys(fingerprints)),tuple(algorithms),tuple(user_ids))
+          PY
+
+      - name: Implement Bitcoin Ethereum and Monero validators
+        run: |
+          cat > apps/api/darknetra_api/validators/crypto.py <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import re
+          from dataclasses import dataclass
+
+          from Crypto.Hash import keccak
+
+          _B58='123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+          _B58_INDEX={char:index for index,char in enumerate(_B58)}
+          _BECH32='qpzry9x8gf2tvdw0s3jn54khce6mua7l'
+
+
+          @dataclass(frozen=True,slots=True)
+          class CryptoValidation:
+              chain: str
+              canonical: str
+              network: str | None
+              address_type: str
+              checksum_status: str
+
+
+          def _keccak(data: bytes) -> bytes:
+              digest=keccak.new(digest_bits=256); digest.update(data); return digest.digest()
+
+
+          def _b58decode(value: str) -> bytes | None:
+              number=0
+              for char in value:
+                  if char not in _B58_INDEX: return None
+                  number=number*58+_B58_INDEX[char]
+              payload=number.to_bytes((number.bit_length()+7)//8,'big') if number else b''
+              return b'\0'*(len(value)-len(value.lstrip('1')))+payload
+
+
+          def _bitcoin_base58(value: str) -> CryptoValidation | None:
+              decoded=_b58decode(value)
+              if not decoded or len(decoded)!=25: return None
+              body,checksum=decoded[:-4],decoded[-4:]
+              if hashlib.sha256(hashlib.sha256(body).digest()).digest()[:4]!=checksum: return None
+              version=body[0]
+              mapping={0x00:('mainnet','p2pkh'),0x05:('mainnet','p2sh'),0x6f:('testnet','p2pkh'),0xc4:('testnet','p2sh')}
+              if version not in mapping: return None
+              network,kind=mapping[version]
+              return CryptoValidation('BITCOIN',value,network,kind,'valid_checksum')
+
+
+          def _bech32_polymod(values):
+              generators=(0x3b6a57b2,0x26508e6d,0x1ea119fa,0x3d4233dd,0x2a1462b3); chk=1
+              for value in values:
+                  top=chk>>25; chk=(chk&0x1ffffff)<<5^value
+                  for index,generator in enumerate(generators):
+                      if (top>>index)&1: chk^=generator
+              return chk
+
+
+          def _bech32_expand(hrp): return [ord(char)>>5 for char in hrp]+[0]+[ord(char)&31 for char in hrp]
+
+
+          def _bitcoin_bech32(value: str) -> CryptoValidation | None:
+              if value.lower()!=value and value.upper()!=value: return None
+              value=value.lower(); pos=value.rfind('1')
+              if pos<1 or pos+7>len(value) or len(value)>90: return None
+              hrp=value[:pos]; data=[]
+              try: data=[_BECH32.index(char) for char in value[pos+1:]]
+              except ValueError: return None
+              polymod=_bech32_polymod(_bech32_expand(hrp)+data)
+              if polymod not in {1,0x2bc830a3}: return None
+              if not data[:-6]: return None
+              version=data[0]; expected=1 if version==0 else 0x2bc830a3
+              if polymod!=expected or version>16: return None
+              network={'bc':'mainnet','tb':'testnet','bcrt':'regtest'}.get(hrp)
+              if not network: return None
+              return CryptoValidation('BITCOIN',value,network,f'witness_v{version}','valid_checksum')
+
+
+          def _ethereum(value: str) -> CryptoValidation | None:
+              if not re.fullmatch(r'0x[0-9a-fA-F]{40}',value): return None
+              body=value[2:]
+              if body.islower(): status='all_lower_no_checksum'
+              elif body.isupper(): status='all_upper_no_checksum'
+              else:
+                  digest=_keccak(body.lower().encode('ascii')).hex()
+                  for index,char in enumerate(body):
+                      if char.isalpha() and (char.isupper() != (int(digest[index],16)>=8)): return None
+                  status='valid_checksum'
+              return CryptoValidation('ETHEREUM',value,None,'account',status)
+
+
+          _CN_BLOCK_DECODED=(0,1,2,3,4,5,5,6,7,7,8)
+          _CN_BLOCK_ENCODED=(0,2,3,5,6,7,9,10,11)
+
+
+          def _cn_decode(value: str) -> bytes | None:
+              output=bytearray()
+              for offset in range(0,len(value),11):
+                  block=value[offset:offset+11]; size=_CN_BLOCK_DECODED[len(block)] if len(block)<len(_CN_BLOCK_DECODED) else 0
+                  if not size: return None
+                  number=0
+                  for char in block:
+                      if char not in _B58_INDEX: return None
+                      number=number*58+_B58_INDEX[char]
+                  if number >= 1 << (8*size): return None
+                  output.extend(number.to_bytes(size,'big'))
+              return bytes(output)
+
+
+          def _cn_encode(data: bytes) -> str:
+              result=[]
+              for offset in range(0,len(data),8):
+                  block=data[offset:offset+8]; size=_CN_BLOCK_ENCODED[len(block)]; number=int.from_bytes(block,'big'); chars=['1']*size
+                  for index in range(size-1,-1,-1): chars[index]=_B58[number%58]; number//=58
+                  result.extend(chars)
+              return ''.join(result)
+
+
+          def build_test_monero_address(public_keys: bytes, *, network: str='mainnet') -> str:
+              if len(public_keys)!=64: raise ValueError('public_keys must contain two 32-byte public keys')
+              prefix={'mainnet':18,'testnet':53,'stagenet':24}[network]
+              body=bytes([prefix])+public_keys; return _cn_encode(body+_keccak(body)[:4])
+
+
+          def _monero(value: str) -> CryptoValidation | None:
+              if len(value) not in {95,106}: return None
+              decoded=_cn_decode(value)
+              if not decoded or len(decoded) not in {69,77}: return None
+              body,checksum=decoded[:-4],decoded[-4:]
+              if _keccak(body)[:4]!=checksum: return None
+              mapping={18:('mainnet','standard'),19:('mainnet','integrated'),42:('mainnet','subaddress'),53:('testnet','standard'),54:('testnet','integrated'),63:('testnet','subaddress'),24:('stagenet','standard'),25:('stagenet','integrated'),36:('stagenet','subaddress')}
+              if body[0] not in mapping: return None
+              network,kind=mapping[body[0]]
+              return CryptoValidation('MONERO',value,network,kind,'valid_checksum')
+
+
+          def validate_crypto_candidate(value: str) -> CryptoValidation | None:
+              if not isinstance(value,str) or len(value)>128: return None
+              if value.startswith(('1','3','m','n','2')):
+                  result=_bitcoin_base58(value)
+                  if result: return result
+              if value.lower().startswith(('bc1','tb1','bcrt1')):
+                  result=_bitcoin_bech32(value)
+                  if result: return result
+              result=_ethereum(value)
+              if result: return result
+              return _monero(value)
+          PY
+
+      - name: Ensure runtime image includes GnuPG
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path=Path('infrastructure/docker/api.Dockerfile')
+          text=path.read_text(encoding='utf-8')
+          if 'gnupg' not in text.casefold():
+              marker='WORKDIR /app\n'
+              install='RUN apt-get update && apt-get install -y --no-install-recommends gnupg && rm -rf /var/lib/apt/lists/*\n\n'
+              if marker not in text: raise SystemExit('Dockerfile WORKDIR marker missing')
+              text=text.replace(marker,install+marker,1)
+              path.write_text(text,encoding='utf-8')
+          PY
+
+      - name: Verify GREEN and complete regression
+        run: |
+          uv run ruff check .
+          uv run pytest -q apps/api/tests/unit/extractors/test_plan04_commercial.py apps/api/tests/unit/validators/test_plan04_pgp.py apps/api/tests/unit/validators/test_plan04_crypto.py
+          uv run pytest -q
+          docker compose -f docker-compose.yml build api worker
+
+      - name: Record Stage B and commit
+        run: |
+          mkdir -p docs/verification
+          cat > docs/verification/plan04-stage-b-deterministic-validators.md <<EOF
+          # Plan 04 Stage B — deterministic commercial and protocol validators
+
+          - **Verified source:** \`$(git rev-parse HEAD)\`
+          - **Observed:** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+
+          RED preceded implementation. GREEN verified bounded span-preserving price, quantity, contact, URL and onion candidates; region-aware phone validation; isolated temporary-home OpenPGP public-key inspection with computed fingerprints and secret-key rejection; Bitcoin checksum/network validation; Ethereum checksum-state preservation; and Monero public-address checksum validation. Indicator presence is represented only as an observation, never proof of control or identity.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/api infrastructure/docker/api.Dockerfile uv.lock docs/verification/plan04-stage-b-deterministic-validators.md
+          git rm .github/workflows/plan04-stage-b-deterministic-validators.yml
+          git commit -m 'feat: add deterministic commercial and protocol validators'
+          git push origin HEAD:testing-codex
