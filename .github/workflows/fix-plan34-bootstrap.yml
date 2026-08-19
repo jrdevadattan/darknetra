@@ -1,0 +1,76 @@
+name: Harden Plans 03 and 04 runner bootstrap
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/fix-plan34-bootstrap.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Patch pnpm bootstrap and model output limits
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/complete-plan03-plan04.yml')
+          text = path.read_text(encoding='utf-8')
+          setup = """      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Enable pinned pnpm
+        run: corepack enable
+"""
+          replacement = """      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Enable pinned pnpm
+        run: corepack enable
+"""
+          if setup in text:
+              text = text.replace(setup, replacement, 1)
+          elif 'pnpm/action-setup@v4' not in text:
+              raise SystemExit('setup-node bootstrap marker not found')
+
+          hardening = """          text = text.replace(
+              '            \"response_format\": {\"type\": \"json_object\"},\\n',
+              '',
+          )
+"""
+          hardened = hardening + """          text = text.replace(
+              '\"max_tokens\": 30000,',
+              '\"max_tokens\": 16000,',
+          )
+"""
+          if hardening in text and "'\"max_tokens\": 30000,'" not in text:
+              text = text.replace(hardening, hardened, 1)
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Commit and retrigger
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/complete-plan03-plan04.yml
+          git rm .github/workflows/fix-plan34-bootstrap.yml
+          git commit -m 'fix: harden Plans 03 and 04 runner bootstrap'
+          git pull --rebase origin testing-codex
+          git push origin HEAD:testing-codex
