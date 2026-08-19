@@ -1,0 +1,210 @@
+name: Fallback DARKNETRA Plans 03 and 04 completion
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/fallback-plan03-plan04-aider.yml
+
+concurrency:
+  group: darknetra-plan03-plan04-monitor
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: read
+  models: read
+
+jobs:
+  fallback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-plan34-fallback@127.0.0.1:5432/darknetra_plan34_fallback
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan34-fallback
+      OPENAI_API_KEY: ${{ github.token }}
+      OPENAI_API_BASE: https://models.github.ai/inference
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan34_fallback
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-plan34-fallback
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan34_fallback"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Wait for the latest primary completion run
+        id: primary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RUN_ID=""
+          for _ in $(seq 1 30); do
+            RUN_ID="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/workflows/complete-plan03-plan04.yml/runs?branch=testing-codex&per_page=5" --jq '.workflow_runs | sort_by(.created_at) | reverse | .[0].id // empty' || true)"
+            if test -n "$RUN_ID"; then break; fi
+            sleep 10
+          done
+          test -n "$RUN_ID"
+          while true; do
+            STATUS="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" --jq '.status')"
+            CONCLUSION="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" --jq '.conclusion // empty')"
+            echo "primary=${RUN_ID} status=${STATUS} conclusion=${CONCLUSION}"
+            if test "$STATUS" = completed; then
+              echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+              echo "conclusion=$CONCLUSION" >> "$GITHUB_OUTPUT"
+              break
+            fi
+            sleep 60
+          done
+
+      - name: Exit when primary succeeded
+        if: steps.primary.outputs.conclusion == 'success'
+        run: echo 'Primary Plans 03/04 release gate succeeded; fallback is not required.'
+
+      - name: Refresh failed branch and collect logs
+        if: steps.primary.outputs.conclusion != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch origin testing-codex
+          git reset --hard origin/testing-codex
+          gh run view "${{ steps.primary.outputs.run_id }}" --repo "$GITHUB_REPOSITORY" --log-failed \
+            > /tmp/primary-failure.log 2>&1 || true
+
+      - uses: actions/setup-python@v5
+        if: steps.primary.outputs.conclusion != 'success'
+        with:
+          python-version: '3.12'
+
+      - uses: astral-sh/setup-uv@v10.0.1
+        if: steps.primary.outputs.conclusion != 'success'
+        with:
+          version: '0.12.4'
+
+      - uses: pnpm/action-setup@v4
+        if: steps.primary.outputs.conclusion != 'success'
+        with:
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        if: steps.primary.outputs.conclusion != 'success'
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install fallback tooling and project dependencies
+        if: steps.primary.outputs.conclusion != 'success'
+        run: |
+          corepack enable
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gnupg libmagic1 libmagic-dev
+          python -m pip install --upgrade pip
+          python -m pip install 'aider-chat>=0.86,<1'
+          uv sync --all-packages --dev --frozen
+          pnpm install --frozen-lockfile
+
+      - name: Generate runtime-only keys
+        if: steps.primary.outputs.conclusion != 'success'
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode('ascii')
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f'::add-mask::{value}')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              output.write(f'DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n')
+              output.write(f'DARKNETRA_FIELD_KEY_V1_B64={field}\n')
+              output.write('DARKNETRA_FIELD_KEYRING_B64_JSON=' + json.dumps({'v1': field}, separators=(',', ':')) + '\n')
+              output.write('DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n')
+              output.write(f'DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n')
+          PY
+          uv run alembic -c apps/api/alembic.ini upgrade head
+
+      - name: Run guarded Aider completion pass
+        if: steps.primary.outputs.conclusion != 'success'
+        run: |
+          cat > /tmp/aider-message.md <<'EOF'
+          Complete all remaining requirements in:
+
+          - docs/superpowers/plans/2026-08-17-03-evidence-vault-ingestion.md
+          - docs/superpowers/plans/2026-08-17-04-extraction-indicators.md
+
+          First read both plans and the failed primary workflow log at /tmp/primary-failure.log. Inspect the existing implementation and verification records; preserve already-correct work. Work test-first: add a failing synthetic test for each real gap, observe the failure, then implement the smallest production fix. Do not delete or weaken tests. Run the full backend and frontend suites repeatedly until green.
+
+          Security constraints are mandatory: no live darknet access, credential or encryption bypass, seller contact, purchase workflow, untrusted active HTML execution, archive traversal, browser object-store access, embedded secrets, real criminal identifiers, or invented metrics. PostgreSQL remains authoritative, original evidence remains immutable, all sensitive source metadata stays encrypted, all entities require exact source spans, formal validators outrank inference, optional local models fail explicitly/offline, and indicator presence is not proof of identity, ownership or guilt.
+
+          Finish the investigator Evidence and Entities UI, case-scoped APIs, multilingual evaluation harness, architecture docs, verification docs, .env.example, Docker configuration and README installation/usage/status sections. Do not claim success until Alembic reversibility, Ruff, complete pytest, frontend lint/typecheck/tests/build, evaluation, Compose validation, Docker builds and browser tests pass.
+          EOF
+
+          aider \
+            --model openai/gpt-4.1 \
+            --weak-model openai/gpt-4.1-mini \
+            --yes-always \
+            --no-auto-commits \
+            --map-tokens 8192 \
+            --read docs/superpowers/plans/2026-08-17-03-evidence-vault-ingestion.md \
+            --read docs/superpowers/plans/2026-08-17-04-extraction-indicators.md \
+            --read /tmp/primary-failure.log \
+            --message-file /tmp/aider-message.md
+
+      - name: Run fallback release gate
+        if: steps.primary.outputs.conclusion != 'success'
+        run: |
+          set -euo pipefail
+          if git diff --name-only | grep -qE '(^|/)pyproject.toml$'; then uv lock; fi
+          if git diff --name-only | grep -q 'package.json$'; then pnpm install --lockfile-only; fi
+          uv sync --all-packages --dev --frozen
+          pnpm install --frozen-lockfile
+          uv run alembic -c apps/api/alembic.ini downgrade base
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run ruff check .
+          uv run pytest -q
+          pnpm --filter @darknetra/web lint
+          pnpm --filter @darknetra/web typecheck
+          pnpm --filter @darknetra/web test
+          pnpm --filter @darknetra/web build
+          uv run python evaluation/extraction/score.py --dataset datasets/synthetic/extraction --output docs/verification/extraction-evaluation
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml build api worker web
+
+      - name: Commit fallback result and retrigger canonical final gate
+        if: steps.primary.outputs.conclusion != 'success'
+        run: |
+          mkdir -p docs/verification
+          cat > docs/verification/plans-03-04-aider-fallback.md <<EOF
+          # Plans 03 and 04 Aider fallback
+
+          - Failed primary run: \`${{ steps.primary.outputs.run_id }}\`
+          - Fallback verification: **success**
+          - Observed: \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          EOF
+          echo '# aider-fallback-retrigger' >> .github/workflows/complete-plan03-plan04.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'feat: complete Plans 03 and 04 through guarded fallback'
+          git pull --rebase origin testing-codex
+          git push origin HEAD:testing-codex
