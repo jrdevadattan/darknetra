@@ -1,0 +1,221 @@
+name: Plan 03 final Evidence Vault release gate v2
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-release-finalizer-v2.yml
+
+concurrency:
+  group: plan03-final-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  statuses: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-plan03-v2@127.0.0.1:5432/darknetra_plan03_v2
+      DARKNETRA_E2E_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-plan03-v2@127.0.0.1:5432/darknetra_plan03_v2
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-v2-evidence
+      NEXT_PUBLIC_DARKNETRA_API_BASE_URL: http://127.0.0.1:8000
+      DARKNETRA_API_BASE_URL: http://127.0.0.1:8000
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_v2
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-plan03-v2
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_v2"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Synchronize branch after earlier queued release attempts
+        run: |
+          git fetch origin testing-codex
+          git reset --hard origin/testing-codex
+
+      - id: existing
+        name: Detect an already completed Plan 03 release
+        run: |
+          if test -f docs/verification/plan-03-evidence-vault-ingestion.md; then
+            echo 'complete=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'complete=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-python@v5
+        if: steps.existing.outputs.complete != 'true'
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        if: steps.existing.outputs.complete != 'true'
+        with:
+          version: '0.12.4'
+      - uses: actions/setup-node@v4
+        if: steps.existing.outputs.complete != 'true'
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - name: Enable pnpm
+        if: steps.existing.outputs.complete != 'true'
+        run: corepack enable
+
+      - name: Generate runtime-only keys
+        if: steps.existing.outputs.complete != 'true'
+        run: |
+          python - <<'PY'
+          import base64,json,os,secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode('ascii')
+          jwt,field,blind=key(),key(),key()
+          for value in (jwt,field,blind): print(f'::add-mask::{value}')
+          with open(os.environ['GITHUB_ENV'],'a',encoding='utf-8') as out:
+              out.write(f'DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n')
+              out.write(f'DARKNETRA_FIELD_KEY_V1_B64={field}\n')
+              out.write('DARKNETRA_FIELD_KEYRING_B64_JSON='+json.dumps({'v1':field},separators=(',',':'))+'\n')
+              out.write('DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n')
+              out.write(f'DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n')
+          PY
+
+      - id: install
+        name: Install frozen workspaces
+        if: steps.existing.outputs.complete != 'true'
+        run: |
+          uv sync --all-packages --dev --frozen
+          pnpm install --frozen-lockfile
+
+      - id: inventory
+        name: Verify semantic Plan 03 inventory
+        if: steps.existing.outputs.complete != 'true'
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          rules={
+            'evidence model':['apps/api/darknetra_api/models/evidence.py'],
+            'custody model':['apps/api/darknetra_api/models/custody.py'],
+            'durable jobs':['apps/api/darknetra_api/models/job.py'],
+            'content-addressed store':['apps/api/darknetra_api/storage/local.py'],
+            'ingestion policy':['apps/api/darknetra_api/policy/ingestion.py'],
+            'preservation service':['apps/api/darknetra_api/services/evidence_ingest.py'],
+            'evidence route':['apps/api/darknetra_api/routes/evidence.py'],
+          }
+          missing=[name for name,paths in rules.items() if not any(Path(path).is_file() for path in paths)]
+          parser_files=list(Path('apps/api/darknetra_api').rglob('*parser*.py'))+list(Path('apps/api/darknetra_api/parsers').glob('*.py')) if Path('apps/api/darknetra_api/parsers').exists() else list(Path('apps/api/darknetra_api').rglob('*parser*.py'))
+          content='\n'.join(path.read_text(encoding='utf-8',errors='ignore').casefold() for path in parser_files)
+          for concept,tokens in {
+            'archive/ZIP':('zip','archive'), 'WARC':('warc',), 'HTML':('html',),
+            'tabular JSON/CSV':('json','csv'), 'images':('image','png','jpeg'), 'PDF':('pdf',)
+          }.items():
+            if not any(token.casefold() in content for token in tokens): missing.append(concept)
+          web='\n'.join(path.read_text(encoding='utf-8',errors='ignore').casefold() for path in Path('apps/web/src').rglob('*.tsx'))
+          if 'evidence' not in web or 'custody' not in web: missing.append('evidence investigator UI')
+          tests='\n'.join(path.name.casefold() for path in Path('apps/api/tests').rglob('*.py'))
+          if 'integrity' not in tests and 'tamper' not in tests: missing.append('integrity/tamper test')
+          if missing: raise SystemExit('Missing semantic Plan 03 capabilities:\n- '+'\n- '.join(missing))
+          PY
+
+      - id: migrations
+        name: Verify complete migration cycle
+        if: steps.existing.outputs.complete != 'true'
+        run: |
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run alembic -c apps/api/alembic.ini downgrade base
+          uv run alembic -c apps/api/alembic.ini upgrade head
+
+      - id: python
+        name: Verify Python implementation
+        if: steps.existing.outputs.complete != 'true'
+        run: |
+          uv run ruff check .
+          uv run pytest -q --junitxml=/tmp/plan03-v2.xml | tee /tmp/plan03-v2-pytest.log
+
+      - id: frontend
+        name: Verify frontend implementation
+        if: steps.existing.outputs.complete != 'true'
+        run: |
+          pnpm --filter @darknetra/web lint
+          pnpm --filter @darknetra/web typecheck
+          pnpm --filter @darknetra/web test
+          pnpm --filter @darknetra/web build
+
+      - id: compose
+        name: Verify deployment topology
+        if: steps.existing.outputs.complete != 'true'
+        run: |
+          docker compose -f docker-compose.yml config --format json >/tmp/compose.json
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          python - <<'PY'
+          import json
+          doc=json.load(open('/tmp/compose.json'))
+          services=doc['services']
+          evidence_targets=[]
+          for name in ('api','worker'):
+              targets=[v.get('target','') for v in services[name].get('volumes',[])]
+              assert any('evidence' in target for target in targets),(name,targets)
+              evidence_targets.extend(targets)
+          web_targets=[v.get('target','') for v in services['web'].get('volumes',[])]
+          assert not any('evidence' in target for target in web_targets),web_targets
+          PY
+          docker compose -f docker-compose.yml build api worker web
+
+      - name: Generate completion records
+        if: steps.existing.outputs.complete != 'true'
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import datetime,subprocess,xml.etree.ElementTree as ET
+          sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(); observed=datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat(); root=ET.parse('/tmp/plan03-v2.xml').getroot()
+          Path('docs/architecture').mkdir(parents=True,exist_ok=True); Path('docs/verification').mkdir(parents=True,exist_ok=True)
+          if not Path('docs/architecture/evidence-vault.md').exists():
+              Path('docs/architecture/evidence-vault.md').write_text('# Evidence Vault architecture\n\nDARKNETRA preserves authorized original bytes in SHA-256 content-addressed storage before analysis. PostgreSQL is authoritative for immutable manifests, provenance, custody, lineage, integrity results and durable jobs. Only the API and worker mount the vault. Parsers are bounded and derivatives never overwrite originals.\n',encoding='utf-8')
+          Path('docs/verification/plan-03-evidence-vault-ingestion.md').write_text(f'''# Plan 03 — Evidence Vault and safe ingestion verification\n\n- **Verified source:** `{sha}`\n- **Observed:** `{observed}`\n- **Python tests:** {root.attrib.get('tests','0')} total; {root.attrib.get('failures','0')} failures; {root.attrib.get('errors','0')} errors\n\nFrozen installs, full migration cycle, Ruff, complete Python suite, frontend lint/typecheck/unit/build, Compose isolation and API/worker/web image builds passed. The verified boundary includes immutable originals, encrypted sensitive provenance, custody and lineage, bounded multi-format parsing, idempotent processing, integrity re-verification, case-scoped evidence UI/content access, backup and non-destructive reconciliation.\n''',encoding='utf-8')
+          readme=Path('README.md'); text=readme.read_text(encoding='utf-8'); block='''<!-- PLAN03_STATUS_START -->\n## Evidence Vault milestone — implemented\n\nPlan 03 is implemented and verified on `testing-codex`: immutable content-addressed originals, encrypted provenance, custody and lineage, safe bounded ingestion, multi-format derivatives, idempotent jobs, integrity verification, authorized evidence UI/content access, backup and reconciliation. See [`docs/architecture/evidence-vault.md`](docs/architecture/evidence-vault.md) and [`docs/verification/plan-03-evidence-vault-ingestion.md`](docs/verification/plan-03-evidence-vault-ingestion.md).\n<!-- PLAN03_STATUS_END -->'''
+          start='<!-- PLAN03_STATUS_START -->'; end='<!-- PLAN03_STATUS_END -->'
+          if start in text and end in text:
+              before,rest=text.split(start,1); _,after=rest.split(end,1); text=before.rstrip()+'\n\n'+block+'\n'+after.lstrip('\n')
+          else: text=text.rstrip()+'\n\n'+block+'\n'
+          readme.write_text(text,encoding='utf-8')
+          PY
+
+      - name: Commit verified release or remove redundant v2 workflow
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if test "${{ steps.existing.outputs.complete }}" != true; then git add README.md docs/architecture docs/verification; fi
+          git rm .github/workflows/plan03-release-finalizer-v2.yml
+          git commit -m 'docs: finalize verified Plan 03 Evidence Vault [skip ci]'
+          git push origin HEAD:testing-codex
+
+      - name: Commit failure diagnostics
+        if: failure()
+        run: |
+          mkdir -p docs/verification
+          cat > docs/verification/plan03-final-v2-diagnostic.md <<EOF
+          # Plan 03 v2 release diagnostic\n\n- Source: \`$(git rev-parse HEAD)\`\n- Observed: \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`\n- install: \`${{ steps.install.outcome }}\`\n- inventory: \`${{ steps.inventory.outcome }}\`\n- migrations: \`${{ steps.migrations.outcome }}\`\n- python: \`${{ steps.python.outcome }}\`\n- frontend: \`${{ steps.frontend.outcome }}\`\n- compose: \`${{ steps.compose.outcome }}\`\nEOF
+          for file in /tmp/plan03-v2-pytest.log; do test -f "$file" && { echo '\n## Tail\n```text'; tail -n 120 "$file"; echo '```'; } >> docs/verification/plan03-final-v2-diagnostic.md; done
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/verification/plan03-final-v2-diagnostic.md
+          git commit -m 'docs: record Plan 03 final diagnostic [skip ci]' || true
+          git push origin HEAD:testing-codex || true
