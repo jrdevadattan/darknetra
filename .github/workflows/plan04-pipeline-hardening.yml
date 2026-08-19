@@ -1,0 +1,87 @@
+name: Harden queued Plan 03 and Plan 04 workflows
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan04-pipeline-hardening.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - name: Apply deterministic workflow corrections
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          workflow_dir=Path('.github/workflows')
+          for name in ('plan03-release-finalizer.yml','plan03-release-finalizer-v2.yml','plan04-stage-d-entities-api-ui.yml','plan04-stage-e-evaluation-release.yml'):
+              path=workflow_dir/name
+              if not path.exists(): continue
+              text=path.read_text(encoding='utf-8')
+              text=text.replace('node-version-file: .node-version','node-version: 22')
+              path.write_text(text,encoding='utf-8')
+
+          path=workflow_dir/'plan04-stage-a-schema-language.yml'
+          if path.exists():
+              text=path.read_text(encoding='utf-8')
+              text=text.replace('from datetime import UTC, datetime\n','')
+              text=text.replace('from sqlalchemy.orm import Mapped, mapped_column, relationship\n','from sqlalchemy.orm import Mapped, mapped_column\n')
+              path.write_text(text,encoding='utf-8')
+
+          path=workflow_dir/'plan04-stage-b-deterministic-validators.yml'
+          if path.exists():
+              text=path.read_text(encoding='utf-8')
+              text=text.replace('from pathlib import Path\n\n          import pytest\n','import pytest\n',1)
+              text=text.replace("_CN_BLOCK_DECODED=(0,1,2,3,4,5,5,6,7,7,8)","_CN_BLOCK_DECODED={2:1,3:2,5:3,6:4,7:5,9:6,10:7,11:8}")
+              text=text.replace("size=_CN_BLOCK_DECODED[len(block)] if len(block)<len(_CN_BLOCK_DECODED) else 0","size=_CN_BLOCK_DECODED.get(len(block),0)")
+              path.write_text(text,encoding='utf-8')
+
+          path=workflow_dir/'plan04-stage-c-extraction-pipeline.yml'
+          if path.exists():
+              text=path.read_text(encoding='utf-8')
+              text=text.replace("                  seen=set()\n",'')
+              text=text.replace("; seen.add(term)","")
+              path.write_text(text,encoding='utf-8')
+
+          path=workflow_dir/'plan04-stage-d-entities-api-ui.yml'
+          if path.exists():
+              text=path.read_text(encoding='utf-8')
+              text=text.replace('from typing import Annotated\n','from typing import Annotated\n          import inspect\n',1)
+              old="""          async def _authorize(session: AsyncSession,user: User,case_id: UUID,permission: Permission):
+              try: return await authorize_case(user,case_id,permission,session)
+              except (CaseNotFound,AuthorizationDenied) as exc: _not_found(exc)
+"""
+              new="""          async def _authorize(session: AsyncSession,user: User,case_id: UUID,permission: Permission):
+              try:
+                  parameters=tuple(inspect.signature(authorize_case).parameters)
+                  if parameters and parameters[0] in {'session','db'}:
+                      return await authorize_case(session,user=user,case_id=case_id,permission=permission)
+                  return await authorize_case(user,case_id,permission,session)
+              except (CaseNotFound,AuthorizationDenied) as exc: _not_found(exc)
+"""
+              text=text.replace(old,new)
+              path.write_text(text,encoding='utf-8')
+
+          path=workflow_dir/'plan04-stage-e-evaluation-release.yml'
+          if path.exists():
+              text=path.read_text(encoding='utf-8')
+              text=text.replace('from collections import defaultdict\n','')
+              path.write_text(text,encoding='utf-8')
+          PY
+      - name: Commit hardened workflows
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows
+          git rm .github/workflows/plan04-pipeline-hardening.yml
+          git commit -m 'ci: harden queued Plan 03 and Plan 04 release gates'
+          git push origin HEAD:testing-codex
