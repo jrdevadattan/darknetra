@@ -1,0 +1,99 @@
+name: Clean Plans 03 and 04 orchestration after certification
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/cleanup-plan34-after-cert.yml
+
+concurrency:
+  group: darknetra-plan34-post-cert-cleanup
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Wait for independent completion certificate
+        run: |
+          set -euo pipefail
+          for ATTEMPT in $(seq 1 330); do
+            git fetch origin testing-codex
+            git reset --hard origin/testing-codex
+            if test -f docs/verification/PLANS_03_04_COMPLETE.md \
+              && grep -q 'Outcome:.*COMPLETE' docs/verification/PLANS_03_04_COMPLETE.md \
+              && grep -q '<!-- PLAN34_VERIFIED_START -->' README.md; then
+              exit 0
+            fi
+            sleep 60
+          done
+          echo 'Timed out waiting for independent completion certificate.' >&2
+          exit 1
+
+      - name: Remove temporary agents, workflows and stale failure diagnostics
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import shutil
+
+          Path('scripts/plan_completion_agent.py').unlink(missing_ok=True)
+          snapshot = Path('.snapshot')
+          if snapshot.exists():
+              shutil.rmtree(snapshot)
+
+          keep_workflows = {'ci.yml', 'readme-screenshots.yml'}
+          workflows = Path('.github/workflows')
+          for path in workflows.glob('*.yml'):
+              if path.name not in keep_workflows:
+                  path.unlink()
+
+          stale = (
+              'docs/verification/plans-03-04-current-failure.md',
+              'docs/verification/plans-03-04-live-status.md',
+              'docs/verification/plans-03-04-live-status.json',
+              'docs/verification/plans-03-04-failed-run.log',
+              'docs/verification/plans-03-04-supervisor-last-failure.log',
+              'docs/verification/plans-03-04-reconcile-diagnostic.md',
+              'docs/verification/plans-03-04-auto-repair.md',
+              'docs/verification/plans-03-04-auto-repair-count.txt',
+              'docs/verification/plan03-task3-reconcile-diagnostic.md',
+              'docs/verification/current-tree-export-run-id.txt',
+              'docs/verification/export-artifact-run-id.txt',
+          )
+          for relative in stale:
+              Path(relative).unlink(missing_ok=True)
+          PY
+
+      - name: Validate certified branch shape
+        run: |
+          test -f docs/verification/PLANS_03_04_COMPLETE.md
+          test -f docs/verification/plan-03-evidence-vault-ingestion.md
+          test -f docs/verification/plan-04-extraction-indicators.md
+          test -f docs/verification/plans-03-04-release-gate.md
+          grep -q '<!-- PLAN34_VERIFIED_START -->' README.md
+          test ! -f scripts/plan_completion_agent.py
+          WORKFLOW_COUNT="$(find .github/workflows -maxdepth 1 -type f -name '*.yml' | wc -l)"
+          test "$WORKFLOW_COUNT" -le 2
+          git diff --check
+
+      - name: Commit clean certified branch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            echo 'No cleanup changes required.'
+          else
+            git commit -m 'chore: clean temporary Plans 03 and 04 orchestration [skip ci]'
+            git pull --rebase origin testing-codex
+            git push origin HEAD:testing-codex
+          fi
