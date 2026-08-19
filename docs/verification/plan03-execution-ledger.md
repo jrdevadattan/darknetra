@@ -28,7 +28,7 @@
 
 - Task 1: complete — durable PostgreSQL job boundary, Redis/Celery delivery, migration, and worker smoke verified at `5bd0f473fee8a7d2279025a18f43eb306e265e42`.
 - Task 2: complete — evidence provenance, encrypted sensitive metadata, immutable expected digests, derivation lineage, append-only custody, safe read schema, and migration cycle verified by GREEN run `32142762384`; record: `docs/verification/plan03-task2-provenance.md`.
-- Task 3: pending.
+- Task 3: complete — content-addressed storage, atomic verified promotion, deduplication and isolated shared Docker volume verified.
 - Task 4: pending.
 - Task 5: pending.
 - Task 6: pending.

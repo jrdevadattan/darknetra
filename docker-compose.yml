@@ -37,7 +37,7 @@ services:
       DARKNETRA_BUILD_VERSION: docker-dev
       DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:${DARKNETRA_POSTGRES_PASSWORD:-darknetra-dev-only}@postgres:5432/darknetra
       DARKNETRA_REDIS_URL: redis://redis:6379/0
-      DARKNETRA_EVIDENCE_STORE_PATH: /var/lib/darknetra/evidence-store
+      DARKNETRA_EVIDENCE_STORE_PATH: /var/lib/darknetra/evidence
       DARKNETRA_WEB_ORIGIN: ${DARKNETRA_WEB_ORIGIN:-http://localhost:3000}
       DARKNETRA_JWT_SIGNING_KEY_B64: ${DARKNETRA_JWT_SIGNING_KEY_B64:-}
       DARKNETRA_FIELD_KEY_V1_B64: ${DARKNETRA_FIELD_KEY_V1_B64:-}
@@ -45,7 +45,7 @@ services:
       DARKNETRA_FIELD_BLIND_INDEX_KEY_B64: ${DARKNETRA_FIELD_BLIND_INDEX_KEY_B64:-}
       DARKNETRA_FIELD_ACTIVE_KEY_VERSION: ${DARKNETRA_FIELD_ACTIVE_KEY_VERSION:-v1}
     volumes:
-      - evidence-store:/var/lib/darknetra/evidence-store
+      - evidence_store:/var/lib/darknetra/evidence
     depends_on:
       postgres:
         condition: service_healthy
@@ -82,7 +82,7 @@ services:
       - --hostname=ingest@%h
     environment: *api-environment
     volumes:
-      - evidence-store:/var/lib/darknetra/evidence-store
+      - evidence_store:/var/lib/darknetra/evidence
     depends_on:
       postgres:
         condition: service_healthy
@@ -120,4 +120,4 @@ networks:
 
 volumes:
   postgres-data:
-  evidence-store:
+  evidence_store:
