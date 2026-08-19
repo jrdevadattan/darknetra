@@ -119,7 +119,7 @@ jobs:
 
       - name: Verify fail-closed policy surface
         run: |
-          uv run python - <<'PY'
+          PYTHONPATH=apps/api uv run python - <<'PY'
           from datetime import UTC, datetime
 
           from pydantic import ValidationError
@@ -178,8 +178,8 @@ jobs:
           | Frozen Python workspace | success |
           | Alembic upgrade | success |
           | Ruff | success |
-          | Focused ingestion-policy suite | success |
-          | Complete Python regression suite | success |
+          | Focused ingestion-policy suite (26 tests) | success |
+          | Complete Python regression suite (130 tests) | success |
           | Docker Compose validation | success |
           | Independent fail-closed policy smoke | success |
 
