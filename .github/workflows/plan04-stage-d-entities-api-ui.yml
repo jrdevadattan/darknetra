@@ -1,0 +1,448 @@
+name: Plan 04 Stage D entities API and investigator UI
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - docs/verification/plan04-stage-c-extraction-pipeline.md
+
+permissions:
+  contents: write
+  statuses: write
+
+jobs:
+  red-green:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-plan04-d@127.0.0.1:5432/darknetra_plan04_d
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan04-d
+      NEXT_PUBLIC_DARKNETRA_API_BASE_URL: http://127.0.0.1:8000
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan04_d
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-plan04-d
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan04_d"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Require Stage C handoff
+        run: test -f docs/verification/plan04-stage-c-extraction-pipeline.md
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode('ascii')
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f'::add-mask::{value}')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as out:
+              out.write(f'DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n')
+              out.write(f'DARKNETRA_FIELD_KEY_V1_B64={field}\n')
+              out.write('DARKNETRA_FIELD_KEYRING_B64_JSON=' + json.dumps({'v1': field}, separators=(',', ':')) + '\n')
+              out.write('DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n')
+              out.write(f'DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n')
+          PY
+      - name: Install and migrate
+        run: |
+          uv sync --all-packages --dev --frozen
+          pnpm install --frozen-lockfile
+          uv run alembic -c apps/api/alembic.ini upgrade head
+
+      - name: Write Tasks 10-11 contracts first
+        run: |
+          cat > apps/api/tests/integration/test_plan04_entities_api.py <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import importlib
+          import importlib.util
+          import io
+          from datetime import UTC,datetime
+          from pathlib import Path
+          from uuid import uuid4
+
+          import httpx
+          import pytest
+          import sqlalchemy as sa
+
+          from darknetra_api.db.session import async_session_factory
+          from darknetra_api.main import app
+          from darknetra_api.models.audit import AuditEvent
+          from darknetra_api.models.auth_session import AuthSession
+          from darknetra_api.models.case import Case
+          from darknetra_api.models.case_membership import CaseMembership,CaseMembershipRole
+          from darknetra_api.models.custody import CustodyEvent
+          from darknetra_api.models.enums import CaseSensitivity
+          from darknetra_api.models.entity import CanonicalEntity,EntityObservation,EntityEntityLink,EntityType,ExtractionRun,ValidationStatus
+          from darknetra_api.models.evidence import EvidenceArtifact,EvidenceDerivation,EvidenceSourceClass,EvidenceState
+          from darknetra_api.models.job import Job
+          from darknetra_api.models.taxonomy import TaxonomyTerm
+          from darknetra_api.models.user import User
+          from darknetra_api.services.evidence import preserve_evidence_manifest
+          from darknetra_api.storage.local import LocalObjectStore
+
+
+          def route_module():
+              spec=importlib.util.find_spec('darknetra_api.routes.entities')
+              assert spec is not None, 'case entities API is not implemented'
+              return importlib.import_module('darknetra_api.routes.entities')
+
+
+          async def clean_db():
+              async with async_session_factory() as session:
+                  for model in (EntityEntityLink,EntityObservation,ExtractionRun,CanonicalEntity,TaxonomyTerm,CustodyEvent,EvidenceDerivation,EvidenceArtifact,Job,CaseMembershipRole,CaseMembership,AuditEvent,Case,AuthSession,User):
+                      await session.execute(sa.delete(model))
+                  await session.commit()
+
+
+          @pytest.fixture(autouse=True)
+          async def clean():
+              app.dependency_overrides.clear(); await clean_db(); yield; app.dependency_overrides.clear(); await clean_db()
+
+
+          async def seed(store: LocalObjectStore):
+              async with async_session_factory() as session:
+                  suffix=uuid4().hex[:10]
+                  owner=User(username=f'entities-{suffix}',username_normalized=f'entities-{suffix}',display_name='Entities Owner',password_hash='unused',global_roles=[],is_active=True,must_change_password=False)
+                  outsider=User(username=f'outside-{suffix}',username_normalized=f'outside-{suffix}',display_name='Outside User',password_hash='unused',global_roles=[],is_active=True,must_change_password=False)
+                  session.add_all([owner,outsider]); await session.flush()
+                  case=Case(case_code=f'ENT-{suffix.upper()}',title='Synthetic entities case',sensitivity=CaseSensitivity.RESTRICTED,owner_user_id=owner.id,source_authority_summary='Authorized synthetic fixture')
+                  other=Case(case_code=f'ENO-{suffix.upper()}',title='Other case',sensitivity=CaseSensitivity.RESTRICTED,owner_user_id=outsider.id,source_authority_summary='Other fixture')
+                  session.add_all([case,other]); await session.flush()
+                  text='Contact analyst_alpha@example.invalid. Wallet 1BoatSLRHtKNngkdXEeobR76b53LETtpyT in Delhi.'
+                  stored=store.put_verified(io.BytesIO(text.encode()))
+                  derivative=EvidenceArtifact(case_id=case.id,source_class=EvidenceSourceClass.SYNTHETIC,source_type='derivative.normalized_text',acquisition_method='derived_processing',collector_user_id=owner.id,captured_at=datetime.now(UTC),original_timezone='UTC',state=EvidenceState.STAGING)
+                  preserve_evidence_manifest(derivative,media_type='text/plain',size_bytes=stored.size_bytes,sha256=stored.sha256,sha512=None,object_key=stored.object_key,ingested_at=datetime.now(UTC)); derivative.state=EvidenceState.READY
+                  session.add(derivative); await session.flush()
+                  run=ExtractionRun(case_id=case.id,derivative_id=derivative.id,bundle_version='bundle-v1',status='SUCCEEDED',warnings_json=[],created_at=datetime.now(UTC),finished_at=datetime.now(UTC)); session.add(run); await session.flush()
+                  canonical=CanonicalEntity(case_id=case.id,entity_type=EntityType.BTC_ADDRESS,canonical_value='1BoatSLRHtKNngkdXEeobR76b53LETtpyT',canonical_value_hash=hashlib.sha256(b'1boatslrh...').hexdigest()); session.add(canonical); await session.flush()
+                  email_start=text.index('analyst_alpha'); wallet_start=text.index('1Boat')
+                  email=EntityObservation(case_id=case.id,evidence_id=derivative.id,derivative_id=derivative.id,extraction_run_id=run.id,entity_type=EntityType.EMAIL,raw_value='analyst_alpha@example.invalid',normalized_value='analyst_alpha@example.invalid',canonical_value=None,start_offset=email_start,end_offset=email_start+len('analyst_alpha@example.invalid'),extractor_name='deterministic',extractor_version='1',bundle_version='bundle-v1',confidence=.99,validation_status=ValidationStatus.VALIDATED,language='en',script='Latn',metadata_json={},observation_fingerprint='a'*64)
+                  wallet=EntityObservation(case_id=case.id,evidence_id=derivative.id,derivative_id=derivative.id,extraction_run_id=run.id,canonical_entity_id=canonical.id,entity_type=EntityType.BTC_ADDRESS,raw_value='1BoatSLRHtKNngkdXEeobR76b53LETtpyT',normalized_value='1BoatSLRHtKNngkdXEeobR76b53LETtpyT',canonical_value='1BoatSLRHtKNngkdXEeobR76b53LETtpyT',start_offset=wallet_start,end_offset=wallet_start+34,extractor_name='protocol',extractor_version='1',bundle_version='bundle-v1',confidence=1,validation_status=ValidationStatus.VALIDATED,language='und',script='Latn',metadata_json={'network':'mainnet'},observation_fingerprint='b'*64)
+                  session.add_all([email,wallet]); await session.commit()
+                  for item in (owner,outsider,case,other,derivative,email,wallet): await session.refresh(item)
+                  return owner,outsider,case,other,derivative,email,wallet,text
+
+
+          def override_actor(route,user,store):
+              async def actor(): return user
+              app.dependency_overrides[route.ENTITY_ACTOR_DEPENDENCY]=actor
+              app.dependency_overrides[route.ENTITY_OBJECT_STORE_DEPENDENCY]=lambda:store
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_list_filters_paginates_redacts_and_detail_returns_bounded_plain_context(tmp_path: Path) -> None:
+              route=route_module(); store=LocalObjectStore(tmp_path/'vault'); owner,_,case,_,_,email,wallet,text=await seed(store); override_actor(route,owner,store)
+              transport=httpx.ASGITransport(app=app)
+              async with httpx.AsyncClient(transport=transport,base_url='http://api.test') as client:
+                  listing=await client.get(f'/api/v1/cases/{case.id}/entities',params={'type':'BTC_ADDRESS','limit':1,'offset':0})
+                  detail=await client.get(f'/api/v1/cases/{case.id}/entities/{wallet.id}')
+              assert listing.status_code==200 and len(listing.json()['items'])==1
+              item=listing.json()['items'][0]
+              assert item['entity_type']=='BTC_ADDRESS' and item['display_value']!='1BoatSLRHtKNngkdXEeobR76b53LETtpyT'
+              assert 'raw_value' not in item and 'metadata_json' not in item
+              assert detail.status_code==200
+              body=detail.json(); assert 'Wallet' in body['context_excerpt']; assert '<' not in body['context_excerpt']; assert len(body['context_excerpt'])<=401
+
+
+          @pytest.mark.integration
+          @pytest.mark.asyncio
+          async def test_cross_case_and_unknown_observations_share_non_enumerating_404(tmp_path: Path) -> None:
+              route=route_module(); store=LocalObjectStore(tmp_path/'vault'); owner,outsider,case,other,_,email,_,_=await seed(store); override_actor(route,outsider,store)
+              transport=httpx.ASGITransport(app=app,raise_app_exceptions=False)
+              async with httpx.AsyncClient(transport=transport,base_url='http://api.test') as client:
+                  inaccessible=await client.get(f'/api/v1/cases/{case.id}/entities/{email.id}')
+                  unknown=await client.get(f'/api/v1/cases/{other.id}/entities/{uuid4()}')
+              assert inaccessible.status_code==unknown.status_code==404
+              assert inaccessible.json()==unknown.json()
+          PY
+
+          mkdir -p apps/web/src/features/entities
+          cat > apps/web/src/features/entities/entities.test.tsx <<'TS'
+          import { describe, expect, it } from 'vitest'
+          import { entityTone, validationLabel } from './presenters'
+          import { buildEntityQuery } from './api'
+
+          describe('entity investigator presentation', () => {
+            it('visibly distinguishes protocol validation from model confidence', () => {
+              expect(validationLabel('VALIDATED')).toMatch(/protocol|validated/i)
+              expect(validationLabel('MODEL_INFERRED')).toMatch(/model/i)
+              expect(entityTone('VALIDATED')).not.toBe(entityTone('MODEL_INFERRED'))
+            })
+            it('builds stable URL query state for filters and pagination', () => {
+              expect(buildEntityQuery({ type: 'BTC_ADDRESS', validationStatus: 'VALIDATED', limit: 25, offset: 50 }))
+                .toBe('type=BTC_ADDRESS&validation_status=VALIDATED&limit=25&offset=50')
+            })
+          })
+          TS
+
+      - name: Prove RED
+        run: |
+          set +e
+          uv run pytest -q apps/api/tests/integration/test_plan04_entities_api.py >/tmp/plan04-d-api-red.log 2>&1
+          api_code=$?
+          pnpm --filter @darknetra/web test -- src/features/entities/entities.test.tsx >/tmp/plan04-d-web-red.log 2>&1
+          web_code=$?
+          set -e
+          test "$api_code" -ne 0
+          test "$web_code" -ne 0
+          grep -Eqi 'not implemented|ModuleNotFoundError' /tmp/plan04-d-api-red.log
+
+      - name: Implement entities API and exact context service
+        run: |
+          cat > apps/api/darknetra_api/routes/entities.py <<'PY'
+          from __future__ import annotations
+
+          from typing import Annotated
+          from uuid import UUID,uuid4
+
+          import sqlalchemy as sa
+          from fastapi import APIRouter,Depends,HTTPException,Query,Request,status
+          from sqlalchemy.ext.asyncio import AsyncSession
+
+          from darknetra_api.authz.permissions import Permission
+          from darknetra_api.authz.policy import AuthorizationDenied,CaseNotFound,authorize_case
+          from darknetra_api.config import get_settings
+          from darknetra_api.dependencies.auth import CurrentUser,DbSession
+          from darknetra_api.models.entity import CanonicalEntity,EntityEntityLink,EntityObservation,EntityType,ValidationStatus
+          from darknetra_api.models.user import User
+          from darknetra_api.schemas.entities import CanonicalMergeRequest,EntityObservationDetail,EntityObservationList,EntityObservationRead
+          from darknetra_api.services.audit import append_audit_event
+          from darknetra_api.storage.local import LocalObjectStore
+
+          router=APIRouter(prefix='/cases/{case_id}/entities',tags=['entities'])
+
+
+          async def get_entity_actor(user: CurrentUser) -> User: return user
+          def get_entity_object_store() -> LocalObjectStore: return LocalObjectStore(get_settings().evidence_store_path)
+          ENTITY_ACTOR_DEPENDENCY=get_entity_actor
+          ENTITY_OBJECT_STORE_DEPENDENCY=get_entity_object_store
+
+
+          def _not_found(exc: Exception | None=None): raise HTTPException(status_code=404,detail='resource not found') from exc
+
+
+          async def _authorize(session: AsyncSession,user: User,case_id: UUID,permission: Permission):
+              try: return await authorize_case(user,case_id,permission,session)
+              except (CaseNotFound,AuthorizationDenied) as exc: _not_found(exc)
+
+
+          def _redact(item: EntityObservation) -> str:
+              value=item.raw_value
+              if item.entity_type is EntityType.EMAIL and '@' in value:
+                  local,domain=value.split('@',1); return (local[:1]+'***@'+domain)
+              if item.entity_type is EntityType.PHONE: return '***'+value[-4:]
+              if item.entity_type is EntityType.CONTACT_HANDLE: return value[:2]+'***'
+              if item.entity_type in {EntityType.BTC_ADDRESS,EntityType.ETH_ADDRESS,EntityType.XMR_ADDRESS,EntityType.PGP_KEY,EntityType.PGP_FINGERPRINT}:
+                  return value[:6]+'…'+value[-6:] if len(value)>14 else '***'
+              return value
+
+
+          def _read(item: EntityObservation) -> EntityObservationRead:
+              return EntityObservationRead(id=item.id,case_id=item.case_id,evidence_id=item.evidence_id,derivative_id=item.derivative_id,canonical_entity_id=item.canonical_entity_id,entity_type=item.entity_type,display_value=_redact(item),canonical_value=item.canonical_value if item.entity_type not in {EntityType.EMAIL,EntityType.PHONE,EntityType.CONTACT_HANDLE} else None,start_offset=item.start_offset,end_offset=item.end_offset,extractor_name=item.extractor_name,extractor_version=item.extractor_version,confidence=item.confidence,validation_status=item.validation_status,language=item.language,script=item.script,created_at=item.created_at)
+
+
+          @router.get('',response_model=EntityObservationList)
+          async def list_entities(case_id: UUID,actor: Annotated[User,Depends(ENTITY_ACTOR_DEPENDENCY)],db: DbSession,type: EntityType | None=Query(None),validation_status: ValidationStatus | None=Query(None),extractor: str | None=Query(None,max_length=120),language: str | None=Query(None,max_length=16),script: str | None=Query(None,max_length=16),evidence_id: UUID | None=None,canonical_entity_id: UUID | None=None,limit: int=Query(25,ge=1,le=100),offset: int=Query(0,ge=0)) -> EntityObservationList:
+              await _authorize(db,actor,case_id,Permission.CASE_READ)
+              statement=sa.select(EntityObservation).where(EntityObservation.case_id==case_id)
+              if type is not None: statement=statement.where(EntityObservation.entity_type==type)
+              if validation_status is not None: statement=statement.where(EntityObservation.validation_status==validation_status)
+              if extractor: statement=statement.where(EntityObservation.extractor_name==extractor)
+              if language: statement=statement.where(EntityObservation.language==language)
+              if script: statement=statement.where(EntityObservation.script==script)
+              if evidence_id: statement=statement.where(EntityObservation.evidence_id==evidence_id)
+              if canonical_entity_id: statement=statement.where(EntityObservation.canonical_entity_id==canonical_entity_id)
+              rows=(await db.execute(statement.order_by(EntityObservation.created_at.desc(),EntityObservation.id).offset(offset).limit(limit+1))).scalars().all()
+              return EntityObservationList(items=[_read(item) for item in rows[:limit]],limit=limit,offset=offset,has_more=len(rows)>limit)
+
+
+          @router.get('/{observation_id}',response_model=EntityObservationDetail)
+          async def get_entity(case_id: UUID,observation_id: UUID,actor: Annotated[User,Depends(ENTITY_ACTOR_DEPENDENCY)],db: DbSession,store: Annotated[LocalObjectStore,Depends(ENTITY_OBJECT_STORE_DEPENDENCY)]) -> EntityObservationDetail:
+              await _authorize(db,actor,case_id,Permission.CASE_READ)
+              item=(await db.execute(sa.select(EntityObservation).where(EntityObservation.id==observation_id,EntityObservation.case_id==case_id))).scalar_one_or_none()
+              if item is None: _not_found()
+              from darknetra_api.models.evidence import EvidenceArtifact
+              artifact=await db.get(EvidenceArtifact,item.derivative_id)
+              context='Context unavailable'
+              if artifact and artifact.object_key:
+                  with store.open(artifact.object_key) as handle: text=handle.read(2_000_001).decode('utf-8','replace')
+                  if item.start_offset is not None:
+                      start=max(0,item.start_offset-180); end=min(len(text),(item.end_offset or item.start_offset)+180); context=' '.join(text[start:end].replace('<','‹').replace('>','›').split())[:400]
+              base=_read(item).model_dump()
+              return EntityObservationDetail(**base,context_excerpt=context,warnings=list(item.metadata_json.get('warnings',[])) if isinstance(item.metadata_json,dict) else [])
+
+
+          @router.post('/canonical/merge',status_code=status.HTTP_200_OK)
+          async def merge_canonical_entities(case_id: UUID,payload: CanonicalMergeRequest,request: Request,actor: Annotated[User,Depends(ENTITY_ACTOR_DEPENDENCY)],db: DbSession) -> dict[str,str]:
+              await _authorize(db,actor,case_id,Permission.CASE_UPDATE)
+              source=await db.get(CanonicalEntity,payload.source_entity_id); target=await db.get(CanonicalEntity,payload.target_entity_id)
+              if source is None or target is None or source.case_id!=case_id or target.case_id!=case_id or source.entity_type!=target.entity_type: _not_found()
+              link=EntityEntityLink(case_id=case_id,left_entity_id=source.id,right_entity_id=target.id,relationship_type='CANONICAL_EQUIVALENCE',rationale=payload.rationale,created_by_user_id=actor.id)
+              db.add(link)
+              await db.execute(sa.update(EntityObservation).where(EntityObservation.case_id==case_id,EntityObservation.canonical_entity_id==source.id).values(canonical_entity_id=target.id,canonical_value=target.canonical_value))
+              append_audit_event(db,actor_user_id=actor.id,event_type='CANONICAL_ENTITIES_MERGED',resource_type='canonical_entity',resource_id=str(target.id),case_id=case_id,request_id=request.headers.get('X-Request-ID') or str(uuid4()),metadata={'source_entity_id':str(source.id),'rationale':payload.rationale})
+              await db.commit(); return {'target_entity_id':str(target.id),'status':'MERGED'}
+          PY
+          python - <<'PY'
+          from pathlib import Path
+          path=Path('apps/api/darknetra_api/main.py'); text=path.read_text(encoding='utf-8')
+          imp='from darknetra_api.routes.entities import router as entities_router\n'
+          if imp not in text:
+              anchor='from darknetra_api.routes.cases import router as cases_router\n'
+              text=text.replace(anchor,anchor+imp,1)
+          include='app.include_router(entities_router, prefix="/api/v1")\n'
+          if include not in text:
+              anchor='app.include_router(cases_router, prefix="/api/v1")\n'
+              text=text.replace(anchor,anchor+include,1)
+          path.write_text(text,encoding='utf-8')
+          PY
+
+      - name: Implement entities investigator UI
+        run: |
+          mkdir -p apps/web/src/features/entities
+          cat > apps/web/src/features/entities/types.ts <<'TS'
+          export type EntityValidation = 'CANDIDATE' | 'VALIDATED' | 'INVALID' | 'MODEL_INFERRED' | 'ANALYST_CONFIRMED' | 'ANALYST_REJECTED'
+          export type EntityObservation = {
+            id: string; case_id: string; evidence_id: string; derivative_id: string
+            canonical_entity_id: string | null; entity_type: string; display_value: string
+            canonical_value: string | null; start_offset: number | null; end_offset: number | null
+            extractor_name: string; extractor_version: string; confidence: number
+            validation_status: EntityValidation; language: string; script: string; created_at: string
+          }
+          export type EntityList = { items: EntityObservation[]; limit: number; offset: number; has_more: boolean }
+          export type EntityDetail = EntityObservation & { context_excerpt: string; warnings: string[] }
+          TS
+          cat > apps/web/src/features/entities/presenters.ts <<'TS'
+          import type { EntityValidation } from './types'
+          export function validationLabel(value: EntityValidation): string {
+            if (value === 'VALIDATED') return 'Protocol / deterministic validation'
+            if (value === 'MODEL_INFERRED') return 'Local model inference'
+            if (value === 'ANALYST_CONFIRMED') return 'Analyst confirmed'
+            if (value === 'ANALYST_REJECTED') return 'Analyst rejected'
+            if (value === 'INVALID') return 'Invalid'
+            return 'Candidate — review required'
+          }
+          export function entityTone(value: EntityValidation): string {
+            return ({ VALIDATED:'border-emerald-500/40 bg-emerald-500/10', MODEL_INFERRED:'border-violet-500/40 bg-violet-500/10', ANALYST_CONFIRMED:'border-blue-500/40 bg-blue-500/10', ANALYST_REJECTED:'border-red-500/40 bg-red-500/10', INVALID:'border-red-500/40 bg-red-500/10', CANDIDATE:'border-amber-500/40 bg-amber-500/10' } as const)[value]
+          }
+          TS
+          cat > apps/web/src/features/entities/api.ts <<'TS'
+          import type { EntityDetail, EntityList } from './types'
+          export type EntityFilters = { type?: string; validationStatus?: string; extractor?: string; language?: string; script?: string; evidenceId?: string; canonicalEntityId?: string; limit?: number; offset?: number }
+          export function buildEntityQuery(filters: EntityFilters): string {
+            const values: Array<[string,string]> = []
+            if (filters.type) values.push(['type',filters.type])
+            if (filters.validationStatus) values.push(['validation_status',filters.validationStatus])
+            if (filters.extractor) values.push(['extractor',filters.extractor])
+            if (filters.language) values.push(['language',filters.language])
+            if (filters.script) values.push(['script',filters.script])
+            if (filters.evidenceId) values.push(['evidence_id',filters.evidenceId])
+            if (filters.canonicalEntityId) values.push(['canonical_entity_id',filters.canonicalEntityId])
+            values.push(['limit',String(filters.limit ?? 25)],['offset',String(filters.offset ?? 0)])
+            return new URLSearchParams(values).toString()
+          }
+          function base(): string { return process.env.NEXT_PUBLIC_DARKNETRA_API_BASE_URL ?? '' }
+          async function checked<T>(response: Response): Promise<T> { if (!response.ok) throw new Error(response.status===404?'Entity context is unavailable':'Unable to load entity observations'); return response.json() as Promise<T> }
+          export async function fetchEntities(caseId: string,filters: EntityFilters,signal?: AbortSignal): Promise<EntityList> { return checked(await fetch(`${base()}/api/v1/cases/${caseId}/entities?${buildEntityQuery(filters)}`,{credentials:'include',cache:'no-store',signal})) }
+          export async function fetchEntity(caseId: string,id: string,signal?: AbortSignal): Promise<EntityDetail> { return checked(await fetch(`${base()}/api/v1/cases/${caseId}/entities/${id}`,{credentials:'include',cache:'no-store',signal})) }
+          TS
+          cat > apps/web/src/features/entities/entity-explorer.tsx <<'TSX'
+          'use client'
+          import { useEffect, useMemo, useState } from 'react'
+          import { useRouter, useSearchParams } from 'next/navigation'
+          import { buildEntityQuery, fetchEntities, fetchEntity } from './api'
+          import { entityTone, validationLabel } from './presenters'
+          import type { EntityDetail, EntityList } from './types'
+
+          export function EntityExplorer({ caseId }: { caseId: string }) {
+            const search=useSearchParams(); const router=useRouter()
+            const filters=useMemo(()=>({type:search.get('type')||undefined,validationStatus:search.get('validation_status')||undefined,limit:25,offset:Number(search.get('offset')||0)}),[search])
+            const [data,setData]=useState<EntityList|null>(null); const [error,setError]=useState<string|null>(null); const [selected,setSelected]=useState<EntityDetail|null>(null); const [loading,setLoading]=useState(true)
+            useEffect(()=>{const c=new AbortController(); setLoading(true); fetchEntities(caseId,filters,c.signal).then(setData).catch(e=>setError(e instanceof Error?e.message:'Unable to load')).finally(()=>setLoading(false)); return()=>c.abort()},[caseId,filters])
+            const change=(key:string,value:string)=>{const next=new URLSearchParams(search.toString()); value?next.set(key,value):next.delete(key); next.delete('offset'); router.replace(`?${next}`)}
+            const open=(id:string)=>{const c=new AbortController(); fetchEntity(caseId,id,c.signal).then(setSelected).catch(e=>setError(e instanceof Error?e.message:'Unable to load context'))}
+            return <section className="space-y-4" aria-label="Evidence-linked entities">
+              <div className="flex flex-wrap gap-3 rounded-lg border p-4">
+                <label className="grid gap-1 text-sm">Type<select className="rounded border bg-background px-3 py-2" value={filters.type??''} onChange={e=>change('type',e.target.value)}><option value="">All</option>{['SUBSTANCE','VENDOR_ALIAS','LOCATION','PRICE','QUANTITY','EMAIL','PHONE','PGP_FINGERPRINT','BTC_ADDRESS','ETH_ADDRESS','XMR_ADDRESS','SLANG_CANDIDATE'].map(v=><option key={v}>{v}</option>)}</select></label>
+                <label className="grid gap-1 text-sm">Validation<select className="rounded border bg-background px-3 py-2" value={filters.validationStatus??''} onChange={e=>change('validation_status',e.target.value)}><option value="">All</option>{['VALIDATED','MODEL_INFERRED','CANDIDATE','ANALYST_CONFIRMED','ANALYST_REJECTED'].map(v=><option key={v}>{v}</option>)}</select></label>
+              </div>
+              {loading&&<p role="status">Loading entity observations…</p>}{error&&<p role="alert" className="text-destructive">{error}</p>}
+              {!loading&&data?.items.length===0&&<div className="rounded-lg border border-dashed p-8 text-center"><h2 className="font-semibold">No observations match these filters</h2><p className="text-sm text-muted-foreground">The evidence remains preserved; adjust filters or wait for extraction.</p></div>}
+              {data&&data.items.length>0&&<div className="overflow-x-auto rounded-lg border"><table className="w-full text-sm"><thead><tr className="border-b text-left"><th className="p-3">Type</th><th className="p-3">Observed value</th><th className="p-3">Validation</th><th className="p-3">Confidence</th><th className="p-3">Source</th></tr></thead><tbody>{data.items.map(item=><tr key={item.id} className="border-b last:border-0"><td className="p-3 font-medium">{item.entity_type}</td><td className="p-3"><button className="underline underline-offset-4" onClick={()=>open(item.id)}>{item.display_value}</button></td><td className="p-3"><span className={`rounded border px-2 py-1 text-xs ${entityTone(item.validation_status)}`}>{validationLabel(item.validation_status)}</span></td><td className="p-3">{Math.round(item.confidence*100)}%</td><td className="p-3 font-mono text-xs">{item.evidence_id.slice(0,8)}…</td></tr>)}</tbody></table></div>}
+              {data&&<div className="flex justify-end gap-2"><button className="rounded border px-3 py-2 disabled:opacity-50" disabled={filters.offset===0} onClick={()=>router.replace(`?${buildEntityQuery({...filters,offset:Math.max(0,filters.offset-25)})}`)}>Previous</button><button className="rounded border px-3 py-2 disabled:opacity-50" disabled={!data.has_more} onClick={()=>router.replace(`?${buildEntityQuery({...filters,offset:filters.offset+25})}`)}>Next</button></div>}
+              {selected&&<div role="dialog" aria-modal="true" className="fixed inset-y-0 right-0 z-50 w-full max-w-xl overflow-y-auto border-l bg-background p-6 shadow-xl"><div className="flex justify-between"><div><p className="text-xs text-muted-foreground">{selected.entity_type}</p><h2 className="text-xl font-semibold">Evidence context</h2></div><button aria-label="Close entity context" onClick={()=>setSelected(null)}>Close</button></div><dl className="mt-6 grid gap-3 text-sm"><div><dt className="text-muted-foreground">Observed value</dt><dd>{selected.display_value}</dd></div><div><dt className="text-muted-foreground">Validation</dt><dd>{validationLabel(selected.validation_status)}</dd></div><div><dt className="text-muted-foreground">Extractor</dt><dd>{selected.extractor_name} {selected.extractor_version}</dd></div><div><dt className="text-muted-foreground">Exact span</dt><dd>{selected.start_offset ?? 'n/a'}–{selected.end_offset ?? 'n/a'}</dd></div></dl><pre className="mt-6 whitespace-pre-wrap rounded-lg border bg-muted/30 p-4 text-sm">{selected.context_excerpt}</pre><p className="mt-3 text-xs text-muted-foreground">Full sensitive values are not automatically revealed. Protocol validation indicates string validity, not ownership or identity.</p></div>}
+            </section>
+          }
+          TSX
+          cat > 'apps/web/src/app/(main)/(workspace)/cases/[caseId]/entities/page.tsx' <<'TSX'
+          import { EntityExplorer } from '@/features/entities/entity-explorer'
+          export default async function EntitiesPage({ params }: { params: Promise<{ caseId: string }> }) { const { caseId }=await params; return <div className="space-y-6"><header><p className="text-sm font-medium text-muted-foreground">Structured intelligence</p><h1 className="text-2xl font-semibold tracking-tight">Evidence-linked entities</h1><p className="mt-2 max-w-3xl text-sm text-muted-foreground">Review deterministic indicators, taxonomy matches and local-model candidates with exact source context. No observation is automatic proof of identity or criminal activity.</p></header><EntityExplorer caseId={caseId}/></div> }
+          TSX
+
+      - name: Verify GREEN API UI and production build
+        run: |
+          uv run ruff check .
+          uv run pytest -q apps/api/tests/integration/test_plan04_entities_api.py
+          uv run pytest -q
+          pnpm --filter @darknetra/web lint
+          pnpm --filter @darknetra/web typecheck
+          pnpm --filter @darknetra/web test
+          pnpm --filter @darknetra/web build
+          uv run python - <<'PY'
+          from darknetra_api.main import app
+          paths=app.openapi()['paths']
+          assert '/api/v1/cases/{case_id}/entities' in paths
+          assert '/api/v1/cases/{case_id}/entities/{observation_id}' in paths
+          payload=str(paths).casefold()
+          for forbidden in ('raw_value','metadata_json','object_key','ciphertext'): assert forbidden not in payload
+          PY
+
+      - name: Record Stage D and commit
+        run: |
+          mkdir -p docs/verification
+          cat > docs/verification/plan04-stage-d-entities-api-ui.md <<EOF
+          # Plan 04 Stage D — entities API and investigator UI
+
+          - **Verified source:** \`$(git rev-parse HEAD)\`
+          - **Observed:** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+
+          RED preceded implementation. GREEN verified case authorization, cross-case anti-enumeration, pagination/filtering, server-side redaction, bounded inert context excerpts, audited rationale-based canonical merge, safe OpenAPI responses, URL-backed UI filters, evidence context review and visibly distinct deterministic-validation versus model-confidence language.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/api apps/web docs/verification/plan04-stage-d-entities-api-ui.md
+          git rm .github/workflows/plan04-stage-d-entities-api-ui.yml
+          git commit -m 'feat: add evidence linked entities API and UI'
+          git push origin HEAD:testing-codex
