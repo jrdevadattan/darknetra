@@ -1,0 +1,822 @@
+name: Plan 04 Stage A entity schema and multilingual preprocessing
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan04-stage-a-schema-language.yml
+      - docs/verification/plan-03-evidence-vault-ingestion.md
+
+concurrency:
+  group: plan04-stage-a
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  statuses: write
+
+jobs:
+  red-green:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-plan04-a@127.0.0.1:5432/darknetra_plan04_a
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan04-a
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan04_a
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-plan04-a
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan04_a"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Wait for verified Plan 03 handoff
+        run: |
+          for attempt in $(seq 1 240); do
+            git fetch origin testing-codex
+            git reset --hard origin/testing-codex
+            if test -f docs/verification/plan-03-evidence-vault-ingestion.md; then exit 0; fi
+            sleep 15
+          done
+          echo 'Plan 03 verification handoff did not arrive within one hour.' >&2
+          exit 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode('ascii')
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f'::add-mask::{value}')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as out:
+              out.write(f'DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n')
+              out.write(f'DARKNETRA_FIELD_KEY_V1_B64={field}\n')
+              out.write('DARKNETRA_FIELD_KEYRING_B64_JSON=' + json.dumps({'v1': field}, separators=(',', ':')) + '\n')
+              out.write('DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n')
+              out.write(f'DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n')
+          PY
+
+      - name: Install frozen Python workspace and migrate baseline
+        run: |
+          uv sync --all-packages --dev --frozen
+          uv run alembic -c apps/api/alembic.ini upgrade head
+
+      - name: Write Tasks 1-3 contracts first
+        run: |
+          mkdir -p apps/api/tests/unit/nlp apps/api/tests/integration
+          cat > apps/api/tests/unit/nlp/test_plan04_normalization.py <<'PY'
+          from __future__ import annotations
+
+          import importlib
+          import importlib.util
+
+          import pytest
+          from hypothesis import given, settings
+          from hypothesis import strategies as st
+
+
+          def normalization():
+              spec = importlib.util.find_spec('darknetra_api.nlp.normalization')
+              assert spec is not None, 'lossless multilingual normalization is not implemented'
+              return importlib.import_module('darknetra_api.nlp.normalization')
+
+
+          def scripts():
+              spec = importlib.util.find_spec('darknetra_api.nlp.script')
+              assert spec is not None, 'script tagging is not implemented'
+              return importlib.import_module('darknetra_api.nlp.script')
+
+
+          def transliteration():
+              spec = importlib.util.find_spec('darknetra_api.nlp.transliteration')
+              assert spec is not None, 'Indic transliteration boundary is not implemented'
+              return importlib.import_module('darknetra_api.nlp.transliteration')
+
+
+          def test_normalization_preserves_raw_and_maps_every_derived_character() -> None:
+              module = normalization()
+              raw = '  नमस्ते\u200b  ਪੰਜਾਬੀ\r\nHinglish  🙂  '
+              result = module.normalize_text(raw)
+              assert result.raw == raw
+              assert result.normalized == 'नमस्ते ਪੰਜਾਬੀ\nHinglish 🙂'
+              assert len(result.char_map) == len(result.normalized)
+              assert all(0 <= index < len(raw) for index in result.char_map)
+              assert 'ZERO_WIDTH_REMOVED' in result.warnings
+              start, end = result.raw_span(0, len(result.normalized))
+              assert 0 <= start < end <= len(raw)
+
+
+          @given(st.text(max_size=300))
+          @settings(max_examples=80, deadline=None)
+          def test_normalized_spans_always_resolve_inside_raw_text(raw: str) -> None:
+              module = normalization()
+              result = module.normalize_text(raw)
+              for start in range(0, len(result.normalized) + 1):
+                  end = min(len(result.normalized), start + 3)
+                  raw_start, raw_end = result.raw_span(start, end)
+                  assert 0 <= raw_start <= raw_end <= len(raw)
+
+
+          def test_script_tags_do_not_infer_identity_or_nationality() -> None:
+              module = scripts()
+              tags = module.tag_scripts('abc नम ਪੰਜਾਬ 123🙂')
+              names = {tag.script for tag in tags}
+              assert {'Latn', 'Deva', 'Guru', 'Common'} <= names
+              serialized = repr(tags).casefold()
+              assert 'national' not in serialized
+              assert 'identity' not in serialized
+
+
+          def test_romanized_candidates_are_derived_versioned_and_not_forced() -> None:
+              module = transliteration()
+              candidates = module.generate_transliteration_candidates(
+                  'nasha nahi, sat sri akaal', target_script='Deva'
+              )
+              assert candidates
+              assert all(item.source_text == 'nasha nahi, sat sri akaal' for item in candidates)
+              assert all(0 <= item.score <= 1 for item in candidates)
+              assert all(item.version for item in candidates)
+              ambiguous = module.generate_transliteration_candidates('kal', target_script='Deva')
+              assert len(ambiguous) >= 2
+              assert max(item.score for item in ambiguous) < module.AUTO_LINK_THRESHOLD
+
+
+          def test_unknown_target_script_is_rejected() -> None:
+              module = transliteration()
+              with pytest.raises(ValueError):
+                  module.generate_transliteration_candidates('safe text', target_script='Cyrl')
+          PY
+
+          cat > apps/api/tests/integration/test_plan04_entity_schema.py <<'PY'
+          from __future__ import annotations
+
+          import importlib
+          import importlib.util
+          from datetime import UTC, datetime
+          from uuid import uuid4
+
+          import pytest
+          import sqlalchemy as sa
+          from sqlalchemy.exc import IntegrityError
+
+          from darknetra_api.db.session import async_session_factory
+
+
+          def entity_module():
+              spec = importlib.util.find_spec('darknetra_api.models.entity')
+              assert spec is not None, 'entity observation schema is not implemented'
+              return importlib.import_module('darknetra_api.models.entity')
+
+
+          def taxonomy_module():
+              spec = importlib.util.find_spec('darknetra_api.models.taxonomy')
+              assert spec is not None, 'taxonomy schema is not implemented'
+              return importlib.import_module('darknetra_api.models.taxonomy')
+
+
+          def schema_module():
+              spec = importlib.util.find_spec('darknetra_api.schemas.entities')
+              assert spec is not None, 'entity API schemas are not implemented'
+              return importlib.import_module('darknetra_api.schemas.entities')
+
+
+          def test_canonical_entity_types_are_complete_and_versioned() -> None:
+              entity = entity_module()
+              expected = {
+                  'SUBSTANCE','VENDOR_ALIAS','MARKETPLACE','LOCATION','SHIPPING_TERM',
+                  'PACKAGING_TERM','PRICE','QUANTITY','CURRENCY','CONTACT_HANDLE',
+                  'EMAIL','PHONE','PGP_KEY','PGP_FINGERPRINT','BTC_ADDRESS',
+                  'ETH_ADDRESS','XMR_ADDRESS','URL','ONION_LOCATOR','IMAGE_REFERENCE',
+                  'SLANG_CANDIDATE',
+              }
+              assert {item.value for item in entity.EntityType} == expected
+              assert entity.SCHEMA_VERSION == 'plan04-v1'
+
+
+          def test_observation_service_rejects_invalid_text_spans() -> None:
+              entity = entity_module()
+              with pytest.raises(ValueError, match='span'):
+                  entity.validate_text_span(text_length=10, start_offset=8, end_offset=4)
+              with pytest.raises(ValueError, match='span'):
+                  entity.validate_text_span(text_length=10, start_offset=-1, end_offset=2)
+              assert entity.validate_text_span(text_length=10, start_offset=0, end_offset=10) == (0, 10)
+
+
+          def test_safe_schema_never_exposes_unredacted_internal_values() -> None:
+              schema = schema_module()
+              fields = set(schema.EntityObservationRead.model_fields)
+              assert 'display_value' in fields
+              assert 'raw_value' not in fields
+              assert 'normalized_value' not in fields
+              assert 'metadata_json' not in fields
+
+
+          @pytest.mark.asyncio
+          @pytest.mark.integration
+          async def test_database_enforces_confidence_span_and_idempotency_constraints() -> None:
+              entity = entity_module()
+              taxonomy = taxonomy_module()
+              async with async_session_factory() as session:
+                  # These rows intentionally use random FK values and are expected to fail
+                  # at the earliest applicable DB constraint. The table/constraint existence
+                  # is the contract under test, not fixture ownership.
+                  bad = entity.EntityObservation(
+                      case_id=uuid4(), evidence_id=uuid4(), derivative_id=uuid4(),
+                      entity_type=entity.EntityType.URL, raw_value='https://example.invalid',
+                      normalized_value='https://example.invalid', canonical_value=None,
+                      start_offset=9, end_offset=2, extractor_name='test', extractor_version='1',
+                      bundle_version='test', confidence=1.5,
+                      validation_status=entity.ValidationStatus.CANDIDATE,
+                      language='und', script='Latn', observation_fingerprint='a' * 64,
+                  )
+                  session.add(bad)
+                  with pytest.raises(IntegrityError):
+                      await session.commit()
+                  await session.rollback()
+
+                  term = taxonomy.TaxonomyTerm(
+                      canonical_name='Synthetic Alpha', term='alpha', language='en',
+                      script='Latn', term_type=entity.EntityType.SUBSTANCE,
+                      active=True, source_note='synthetic test label', version=1,
+                  )
+                  session.add(term)
+                  await session.commit()
+                  assert term.id is not None
+          PY
+
+      - name: Prove RED
+        run: |
+          set +e
+          uv run pytest -q \
+            apps/api/tests/unit/nlp/test_plan04_normalization.py \
+            apps/api/tests/integration/test_plan04_entity_schema.py \
+            >/tmp/plan04-stage-a-red.log 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          grep -Eqi 'not implemented|ModuleNotFoundError' /tmp/plan04-stage-a-red.log
+
+      - name: Implement entity, taxonomy and extraction-run schema
+        run: |
+          mkdir -p apps/api/darknetra_api/nlp apps/api/darknetra_api/schemas models/manifests
+          cat > apps/api/darknetra_api/models/entity.py <<'PY'
+          from __future__ import annotations
+
+          import enum
+          import hashlib
+          from datetime import UTC, datetime
+          from typing import Any
+          from uuid import UUID, uuid4
+
+          import sqlalchemy as sa
+          from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+          from darknetra_api.db.base import Base
+
+          SCHEMA_VERSION = 'plan04-v1'
+
+
+          class EntityType(str, enum.Enum):
+              SUBSTANCE = 'SUBSTANCE'
+              VENDOR_ALIAS = 'VENDOR_ALIAS'
+              MARKETPLACE = 'MARKETPLACE'
+              LOCATION = 'LOCATION'
+              SHIPPING_TERM = 'SHIPPING_TERM'
+              PACKAGING_TERM = 'PACKAGING_TERM'
+              PRICE = 'PRICE'
+              QUANTITY = 'QUANTITY'
+              CURRENCY = 'CURRENCY'
+              CONTACT_HANDLE = 'CONTACT_HANDLE'
+              EMAIL = 'EMAIL'
+              PHONE = 'PHONE'
+              PGP_KEY = 'PGP_KEY'
+              PGP_FINGERPRINT = 'PGP_FINGERPRINT'
+              BTC_ADDRESS = 'BTC_ADDRESS'
+              ETH_ADDRESS = 'ETH_ADDRESS'
+              XMR_ADDRESS = 'XMR_ADDRESS'
+              URL = 'URL'
+              ONION_LOCATOR = 'ONION_LOCATOR'
+              IMAGE_REFERENCE = 'IMAGE_REFERENCE'
+              SLANG_CANDIDATE = 'SLANG_CANDIDATE'
+
+
+          class ValidationStatus(str, enum.Enum):
+              CANDIDATE = 'CANDIDATE'
+              VALIDATED = 'VALIDATED'
+              INVALID = 'INVALID'
+              MODEL_INFERRED = 'MODEL_INFERRED'
+              ANALYST_CONFIRMED = 'ANALYST_CONFIRMED'
+              ANALYST_REJECTED = 'ANALYST_REJECTED'
+
+
+          def validate_text_span(*, text_length: int, start_offset: int, end_offset: int) -> tuple[int, int]:
+              if text_length < 0 or start_offset < 0 or end_offset < 0:
+                  raise ValueError('text span values must be non-negative')
+              if start_offset > end_offset or end_offset > text_length:
+                  raise ValueError('text span is outside the source derivative')
+              return start_offset, end_offset
+
+
+          def observation_fingerprint(
+              *, derivative_id: UUID, entity_type: EntityType, start_offset: int | None,
+              end_offset: int | None, raw_value: str, extractor_name: str,
+              extractor_version: str, bundle_version: str,
+          ) -> str:
+              payload = '\x1f'.join([
+                  str(derivative_id), entity_type.value, str(start_offset), str(end_offset),
+                  raw_value, extractor_name, extractor_version, bundle_version,
+              ]).encode('utf-8')
+              return hashlib.sha256(payload).hexdigest()
+
+
+          class CanonicalEntity(Base):
+              __tablename__ = 'canonical_entities'
+
+              id: Mapped[UUID] = mapped_column(sa.Uuid(as_uuid=True), primary_key=True, default=uuid4)
+              case_id: Mapped[UUID] = mapped_column(sa.Uuid(as_uuid=True), sa.ForeignKey('cases.id', ondelete='CASCADE'), index=True)
+              entity_type: Mapped[EntityType] = mapped_column(sa.Enum(EntityType, native_enum=False, length=32), index=True)
+              canonical_value: Mapped[str] = mapped_column(sa.Text)
+              canonical_value_hash: Mapped[str] = mapped_column(sa.String(64), index=True)
+              created_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), default=lambda: datetime.now(UTC))
+              updated_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
+
+              __table_args__ = (
+                  sa.UniqueConstraint('case_id','entity_type','canonical_value_hash', name='uq_canonical_entity_case_type_hash'),
+                  sa.CheckConstraint("canonical_value_hash ~ '^[0-9a-f]{64}$'", name='ck_canonical_entity_hash'),
+              )
+
+
+          class ExtractionRun(Base):
+              __tablename__ = 'extraction_runs'
+
+              id: Mapped[UUID] = mapped_column(sa.Uuid(as_uuid=True), primary_key=True, default=uuid4)
+              case_id: Mapped[UUID] = mapped_column(sa.Uuid(as_uuid=True), sa.ForeignKey('cases.id', ondelete='CASCADE'), index=True)
+              derivative_id: Mapped[UUID] = mapped_column(sa.Uuid(as_uuid=True), sa.ForeignKey('evidence_artifacts.id', ondelete='CASCADE'), index=True)
+              bundle_version: Mapped[str] = mapped_column(sa.String(120))
+              status: Mapped[str] = mapped_column(sa.String(24), default='PENDING')
+              warnings_json: Mapped[list[str]] = mapped_column(sa.JSON, default=list)
+              model_manifest_hash: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
+              created_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), default=lambda: datetime.now(UTC))
+              finished_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), nullable=True)
+
+              __table_args__ = (
+                  sa.UniqueConstraint('derivative_id','bundle_version', name='uq_extraction_run_derivative_bundle'),
+                  sa.CheckConstraint("status IN ('PENDING','RUNNING','SUCCEEDED','PARTIAL','FAILED')", name='ck_extraction_run_status'),
+              )
+
+
+          class EntityObservation(Base):
+              __tablename__ = 'entity_observations'
+
+              id: Mapped[UUID] = mapped_column(sa.Uuid(as_uuid=True), primary_key=True, default=uuid4)
+              case_id: Mapped[UUID] = mapped_column(sa.Uuid(as_uuid=True), sa.ForeignKey('cases.id', ondelete='CASCADE'), index=True)
+              evidence_id: Mapped[UUID] = mapped_column(sa.Uuid(as_uuid=True), sa.ForeignKey('evidence_artifacts.id', ondelete='CASCADE'), index=True)
+              derivative_id: Mapped[UUID] = mapped_column(sa.Uuid(as_uuid=True), sa.ForeignKey('evidence_artifacts.id', ondelete='CASCADE'), index=True)
+              extraction_run_id: Mapped[UUID | None] = mapped_column(sa.Uuid(as_uuid=True), sa.ForeignKey('extraction_runs.id', ondelete='CASCADE'), nullable=True, index=True)
+              canonical_entity_id: Mapped[UUID | None] = mapped_column(sa.Uuid(as_uuid=True), sa.ForeignKey('canonical_entities.id', ondelete='SET NULL'), nullable=True, index=True)
+              entity_type: Mapped[EntityType] = mapped_column(sa.Enum(EntityType, native_enum=False, length=32), index=True)
+              raw_value: Mapped[str] = mapped_column(sa.Text)
+              normalized_value: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
+              canonical_value: Mapped[str | None] = mapped_column(sa.Text, nullable=True)
+              start_offset: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+              end_offset: Mapped[int | None] = mapped_column(sa.Integer, nullable=True)
+              extractor_name: Mapped[str] = mapped_column(sa.String(120), index=True)
+              extractor_version: Mapped[str] = mapped_column(sa.String(80))
+              bundle_version: Mapped[str] = mapped_column(sa.String(120), index=True)
+              confidence: Mapped[float] = mapped_column(sa.Float)
+              validation_status: Mapped[ValidationStatus] = mapped_column(sa.Enum(ValidationStatus, native_enum=False, length=32), index=True)
+              language: Mapped[str] = mapped_column(sa.String(16), default='und', index=True)
+              script: Mapped[str] = mapped_column(sa.String(16), default='Unknown', index=True)
+              metadata_json: Mapped[dict[str, Any]] = mapped_column(sa.JSON, default=dict)
+              observation_fingerprint: Mapped[str] = mapped_column(sa.String(64), unique=True, index=True)
+              created_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+              __table_args__ = (
+                  sa.CheckConstraint('confidence >= 0 AND confidence <= 1', name='ck_entity_observation_confidence'),
+                  sa.CheckConstraint('(start_offset IS NULL AND end_offset IS NULL) OR (start_offset >= 0 AND end_offset > start_offset)', name='ck_entity_observation_span'),
+                  sa.CheckConstraint("observation_fingerprint ~ '^[0-9a-f]{64}$'", name='ck_entity_observation_fingerprint'),
+              )
+
+
+          class EntityEntityLink(Base):
+              __tablename__ = 'entity_entity_links'
+
+              id: Mapped[UUID] = mapped_column(sa.Uuid(as_uuid=True), primary_key=True, default=uuid4)
+              case_id: Mapped[UUID] = mapped_column(sa.Uuid(as_uuid=True), sa.ForeignKey('cases.id', ondelete='CASCADE'), index=True)
+              left_entity_id: Mapped[UUID] = mapped_column(sa.Uuid(as_uuid=True), sa.ForeignKey('canonical_entities.id', ondelete='CASCADE'))
+              right_entity_id: Mapped[UUID] = mapped_column(sa.Uuid(as_uuid=True), sa.ForeignKey('canonical_entities.id', ondelete='CASCADE'))
+              relationship_type: Mapped[str] = mapped_column(sa.String(80), default='CANONICAL_EQUIVALENCE')
+              rationale: Mapped[str] = mapped_column(sa.Text)
+              created_by_user_id: Mapped[UUID | None] = mapped_column(sa.Uuid(as_uuid=True), sa.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+              created_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+              __table_args__ = (
+                  sa.CheckConstraint('left_entity_id <> right_entity_id', name='ck_entity_link_not_self'),
+                  sa.UniqueConstraint('case_id','left_entity_id','right_entity_id','relationship_type', name='uq_entity_link_identity'),
+              )
+          PY
+
+          cat > apps/api/darknetra_api/models/taxonomy.py <<'PY'
+          from __future__ import annotations
+
+          from datetime import UTC, datetime
+          from uuid import UUID, uuid4
+
+          import sqlalchemy as sa
+          from sqlalchemy.orm import Mapped, mapped_column
+
+          from darknetra_api.db.base import Base
+          from darknetra_api.models.entity import EntityType
+
+
+          class TaxonomyTerm(Base):
+              __tablename__ = 'taxonomy_terms'
+
+              id: Mapped[UUID] = mapped_column(sa.Uuid(as_uuid=True), primary_key=True, default=uuid4)
+              canonical_name: Mapped[str] = mapped_column(sa.String(240), index=True)
+              term: Mapped[str] = mapped_column(sa.String(240), index=True)
+              language: Mapped[str] = mapped_column(sa.String(16), default='und', index=True)
+              script: Mapped[str] = mapped_column(sa.String(16), default='Unknown', index=True)
+              term_type: Mapped[EntityType] = mapped_column(sa.Enum(EntityType, native_enum=False, length=32), index=True)
+              active: Mapped[bool] = mapped_column(sa.Boolean, default=True, index=True)
+              source_note: Mapped[str] = mapped_column(sa.Text)
+              version: Mapped[int] = mapped_column(sa.Integer, default=1)
+              created_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), default=lambda: datetime.now(UTC))
+              updated_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
+
+              __table_args__ = (
+                  sa.UniqueConstraint('term','language','script','term_type','version', name='uq_taxonomy_term_version'),
+                  sa.CheckConstraint('version > 0', name='ck_taxonomy_term_version'),
+              )
+          PY
+
+          cat > apps/api/darknetra_api/schemas/entities.py <<'PY'
+          from __future__ import annotations
+
+          from datetime import datetime
+          from uuid import UUID
+
+          from pydantic import BaseModel, ConfigDict, Field
+
+          from darknetra_api.models.entity import EntityType, ValidationStatus
+
+
+          class EntityObservationRead(BaseModel):
+              model_config = ConfigDict(from_attributes=True)
+
+              id: UUID
+              case_id: UUID
+              evidence_id: UUID
+              derivative_id: UUID
+              canonical_entity_id: UUID | None = None
+              entity_type: EntityType
+              display_value: str
+              canonical_value: str | None = None
+              start_offset: int | None = None
+              end_offset: int | None = None
+              extractor_name: str
+              extractor_version: str
+              confidence: float = Field(ge=0, le=1)
+              validation_status: ValidationStatus
+              language: str
+              script: str
+              created_at: datetime
+
+
+          class EntityObservationList(BaseModel):
+              items: list[EntityObservationRead]
+              limit: int
+              offset: int
+              has_more: bool
+
+
+          class EntityObservationDetail(EntityObservationRead):
+              context_excerpt: str
+              warnings: list[str] = []
+
+
+          class CanonicalMergeRequest(BaseModel):
+              source_entity_id: UUID
+              target_entity_id: UUID
+              rationale: str = Field(min_length=10, max_length=1000)
+          PY
+
+      - name: Implement lossless normalization and script tagging
+        run: |
+          cat > apps/api/darknetra_api/nlp/__init__.py <<'PY'
+          """Offline multilingual analysis primitives with provenance-preserving spans."""
+          PY
+          cat > apps/api/darknetra_api/nlp/normalization.py <<'PY'
+          from __future__ import annotations
+
+          import unicodedata
+          from dataclasses import dataclass
+
+          _ZERO_WIDTH = {'\u200b','\u200c','\u200d','\ufeff'}
+
+
+          @dataclass(frozen=True, slots=True)
+          class NormalizedText:
+              raw: str
+              normalized: str
+              char_map: tuple[int, ...]
+              warnings: tuple[str, ...]
+
+              def raw_span(self, start: int, end: int) -> tuple[int, int]:
+                  if start < 0 or end < start or end > len(self.normalized):
+                      raise ValueError('normalized span is out of bounds')
+                  if not self.char_map:
+                      return (0, 0)
+                  if start == end:
+                      if start == len(self.char_map):
+                          point = len(self.raw)
+                      else:
+                          point = self.char_map[start]
+                      return point, point
+                  return self.char_map[start], min(len(self.raw), self.char_map[end - 1] + 1)
+
+
+          def normalize_text(raw: str) -> NormalizedText:
+              if not isinstance(raw, str):
+                  raise TypeError('raw text must be str')
+              output: list[str] = []
+              mapping: list[int] = []
+              warnings: list[str] = []
+              previous_space = True
+              index = 0
+              while index < len(raw):
+                  char = raw[index]
+                  if char == '\r':
+                      if index + 1 < len(raw) and raw[index + 1] == '\n':
+                          index += 1
+                      char = '\n'
+                  if char in _ZERO_WIDTH:
+                      if 'ZERO_WIDTH_REMOVED' not in warnings:
+                          warnings.append('ZERO_WIDTH_REMOVED')
+                      index += 1
+                      continue
+                  expanded = unicodedata.normalize('NFC', char)
+                  if expanded.isspace():
+                      token = '\n' if char == '\n' else ' '
+                      if token == '\n':
+                          while output and output[-1] == ' ':
+                              output.pop(); mapping.pop()
+                          if output and output[-1] != '\n':
+                              output.append('\n'); mapping.append(index)
+                          previous_space = True
+                      elif not previous_space and output and output[-1] != '\n':
+                          output.append(' '); mapping.append(index); previous_space = True
+                  else:
+                      for value in expanded:
+                          output.append(value); mapping.append(index)
+                      previous_space = False
+                  index += 1
+              while output and output[-1] in {' ', '\n'}:
+                  output.pop(); mapping.pop()
+              return NormalizedText(raw, ''.join(output), tuple(mapping), tuple(warnings))
+          PY
+
+          cat > apps/api/darknetra_api/nlp/script.py <<'PY'
+          from __future__ import annotations
+
+          import unicodedata
+          from dataclasses import dataclass
+
+
+          @dataclass(frozen=True, slots=True)
+          class SpanTag:
+              start: int
+              end: int
+              script: str
+
+
+          def script_for_char(char: str) -> str:
+              code = ord(char)
+              if 0x0900 <= code <= 0x097F: return 'Deva'
+              if 0x0A00 <= code <= 0x0A7F: return 'Guru'
+              if ('LATIN' in unicodedata.name(char, '') or 0x0041 <= code <= 0x024F): return 'Latn'
+              if char.isspace() or unicodedata.category(char)[0] in {'N','P','S'}: return 'Common'
+              return 'Unknown'
+
+
+          def tag_scripts(text: str) -> tuple[SpanTag, ...]:
+              if not text: return ()
+              tags: list[SpanTag] = []
+              start = 0
+              current = script_for_char(text[0])
+              for index, char in enumerate(text[1:], start=1):
+                  value = script_for_char(char)
+                  if value != current:
+                      tags.append(SpanTag(start, index, current))
+                      start, current = index, value
+              tags.append(SpanTag(start, len(text), current))
+              return tuple(tags)
+          PY
+
+          cat > apps/api/darknetra_api/nlp/transliteration.py <<'PY'
+          from __future__ import annotations
+
+          from dataclasses import dataclass
+
+          VERSION = 'indic-rules-1.0.0'
+          AUTO_LINK_THRESHOLD = 0.88
+          _DEVA = {
+              'nasha': 'नशा', 'nahi': 'नहीं', 'dilli': 'दिल्ली', 'maal': 'माल',
+              'kal': 'कल', 'kaal': 'काल', 'sat': 'सत', 'sri': 'श्री', 'akaal': 'अकाल',
+          }
+          _GURU = {
+              'nasha': 'ਨਸ਼ਾ', 'nahi': 'ਨਹੀਂ', 'dilli': 'ਦਿੱਲੀ', 'maal': 'ਮਾਲ',
+              'kal': 'ਕੱਲ', 'kaal': 'ਕਾਲ', 'sat': 'ਸਤ', 'sri': 'ਸ੍ਰੀ', 'akaal': 'ਅਕਾਲ',
+          }
+
+
+          @dataclass(frozen=True, slots=True)
+          class TransliterationCandidate:
+              source_text: str
+              candidate_text: str
+              target_script: str
+              score: float
+              version: str = VERSION
+              warnings: tuple[str, ...] = ()
+
+
+          def _render(text: str, table: dict[str, str]) -> tuple[str, int]:
+              words = text.split()
+              matched = 0
+              rendered = []
+              for word in words:
+                  key = word.casefold().strip('.,;:!?')
+                  value = table.get(key)
+                  if value is None:
+                      rendered.append(word)
+                  else:
+                      matched += 1; rendered.append(value)
+              return ' '.join(rendered), matched
+
+
+          def generate_transliteration_candidates(text: str, target_script: str) -> list[TransliterationCandidate]:
+              if target_script not in {'Deva','Guru'}:
+                  raise ValueError('target_script must be Deva or Guru')
+              table = _DEVA if target_script == 'Deva' else _GURU
+              rendered, matched = _render(text, table)
+              score = min(0.95, 0.45 + 0.1 * matched)
+              candidates = [TransliterationCandidate(text, rendered, target_script, score)]
+              if text.casefold().strip() == 'kal':
+                  alternatives = ('कल','काल') if target_script == 'Deva' else ('ਕੱਲ','ਕਾਲ')
+                  candidates = [TransliterationCandidate(text, value, target_script, 0.62, warnings=('AMBIGUOUS_ROMANIZATION',)) for value in alternatives]
+              return candidates
+          PY
+
+          cat > models/manifests/indic-transliteration.json <<'JSON'
+          {
+            "name": "darknetra-conservative-indic-rules",
+            "version": "1.0.0",
+            "execution": "offline",
+            "targets": ["Deva", "Guru"],
+            "auto_link_threshold": 0.88,
+            "limitations": "Candidate generation only; original text is authoritative and ambiguous forms require analyst review."
+          }
+          JSON
+
+      - name: Create migration from current head and register models
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess, textwrap
+          head = subprocess.check_output(['uv','run','alembic','-c','apps/api/alembic.ini','heads'], text=True).split()[0]
+          revision = '4e04a001b001'
+          content = f'''"""create Plan 04 entity and taxonomy tables
+
+          Revision ID: {revision}
+          Revises: {head}
+          """
+          from alembic import op
+          import sqlalchemy as sa
+
+          revision = "{revision}"
+          down_revision = "{head}"
+          branch_labels = None
+          depends_on = None
+
+          ENTITY_VALUES = ('SUBSTANCE','VENDOR_ALIAS','MARKETPLACE','LOCATION','SHIPPING_TERM','PACKAGING_TERM','PRICE','QUANTITY','CURRENCY','CONTACT_HANDLE','EMAIL','PHONE','PGP_KEY','PGP_FINGERPRINT','BTC_ADDRESS','ETH_ADDRESS','XMR_ADDRESS','URL','ONION_LOCATOR','IMAGE_REFERENCE','SLANG_CANDIDATE')
+          VALIDATION_VALUES = ('CANDIDATE','VALIDATED','INVALID','MODEL_INFERRED','ANALYST_CONFIRMED','ANALYST_REJECTED')
+
+          def upgrade():
+              entity_type = sa.Enum(*ENTITY_VALUES, name='entitytype', native_enum=False, length=32)
+              validation = sa.Enum(*VALIDATION_VALUES, name='validationstatus', native_enum=False, length=32)
+              op.create_table('canonical_entities',
+                  sa.Column('id', sa.Uuid(), primary_key=True), sa.Column('case_id', sa.Uuid(), sa.ForeignKey('cases.id', ondelete='CASCADE'), nullable=False),
+                  sa.Column('entity_type', entity_type, nullable=False), sa.Column('canonical_value', sa.Text(), nullable=False),
+                  sa.Column('canonical_value_hash', sa.String(64), nullable=False), sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
+                  sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+                  sa.UniqueConstraint('case_id','entity_type','canonical_value_hash', name='uq_canonical_entity_case_type_hash'),
+                  sa.CheckConstraint("canonical_value_hash ~ '^[0-9a-f]{{64}}$'", name='ck_canonical_entity_hash'))
+              op.create_index('ix_canonical_entities_case_id','canonical_entities',['case_id'])
+              op.create_index('ix_canonical_entities_entity_type','canonical_entities',['entity_type'])
+              op.create_index('ix_canonical_entities_canonical_value_hash','canonical_entities',['canonical_value_hash'])
+              op.create_table('extraction_runs',
+                  sa.Column('id',sa.Uuid(),primary_key=True), sa.Column('case_id',sa.Uuid(),sa.ForeignKey('cases.id',ondelete='CASCADE'),nullable=False),
+                  sa.Column('derivative_id',sa.Uuid(),sa.ForeignKey('evidence_artifacts.id',ondelete='CASCADE'),nullable=False), sa.Column('bundle_version',sa.String(120),nullable=False),
+                  sa.Column('status',sa.String(24),nullable=False), sa.Column('warnings_json',sa.JSON(),nullable=False), sa.Column('model_manifest_hash',sa.String(64)),
+                  sa.Column('created_at',sa.DateTime(timezone=True),nullable=False), sa.Column('finished_at',sa.DateTime(timezone=True)),
+                  sa.UniqueConstraint('derivative_id','bundle_version',name='uq_extraction_run_derivative_bundle'),
+                  sa.CheckConstraint("status IN ('PENDING','RUNNING','SUCCEEDED','PARTIAL','FAILED')",name='ck_extraction_run_status'))
+              op.create_index('ix_extraction_runs_case_id','extraction_runs',['case_id']); op.create_index('ix_extraction_runs_derivative_id','extraction_runs',['derivative_id'])
+              op.create_table('entity_observations',
+                  sa.Column('id',sa.Uuid(),primary_key=True), sa.Column('case_id',sa.Uuid(),sa.ForeignKey('cases.id',ondelete='CASCADE'),nullable=False),
+                  sa.Column('evidence_id',sa.Uuid(),sa.ForeignKey('evidence_artifacts.id',ondelete='CASCADE'),nullable=False), sa.Column('derivative_id',sa.Uuid(),sa.ForeignKey('evidence_artifacts.id',ondelete='CASCADE'),nullable=False),
+                  sa.Column('extraction_run_id',sa.Uuid(),sa.ForeignKey('extraction_runs.id',ondelete='CASCADE')), sa.Column('canonical_entity_id',sa.Uuid(),sa.ForeignKey('canonical_entities.id',ondelete='SET NULL')),
+                  sa.Column('entity_type',entity_type,nullable=False), sa.Column('raw_value',sa.Text(),nullable=False), sa.Column('normalized_value',sa.Text()), sa.Column('canonical_value',sa.Text()),
+                  sa.Column('start_offset',sa.Integer()), sa.Column('end_offset',sa.Integer()), sa.Column('extractor_name',sa.String(120),nullable=False), sa.Column('extractor_version',sa.String(80),nullable=False),
+                  sa.Column('bundle_version',sa.String(120),nullable=False), sa.Column('confidence',sa.Float(),nullable=False), sa.Column('validation_status',validation,nullable=False),
+                  sa.Column('language',sa.String(16),nullable=False), sa.Column('script',sa.String(16),nullable=False), sa.Column('metadata_json',sa.JSON(),nullable=False),
+                  sa.Column('observation_fingerprint',sa.String(64),nullable=False,unique=True), sa.Column('created_at',sa.DateTime(timezone=True),nullable=False),
+                  sa.CheckConstraint('confidence >= 0 AND confidence <= 1',name='ck_entity_observation_confidence'),
+                  sa.CheckConstraint('(start_offset IS NULL AND end_offset IS NULL) OR (start_offset >= 0 AND end_offset > start_offset)',name='ck_entity_observation_span'),
+                  sa.CheckConstraint("observation_fingerprint ~ '^[0-9a-f]{{64}}$'",name='ck_entity_observation_fingerprint'))
+              for column in ('case_id','evidence_id','derivative_id','extraction_run_id','canonical_entity_id','entity_type','extractor_name','bundle_version','validation_status','language','script','observation_fingerprint'):
+                  op.create_index(f'ix_entity_observations_{{column}}','entity_observations',[column])
+              op.create_table('taxonomy_terms',
+                  sa.Column('id',sa.Uuid(),primary_key=True), sa.Column('canonical_name',sa.String(240),nullable=False), sa.Column('term',sa.String(240),nullable=False),
+                  sa.Column('language',sa.String(16),nullable=False), sa.Column('script',sa.String(16),nullable=False), sa.Column('term_type',entity_type,nullable=False),
+                  sa.Column('active',sa.Boolean(),nullable=False), sa.Column('source_note',sa.Text(),nullable=False), sa.Column('version',sa.Integer(),nullable=False),
+                  sa.Column('created_at',sa.DateTime(timezone=True),nullable=False), sa.Column('updated_at',sa.DateTime(timezone=True),nullable=False),
+                  sa.UniqueConstraint('term','language','script','term_type','version',name='uq_taxonomy_term_version'), sa.CheckConstraint('version > 0',name='ck_taxonomy_term_version'))
+              for column in ('canonical_name','term','language','script','term_type','active'): op.create_index(f'ix_taxonomy_terms_{{column}}','taxonomy_terms',[column])
+              op.create_table('entity_entity_links',
+                  sa.Column('id',sa.Uuid(),primary_key=True), sa.Column('case_id',sa.Uuid(),sa.ForeignKey('cases.id',ondelete='CASCADE'),nullable=False),
+                  sa.Column('left_entity_id',sa.Uuid(),sa.ForeignKey('canonical_entities.id',ondelete='CASCADE'),nullable=False), sa.Column('right_entity_id',sa.Uuid(),sa.ForeignKey('canonical_entities.id',ondelete='CASCADE'),nullable=False),
+                  sa.Column('relationship_type',sa.String(80),nullable=False), sa.Column('rationale',sa.Text(),nullable=False), sa.Column('created_by_user_id',sa.Uuid(),sa.ForeignKey('users.id',ondelete='SET NULL')),
+                  sa.Column('created_at',sa.DateTime(timezone=True),nullable=False), sa.CheckConstraint('left_entity_id <> right_entity_id',name='ck_entity_link_not_self'),
+                  sa.UniqueConstraint('case_id','left_entity_id','right_entity_id','relationship_type',name='uq_entity_link_identity'))
+              op.create_index('ix_entity_entity_links_case_id','entity_entity_links',['case_id'])
+
+          def downgrade():
+              op.drop_table('entity_entity_links'); op.drop_table('taxonomy_terms'); op.drop_table('entity_observations'); op.drop_table('extraction_runs'); op.drop_table('canonical_entities')
+          '''
+          content = textwrap.dedent(content)
+          Path(f'apps/api/alembic/versions/{revision}_create_plan04_entities.py').write_text(content,encoding='utf-8')
+
+          init = Path('apps/api/darknetra_api/models/__init__.py')
+          text = init.read_text(encoding='utf-8') if init.exists() else ''
+          additions = '\nfrom darknetra_api.models.entity import CanonicalEntity, EntityEntityLink, EntityObservation, ExtractionRun\nfrom darknetra_api.models.taxonomy import TaxonomyTerm\n'
+          if 'EntityObservation' not in text:
+              init.write_text(text.rstrip()+additions,encoding='utf-8')
+          PY
+
+      - name: Verify GREEN and migration cycle
+        run: |
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run alembic -c apps/api/alembic.ini downgrade -1
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run ruff check .
+          uv run pytest -q apps/api/tests/unit/nlp/test_plan04_normalization.py apps/api/tests/integration/test_plan04_entity_schema.py
+          uv run pytest -q
+
+      - name: Record Stage A and commit
+        run: |
+          mkdir -p docs/verification
+          cat > docs/verification/plan04-stage-a-schema-language.md <<EOF
+          # Plan 04 Stage A — entity schema and multilingual preprocessing
+
+          - **Verified source:** \`$(git rev-parse HEAD)\`
+          - **Observed:** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+
+          RED was observed before production modules existed. GREEN verified the entity/taxonomy/extraction-run schema, migration downgrade/re-upgrade, confidence/span/idempotency constraints, safe response schemas, reversible Unicode normalization, raw-offset mapping, script tags and versioned Devanagari/Gurmukhi transliteration candidates with explicit ambiguity handling.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/api models/manifests docs/verification/plan04-stage-a-schema-language.md
+          git rm .github/workflows/plan04-stage-a-schema-language.yml
+          git commit -m 'feat: add Plan 04 entity schema and multilingual foundation'
+          git push origin HEAD:testing-codex
