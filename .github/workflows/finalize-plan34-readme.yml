@@ -1,0 +1,271 @@
+name: Finalize README after Plans 03 and 04
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/finalize-plan34-readme.yml
+
+concurrency:
+  group: darknetra-plan34-readme-finalizer
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-readme@127.0.0.1:5432/darknetra_plan34_readme
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan34-readme
+      CI: 'true'
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan34_readme
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-readme
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan34_readme"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Wait for canonical Plans 03 and 04 verification
+        run: |
+          set -euo pipefail
+          for ATTEMPT in $(seq 1 300); do
+            git fetch origin testing-codex
+            git reset --hard origin/testing-codex
+            if test -f docs/verification/plans-03-04-release-gate.md \
+              && grep -q 'Outcome: success' docs/verification/plans-03-04-release-gate.md \
+              && test -f docs/verification/plan-03-evidence-vault-ingestion.md \
+              && test -f docs/verification/plan-04-extraction-indicators.md; then
+              echo 'Canonical verification records are present.'
+              exit 0
+            fi
+            echo "Waiting for verified implementation (${ATTEMPT}/300)..."
+            sleep 60
+          done
+          echo 'Timed out waiting for the canonical Plans 03/04 release gate.' >&2
+          exit 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Generate runtime-only keys
+        run: |
+          corepack enable
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode('ascii')
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f'::add-mask::{value}')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              output.write(f'DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n')
+              output.write(f'DARKNETRA_FIELD_KEY_V1_B64={field}\n')
+              output.write('DARKNETRA_FIELD_KEYRING_B64_JSON=' + json.dumps({'v1': field}, separators=(',', ':')) + '\n')
+              output.write('DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n')
+              output.write(f'DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n')
+          PY
+
+      - name: Add verified milestone and installation reference to README
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('README.md')
+          text = path.read_text(encoding='utf-8')
+          start = '<!-- PLAN34_VERIFIED_START -->'
+          end = '<!-- PLAN34_VERIFIED_END -->'
+          block = r'''<!-- PLAN34_VERIFIED_START -->
+          ## Verified Evidence Vault and multilingual extraction milestone
+
+          Plans 03 and 04 are implemented and release-gated on `testing-codex`. DARKNETRA now preserves authorized digital evidence before analysis, keeps original bytes immutable, records provenance and custody, and produces evidence-linked multilingual indicators for analyst review.
+
+          ### Implemented investigator workflow
+
+          1. An authenticated investigator opens a case they are authorized to access.
+          2. The investigator submits one supported artifact with structured source metadata and, where required, an authority reference.
+          3. DARKNETRA rejects disallowed size, malformed archives, unsupported bytes and declared-versus-detected MIME conflicts before committing evidence metadata.
+          4. The API streams the original through verified staging, computes cryptographic digests and atomically promotes it to content-addressed storage. Uploaded filenames never become storage paths.
+          5. PostgreSQL records the immutable manifest, encrypted sensitive metadata, custody event, audit event and durable idempotent processing job.
+          6. Isolated workers create safe derivatives for supported WARC, HTML, text, JSON, CSV, ZIP/chat-export, image and text-PDF inputs. Originals are never rewritten.
+          7. The extraction pipeline preserves raw offsets while normalizing Unicode, scripts and bounded transliteration candidates for English, Hindi, Punjabi and common Romanized/Hinglish forms.
+          8. Deterministic validators identify quantities, prices, contacts, URLs/onion candidates, OpenPGP material and Bitcoin/Ethereum/Monero address candidates. Invalid checksums and malformed protocol material are rejected.
+          9. Taxonomy and optional local semantic adapters produce versioned entity observations only when an exact source span exists. Model unavailability is explicit; it never silently fabricates an entity.
+          10. Investigators review evidence, entities, exact context, validation status, language/script, provenance and emerging-term candidates in case-scoped dashboard views.
+
+          Indicator presence is evidence for investigation, not proof of ownership, identity, criminality or guilt. DARKNETRA does not bypass credentials or encryption, contact sellers, purchase prohibited goods, or perform unrestricted live collection.
+
+          ### Supported preservation inputs
+
+          | Family | Preservation and processing boundary |
+          |---|---|
+          | WARC / WARC.GZ | Record-level extraction with source record references and bounded decompression |
+          | HTML | Active content is never executed; scripts, forms and unsafe URLs are removed from investigator previews |
+          | TXT / CSV / JSON | Bounded decoding and structured extraction with exact source offsets |
+          | ZIP / chat exports | Path traversal, absolute paths, links, nested archives and compression bombs are rejected |
+          | Images | Original bytes remain immutable; metadata-stripped preview derivatives are separate evidence children |
+          | Text PDFs | Original preservation plus text/preview derivatives; OCR is outside this milestone |
+
+          ### Quick installation with Docker
+
+          Requirements: Git, Docker Engine with Compose v2, and approximately 8 GB of free memory for the default development stack.
+
+          ```bash
+          git clone https://github.com/jrdevadattan/darknetra.git
+          cd darknetra
+          git switch testing-codex
+          cp .env.example .env
+          ```
+
+          Generate independent development keys. Do not reuse these commands for production key custody:
+
+          ```bash
+          python - <<'PY'
+          import base64, json, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode('ascii')
+          jwt, field, blind = key(), key(), key()
+          print(f'DARKNETRA_JWT_SIGNING_KEY_B64={jwt}')
+          print(f'DARKNETRA_FIELD_KEY_V1_B64={field}')
+          print('DARKNETRA_FIELD_KEYRING_B64_JSON=' + json.dumps({'v1': field}, separators=(',', ':')))
+          print('DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1')
+          print(f'DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}')
+          PY
+          ```
+
+          Copy the generated assignments into `.env`, choose a non-default PostgreSQL password, and start the stack:
+
+          ```bash
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d
+          docker compose exec api uv run --no-sync alembic -c apps/api/alembic.ini upgrade head
+          docker compose ps
+          ```
+
+          Default development endpoints:
+
+          - Dashboard: `http://localhost:3000`
+          - API: `http://localhost:8000`
+          - OpenAPI: `http://localhost:8000/docs`
+
+          Stop the stack without deleting persistent evidence/database volumes:
+
+          ```bash
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml down
+          ```
+
+          Use `down -v` only for disposable synthetic development environments; it deletes PostgreSQL and Evidence Vault volumes.
+
+          ### Native development installation
+
+          Required tools: Python 3.12, `uv`, Node.js 22, pnpm through Corepack, PostgreSQL 18, Redis 7.4, GnuPG and `libmagic`.
+
+          ```bash
+          corepack enable
+          uv sync --all-packages --dev --frozen
+          pnpm install --frozen-lockfile
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          ```
+
+          Start the services in separate terminals:
+
+          ```bash
+          uv run uvicorn darknetra_api.main:app --app-dir apps/api --reload --host 0.0.0.0 --port 8000
+          uv run celery -A darknetra_api.jobs.celery_app:celery_app worker --loglevel=INFO --queues=ingest --concurrency=1
+          pnpm --filter @darknetra/web dev
+          ```
+
+          ### Verification commands
+
+          ```bash
+          uv run ruff check .
+          uv run pytest -q
+          pnpm --filter @darknetra/web lint
+          pnpm --filter @darknetra/web typecheck
+          pnpm --filter @darknetra/web test
+          pnpm --filter @darknetra/web build
+          uv run python evaluation/extraction/score.py \
+            --dataset datasets/synthetic/extraction \
+            --output docs/verification/extraction-evaluation
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config
+          ```
+
+          Observed release evidence is stored in:
+
+          - `docs/verification/plan-03-evidence-vault-ingestion.md`
+          - `docs/verification/plan-04-extraction-indicators.md`
+          - `docs/verification/plans-03-04-release-gate.md`
+          <!-- PLAN34_VERIFIED_END -->'''
+          block = '\n'.join(line[10:] if line.startswith('          ') else line for line in block.splitlines())
+
+          if start in text and end in text:
+              before, remainder = text.split(start, 1)
+              _old, after = remainder.split(end, 1)
+              text = before.rstrip() + '\n\n' + block + after
+          else:
+              anchor = '\n## Development status'
+              if anchor in text:
+                  text = text.replace(anchor, '\n\n' + block + '\n\n## Development status', 1)
+              else:
+                  text = text.rstrip() + '\n\n' + block + '\n'
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Verify README update against the completed source
+        run: |
+          uv sync --all-packages --dev --frozen
+          pnpm install --frozen-lockfile
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run ruff check .
+          uv run pytest -q
+          pnpm --filter @darknetra/web lint
+          pnpm --filter @darknetra/web typecheck
+          pnpm --filter @darknetra/web test
+          pnpm --filter @darknetra/web build
+          grep -q '<!-- PLAN34_VERIFIED_START -->' README.md
+          grep -q 'evaluation/extraction/score.py' README.md
+          grep -q 'Evidence Vault' README.md
+
+      - name: Commit README and remove one-shot finalizer
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add README.md
+          git rm .github/workflows/finalize-plan34-readme.yml || true
+          git commit -m 'docs: update README for verified Plans 03 and 04'
+          git pull --rebase origin testing-codex
+          git push origin HEAD:testing-codex
