@@ -1,0 +1,56 @@
+name: Temporary sanitized implementation status probe
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/status-probe-private.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - name: Publish sanitized status
+        env:
+          TOPIC: darknetra-status-9f62c5c2e4a64c03b99b9b73b62f3d53
+        run: |
+          python - <<'PY' >/tmp/status.json
+          import json
+          from pathlib import Path
+          import subprocess
+
+          def exists(path): return Path(path).is_file()
+          workflows=sorted(p.name for p in Path('.github/workflows').glob('*.yml'))
+          diagnostics=sorted(str(p) for p in Path('docs/verification').glob('*diagnostic*.md'))
+          status={
+            'kind':'darknetra-sanitized-status',
+            'head':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
+            'plan03_final':exists('docs/verification/plan-03-evidence-vault-ingestion.md'),
+            'plan04_final':exists('docs/verification/plan-04-extraction-indicators.md'),
+            'plan03_architecture':exists('docs/architecture/evidence-vault.md'),
+            'plan04_architecture':exists('docs/architecture/extraction.md'),
+            'readme_plan03':'PLAN03_STATUS_START' in Path('README.md').read_text(encoding='utf-8',errors='ignore'),
+            'readme_plan04':'PLAN04_STATUS_START' in Path('README.md').read_text(encoding='utf-8',errors='ignore'),
+            'plan03_one_shots':[name for name in workflows if name.startswith('plan03-')],
+            'plan04_one_shots':[name for name in workflows if name.startswith('plan04-')],
+            'diagnostic_files':diagnostics,
+            'entity_model':exists('apps/api/darknetra_api/models/entity.py'),
+            'extraction_service':exists('apps/api/darknetra_api/services/extraction.py'),
+            'entities_route':exists('apps/api/darknetra_api/routes/entities.py'),
+            'entities_ui':exists('apps/web/src/features/entities/entity-explorer.tsx'),
+            'evaluation_script':exists('scripts/evaluate_entities.py'),
+          }
+          print(json.dumps(status,separators=(',',':')))
+          PY
+          curl --fail --silent --show-error \
+            -H 'Title: DARKNETRA sanitized status' \
+            -H 'Tags: computer' \
+            -d @/tmp/status.json \
+            "https://ntfy.sh/$TOPIC"
