@@ -1,0 +1,99 @@
+name: Plan 04 GitHub Models capability probe
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan04-github-models-probe.yml
+
+permissions:
+  contents: write
+  models: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Invoke GitHub Models
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          endpoint = "https://models.github.ai/inference/chat/completions"
+          payload = {
+              "model": "openai/gpt-4.1",
+              "messages": [
+                  {
+                      "role": "system",
+                      "content": "You are a deterministic capability probe. Return exactly DARKNETRA_MODELS_OK and nothing else.",
+                  },
+                  {"role": "user", "content": "Probe."},
+              ],
+              "temperature": 0,
+              "max_tokens": 32,
+          }
+          request = urllib.request.Request(
+              endpoint,
+              data=json.dumps(payload).encode("utf-8"),
+              headers={
+                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                  "Content-Type": "application/json",
+                  "Accept": "application/json",
+              },
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=120) as response:
+                  body = response.read().decode("utf-8")
+              data = json.loads(body)
+              answer = data["choices"][0]["message"]["content"].strip()
+              if answer != "DARKNETRA_MODELS_OK":
+                  raise RuntimeError(f"unexpected model response: {answer[:120]!r}")
+              outcome = "success"
+              detail = answer
+          except Exception as exc:
+              outcome = "failure"
+              detail = f"{type(exc).__name__}: {str(exc)[:500]}"
+
+          Path("docs/verification").mkdir(parents=True, exist_ok=True)
+          Path("docs/verification/plan04-github-models-probe.md").write_text(
+              "# Plan 04 GitHub Models capability probe\n\n"
+              f"- Outcome: **{outcome}**\n"
+              f"- Detail: `{detail.replace('`', '')}`\n"
+              f"- Source commit: `{os.environ['GITHUB_SHA']}`\n",
+              encoding="utf-8",
+          )
+          if outcome != "success":
+              raise SystemExit(1)
+          PY
+
+      - name: Commit successful probe and remove one-shot workflow
+        if: success()
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/verification/plan04-github-models-probe.md
+          git rm .github/workflows/plan04-github-models-probe.yml
+          git commit -m 'docs: verify GitHub Models implementation capability [skip ci]'
+          git push origin HEAD:testing-codex
+
+      - name: Commit failure diagnostic
+        if: failure()
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/verification/plan04-github-models-probe.md || true
+          git commit -m 'docs: record GitHub Models probe failure [skip ci]' || true
+          git push origin HEAD:testing-codex || true
