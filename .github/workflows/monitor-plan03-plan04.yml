@@ -1,0 +1,229 @@
+name: Monitor DARKNETRA Plans 03 and 04 completion
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/monitor-plan03-plan04.yml
+
+concurrency:
+  group: darknetra-plan03-plan04-monitor
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  actions: read
+  models: read
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Locate and wait for completion workflow
+        id: wait
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RUN_ID=""
+          for _ in $(seq 1 30); do
+            RUN_ID="$(gh api \
+              -H 'Accept: application/vnd.github+json' \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/complete-plan03-plan04.yml/runs?branch=testing-codex&per_page=10" \
+              --jq '.workflow_runs | map(select(.id != env.GITHUB_RUN_ID)) | sort_by(.created_at) | reverse | .[0].id // empty' || true)"
+            if test -n "$RUN_ID"; then break; fi
+            sleep 10
+          done
+          test -n "$RUN_ID"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+          while true; do
+            STATUS="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" --jq '.status')"
+            CONCLUSION="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}" --jq '.conclusion // empty')"
+            echo "run=${RUN_ID} status=${STATUS} conclusion=${CONCLUSION}"
+            if test "$STATUS" = completed; then
+              echo "conclusion=$CONCLUSION" >> "$GITHUB_OUTPUT"
+              break
+            fi
+            sleep 60
+          done
+
+      - name: Record successful completion
+        if: steps.wait.outputs.conclusion == 'success'
+        run: |
+          git fetch origin testing-codex
+          git reset --hard origin/testing-codex
+          mkdir -p docs/verification
+          cat > docs/verification/plans-03-04-monitor-success.md <<EOF
+          # Plans 03 and 04 completion monitor
+
+          - Completion run: \`${{ steps.wait.outputs.run_id }}\`
+          - Conclusion: **success**
+          - Observed: \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/verification/plans-03-04-monitor-success.md
+          git commit -m 'docs: record successful Plans 03 and 04 completion monitor [skip ci]'
+          git push origin HEAD:testing-codex
+
+      - name: Collect failed-run diagnostics
+        if: steps.wait.outputs.conclusion != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch origin testing-codex
+          git reset --hard origin/testing-codex
+          mkdir -p docs/verification
+          gh run view "${{ steps.wait.outputs.run_id }}" --repo "$GITHUB_REPOSITORY" --log-failed \
+            > docs/verification/plans-03-04-failed-run.log 2>&1 || true
+          head -c 120000 docs/verification/plans-03-04-failed-run.log \
+            > docs/verification/plans-03-04-failed-run-truncated.log
+          mv docs/verification/plans-03-04-failed-run-truncated.log \
+            docs/verification/plans-03-04-failed-run.log
+
+      - name: Ask GitHub Models for one root-cause repair
+        if: steps.wait.outputs.conclusion != 'success'
+        env:
+          GH_MODELS_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          import re
+          import subprocess
+          import time
+          import urllib.request
+          from pathlib import Path
+
+          root = Path.cwd()
+          failure = Path("docs/verification/plans-03-04-failed-run.log").read_text(
+              encoding="utf-8", errors="replace"
+          )[-100000:]
+          candidates = [
+              ".github/workflows/complete-plan03-plan04.yml",
+              "scripts/plan_completion_agent.py",
+              "apps/api/pyproject.toml",
+              "apps/web/package.json",
+              "pyproject.toml",
+              "docker-compose.yml",
+              "README.md",
+          ]
+          # Add files named by the failure log, while keeping context bounded.
+          for match in re.findall(
+              r"(?:apps|scripts|docs|evaluation|models|infrastructure)/[A-Za-z0-9_./@()\[\]-]+\.(?:py|ts|tsx|json|toml|yml|yaml|md)",
+              failure,
+          ):
+              candidates.append(match.rstrip(".:,)]"))
+          blocks = []
+          used = 0
+          for relative in dict.fromkeys(candidates):
+              path = root / relative
+              if not path.is_file() or ".git" in path.parts or "node_modules" in path.parts:
+                  continue
+              content = path.read_text(encoding="utf-8", errors="replace")
+              if len(content) > 30000:
+                  content = content[:30000] + "\n...truncated...\n"
+              block = f"\n===== {relative} =====\n{content}"
+              if used + len(block) > 220000:
+                  continue
+              blocks.append(block)
+              used += len(block)
+
+          system = """You are repairing a failed security-focused DARKNETRA implementation workflow. Return JSON only: {\"summary\":string,\"files\":[{\"path\":string,\"content\":string}],\"delete\":[string]}. Each file contains complete UTF-8 content. Find the root cause in the logs; make the smallest real fix. Do not weaken/delete tests, suppress errors, add blanket ignores, expose secrets, add live darknet collection, contact sellers, bypass credentials/encryption, or invent passing metrics. Synthetic fixtures only."""
+          user = (
+              "The Plans 03/04 completion run failed. Repair the root cause so the same workflow can be retriggered.\n\n"
+              "FAILED LOG:\n" + failure + "\n\nRELEVANT FILES:\n" + "".join(blocks)
+          )
+          errors = []
+          response = None
+          for model in ("openai/gpt-4.1", "openai/gpt-4.1-mini", "openai/gpt-4o"):
+              body = json.dumps({
+                  "model": model,
+                  "messages": [
+                      {"role": "system", "content": system},
+                      {"role": "user", "content": user},
+                  ],
+                  "temperature": 0.1,
+                  "max_tokens": 24000,
+              }).encode("utf-8")
+              request = urllib.request.Request(
+                  "https://models.github.ai/inference/chat/completions",
+                  data=body,
+                  headers={
+                      "Authorization": f"Bearer {os.environ['GH_MODELS_TOKEN']}",
+                      "Content-Type": "application/json",
+                  },
+                  method="POST",
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=300) as handle:
+                      payload = json.loads(handle.read().decode("utf-8"))
+                  content = payload["choices"][0]["message"]["content"].strip()
+                  if content.startswith("```"):
+                      content = re.sub(r"^```(?:json)?\s*", "", content)
+                      content = re.sub(r"\s*```$", "", content)
+                  content = content[content.find("{") : content.rfind("}") + 1]
+                  response = json.loads(content)
+                  break
+              except Exception as exc:
+                  errors.append(f"{model}: {type(exc).__name__}: {exc}")
+                  time.sleep(8)
+          if response is None:
+              raise SystemExit(" | ".join(errors))
+
+          forbidden_test_prefixes = ("apps/api/tests/", "apps/web/e2e/", "datasets/synthetic/")
+          for item in response.get("files", []):
+              relative = item["path"]
+              path = Path(relative)
+              if path.is_absolute() or ".." in path.parts or relative.startswith(forbidden_test_prefixes):
+                  raise SystemExit(f"forbidden repair path: {relative}")
+              destination = root / path
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              destination.write_text(item["content"], encoding="utf-8")
+          for relative in response.get("delete", []):
+              path = Path(relative)
+              if path.is_absolute() or ".." in path.parts or relative.startswith(forbidden_test_prefixes):
+                  raise SystemExit(f"forbidden repair deletion: {relative}")
+              destination = root / path
+              if destination.is_file():
+                  destination.unlink()
+          Path("docs/verification/plans-03-04-auto-repair.md").write_text(
+              "# Plans 03 and 04 automatic root-cause repair\n\n"
+              f"- Failed run: `${{ steps.wait.outputs.run_id }}`\n"
+              f"- Summary: {response.get('summary', '')}\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Commit repair and retrigger completion
+        if: steps.wait.outputs.conclusion != 'success'
+        run: |
+          set -euo pipefail
+          COUNT_FILE=docs/verification/plans-03-04-auto-repair-count.txt
+          COUNT=0
+          if test -f "$COUNT_FILE"; then COUNT="$(cat "$COUNT_FILE")"; fi
+          COUNT=$((COUNT + 1))
+          echo "$COUNT" > "$COUNT_FILE"
+          if test "$COUNT" -gt 4; then
+            echo 'Bounded repair limit exceeded.' >&2
+            exit 1
+          fi
+          # Touch both workflows so completion and the next monitor attempt are triggered.
+          echo "# repair-cycle-${COUNT}" >> .github/workflows/complete-plan03-plan04.yml
+          echo "# monitor-cycle-${COUNT}" >> .github/workflows/monitor-plan03-plan04.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m "fix: repair Plans 03 and 04 completion cycle ${COUNT}"
+          git pull --rebase origin testing-codex
+          git push origin HEAD:testing-codex
