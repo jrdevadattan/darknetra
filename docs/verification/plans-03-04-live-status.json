@@ -1,0 +1,447 @@
+{
+  "run": {
+    "actor": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/188529914?v=4",
+      "events_url": "https://api.github.com/users/jrdevadattan/events{/privacy}",
+      "followers_url": "https://api.github.com/users/jrdevadattan/followers",
+      "following_url": "https://api.github.com/users/jrdevadattan/following{/other_user}",
+      "gists_url": "https://api.github.com/users/jrdevadattan/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/jrdevadattan",
+      "id": 188529914,
+      "login": "jrdevadattan",
+      "node_id": "U_kgDOCzy8-g",
+      "organizations_url": "https://api.github.com/users/jrdevadattan/orgs",
+      "received_events_url": "https://api.github.com/users/jrdevadattan/received_events",
+      "repos_url": "https://api.github.com/users/jrdevadattan/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/jrdevadattan/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/jrdevadattan/subscriptions",
+      "type": "User",
+      "url": "https://api.github.com/users/jrdevadattan",
+      "user_view_type": "public"
+    },
+    "artifacts_url": "https://api.github.com/repos/jrdevadattan/darknetra/actions/runs/32267384152/artifacts",
+    "cancel_url": "https://api.github.com/repos/jrdevadattan/darknetra/actions/runs/32267384152/cancel",
+    "check_suite_id": 87472128201,
+    "check_suite_node_id": "CS_kwDOT7YUxM8AAAAUXb7AyQ",
+    "check_suite_url": "https://api.github.com/repos/jrdevadattan/darknetra/check-suites/87472128201",
+    "conclusion": "failure",
+    "created_at": "2026-08-19T14:59:58Z",
+    "display_title": "ci: execute complete Plan 03 and Plan 04 implementation",
+    "event": "push",
+    "head_branch": "testing-codex",
+    "head_commit": {
+      "author": {
+        "email": "jrdevadattan2006@gmail.com",
+        "name": "J R Deva Dattan"
+      },
+      "committer": {
+        "email": "jrdevadattan2006@gmail.com",
+        "name": "J R Deva Dattan"
+      },
+      "id": "322b093a53017ba99ff575af9f0314f47f10c282",
+      "message": "ci: execute complete Plan 03 and Plan 04 implementation",
+      "timestamp": "2026-08-19T14:59:52Z",
+      "tree_id": "99a359e8cb5bb8557b4fbf90f5babebd0adc28fc"
+    },
+    "head_repository": {
+      "archive_url": "https://api.github.com/repos/jrdevadattan/darknetra/{archive_format}{/ref}",
+      "assignees_url": "https://api.github.com/repos/jrdevadattan/darknetra/assignees{/user}",
+      "blobs_url": "https://api.github.com/repos/jrdevadattan/darknetra/git/blobs{/sha}",
+      "branches_url": "https://api.github.com/repos/jrdevadattan/darknetra/branches{/branch}",
+      "collaborators_url": "https://api.github.com/repos/jrdevadattan/darknetra/collaborators{/collaborator}",
+      "comments_url": "https://api.github.com/repos/jrdevadattan/darknetra/comments{/number}",
+      "commits_url": "https://api.github.com/repos/jrdevadattan/darknetra/commits{/sha}",
+      "compare_url": "https://api.github.com/repos/jrdevadattan/darknetra/compare/{base}...{head}",
+      "contents_url": "https://api.github.com/repos/jrdevadattan/darknetra/contents/{+path}",
+      "contributors_url": "https://api.github.com/repos/jrdevadattan/darknetra/contributors",
+      "deployments_url": "https://api.github.com/repos/jrdevadattan/darknetra/deployments",
+      "description": null,
+      "downloads_url": "https://api.github.com/repos/jrdevadattan/darknetra/downloads",
+      "events_url": "https://api.github.com/repos/jrdevadattan/darknetra/events",
+      "fork": false,
+      "forks_url": "https://api.github.com/repos/jrdevadattan/darknetra/forks",
+      "full_name": "jrdevadattan/darknetra",
+      "git_commits_url": "https://api.github.com/repos/jrdevadattan/darknetra/git/commits{/sha}",
+      "git_refs_url": "https://api.github.com/repos/jrdevadattan/darknetra/git/refs{/sha}",
+      "git_tags_url": "https://api.github.com/repos/jrdevadattan/darknetra/git/tags{/sha}",
+      "hooks_url": "https://api.github.com/repos/jrdevadattan/darknetra/hooks",
+      "html_url": "https://github.com/jrdevadattan/darknetra",
+      "id": 1337332932,
+      "issue_comment_url": "https://api.github.com/repos/jrdevadattan/darknetra/issues/comments{/number}",
+      "issue_events_url": "https://api.github.com/repos/jrdevadattan/darknetra/issues/events{/number}",
+      "issues_url": "https://api.github.com/repos/jrdevadattan/darknetra/issues{/number}",
+      "keys_url": "https://api.github.com/repos/jrdevadattan/darknetra/keys{/key_id}",
+      "labels_url": "https://api.github.com/repos/jrdevadattan/darknetra/labels{/name}",
+      "languages_url": "https://api.github.com/repos/jrdevadattan/darknetra/languages",
+      "merges_url": "https://api.github.com/repos/jrdevadattan/darknetra/merges",
+      "milestones_url": "https://api.github.com/repos/jrdevadattan/darknetra/milestones{/number}",
+      "name": "darknetra",
+      "node_id": "R_kgDOT7YUxA",
+      "notifications_url": "https://api.github.com/repos/jrdevadattan/darknetra/notifications{?since,all,participating}",
+      "owner": {
+        "avatar_url": "https://avatars.githubusercontent.com/u/188529914?v=4",
+        "events_url": "https://api.github.com/users/jrdevadattan/events{/privacy}",
+        "followers_url": "https://api.github.com/users/jrdevadattan/followers",
+        "following_url": "https://api.github.com/users/jrdevadattan/following{/other_user}",
+        "gists_url": "https://api.github.com/users/jrdevadattan/gists{/gist_id}",
+        "gravatar_id": "",
+        "html_url": "https://github.com/jrdevadattan",
+        "id": 188529914,
+        "login": "jrdevadattan",
+        "node_id": "U_kgDOCzy8-g",
+        "organizations_url": "https://api.github.com/users/jrdevadattan/orgs",
+        "received_events_url": "https://api.github.com/users/jrdevadattan/received_events",
+        "repos_url": "https://api.github.com/users/jrdevadattan/repos",
+        "site_admin": false,
+        "starred_url": "https://api.github.com/users/jrdevadattan/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/jrdevadattan/subscriptions",
+        "type": "User",
+        "url": "https://api.github.com/users/jrdevadattan",
+        "user_view_type": "public"
+      },
+      "private": true,
+      "pulls_url": "https://api.github.com/repos/jrdevadattan/darknetra/pulls{/number}",
+      "releases_url": "https://api.github.com/repos/jrdevadattan/darknetra/releases{/id}",
+      "stargazers_url": "https://api.github.com/repos/jrdevadattan/darknetra/stargazers",
+      "statuses_url": "https://api.github.com/repos/jrdevadattan/darknetra/statuses/{sha}",
+      "subscribers_url": "https://api.github.com/repos/jrdevadattan/darknetra/subscribers",
+      "subscription_url": "https://api.github.com/repos/jrdevadattan/darknetra/subscription",
+      "tags_url": "https://api.github.com/repos/jrdevadattan/darknetra/tags",
+      "teams_url": "https://api.github.com/repos/jrdevadattan/darknetra/teams",
+      "trees_url": "https://api.github.com/repos/jrdevadattan/darknetra/git/trees{/sha}",
+      "url": "https://api.github.com/repos/jrdevadattan/darknetra"
+    },
+    "head_sha": "322b093a53017ba99ff575af9f0314f47f10c282",
+    "html_url": "https://github.com/jrdevadattan/darknetra/actions/runs/32267384152",
+    "id": 32267384152,
+    "jobs_url": "https://api.github.com/repos/jrdevadattan/darknetra/actions/runs/32267384152/jobs",
+    "logs_url": "https://api.github.com/repos/jrdevadattan/darknetra/actions/runs/32267384152/logs",
+    "name": "Complete DARKNETRA Plans 03 and 04",
+    "node_id": "WFR_kwLOT7YUxM8AAAAHg0k1WA",
+    "path": ".github/workflows/complete-plan03-plan04.yml",
+    "previous_attempt_url": null,
+    "pull_requests": [],
+    "referenced_workflows": [],
+    "repository": {
+      "archive_url": "https://api.github.com/repos/jrdevadattan/darknetra/{archive_format}{/ref}",
+      "assignees_url": "https://api.github.com/repos/jrdevadattan/darknetra/assignees{/user}",
+      "blobs_url": "https://api.github.com/repos/jrdevadattan/darknetra/git/blobs{/sha}",
+      "branches_url": "https://api.github.com/repos/jrdevadattan/darknetra/branches{/branch}",
+      "collaborators_url": "https://api.github.com/repos/jrdevadattan/darknetra/collaborators{/collaborator}",
+      "comments_url": "https://api.github.com/repos/jrdevadattan/darknetra/comments{/number}",
+      "commits_url": "https://api.github.com/repos/jrdevadattan/darknetra/commits{/sha}",
+      "compare_url": "https://api.github.com/repos/jrdevadattan/darknetra/compare/{base}...{head}",
+      "contents_url": "https://api.github.com/repos/jrdevadattan/darknetra/contents/{+path}",
+      "contributors_url": "https://api.github.com/repos/jrdevadattan/darknetra/contributors",
+      "deployments_url": "https://api.github.com/repos/jrdevadattan/darknetra/deployments",
+      "description": null,
+      "downloads_url": "https://api.github.com/repos/jrdevadattan/darknetra/downloads",
+      "events_url": "https://api.github.com/repos/jrdevadattan/darknetra/events",
+      "fork": false,
+      "forks_url": "https://api.github.com/repos/jrdevadattan/darknetra/forks",
+      "full_name": "jrdevadattan/darknetra",
+      "git_commits_url": "https://api.github.com/repos/jrdevadattan/darknetra/git/commits{/sha}",
+      "git_refs_url": "https://api.github.com/repos/jrdevadattan/darknetra/git/refs{/sha}",
+      "git_tags_url": "https://api.github.com/repos/jrdevadattan/darknetra/git/tags{/sha}",
+      "hooks_url": "https://api.github.com/repos/jrdevadattan/darknetra/hooks",
+      "html_url": "https://github.com/jrdevadattan/darknetra",
+      "id": 1337332932,
+      "issue_comment_url": "https://api.github.com/repos/jrdevadattan/darknetra/issues/comments{/number}",
+      "issue_events_url": "https://api.github.com/repos/jrdevadattan/darknetra/issues/events{/number}",
+      "issues_url": "https://api.github.com/repos/jrdevadattan/darknetra/issues{/number}",
+      "keys_url": "https://api.github.com/repos/jrdevadattan/darknetra/keys{/key_id}",
+      "labels_url": "https://api.github.com/repos/jrdevadattan/darknetra/labels{/name}",
+      "languages_url": "https://api.github.com/repos/jrdevadattan/darknetra/languages",
+      "merges_url": "https://api.github.com/repos/jrdevadattan/darknetra/merges",
+      "milestones_url": "https://api.github.com/repos/jrdevadattan/darknetra/milestones{/number}",
+      "name": "darknetra",
+      "node_id": "R_kgDOT7YUxA",
+      "notifications_url": "https://api.github.com/repos/jrdevadattan/darknetra/notifications{?since,all,participating}",
+      "owner": {
+        "avatar_url": "https://avatars.githubusercontent.com/u/188529914?v=4",
+        "events_url": "https://api.github.com/users/jrdevadattan/events{/privacy}",
+        "followers_url": "https://api.github.com/users/jrdevadattan/followers",
+        "following_url": "https://api.github.com/users/jrdevadattan/following{/other_user}",
+        "gists_url": "https://api.github.com/users/jrdevadattan/gists{/gist_id}",
+        "gravatar_id": "",
+        "html_url": "https://github.com/jrdevadattan",
+        "id": 188529914,
+        "login": "jrdevadattan",
+        "node_id": "U_kgDOCzy8-g",
+        "organizations_url": "https://api.github.com/users/jrdevadattan/orgs",
+        "received_events_url": "https://api.github.com/users/jrdevadattan/received_events",
+        "repos_url": "https://api.github.com/users/jrdevadattan/repos",
+        "site_admin": false,
+        "starred_url": "https://api.github.com/users/jrdevadattan/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/jrdevadattan/subscriptions",
+        "type": "User",
+        "url": "https://api.github.com/users/jrdevadattan",
+        "user_view_type": "public"
+      },
+      "private": true,
+      "pulls_url": "https://api.github.com/repos/jrdevadattan/darknetra/pulls{/number}",
+      "releases_url": "https://api.github.com/repos/jrdevadattan/darknetra/releases{/id}",
+      "stargazers_url": "https://api.github.com/repos/jrdevadattan/darknetra/stargazers",
+      "statuses_url": "https://api.github.com/repos/jrdevadattan/darknetra/statuses/{sha}",
+      "subscribers_url": "https://api.github.com/repos/jrdevadattan/darknetra/subscribers",
+      "subscription_url": "https://api.github.com/repos/jrdevadattan/darknetra/subscription",
+      "tags_url": "https://api.github.com/repos/jrdevadattan/darknetra/tags",
+      "teams_url": "https://api.github.com/repos/jrdevadattan/darknetra/teams",
+      "trees_url": "https://api.github.com/repos/jrdevadattan/darknetra/git/trees{/sha}",
+      "url": "https://api.github.com/repos/jrdevadattan/darknetra"
+    },
+    "rerun_url": "https://api.github.com/repos/jrdevadattan/darknetra/actions/runs/32267384152/rerun",
+    "run_attempt": 1,
+    "run_number": 1,
+    "run_started_at": "2026-08-19T14:59:58Z",
+    "status": "completed",
+    "triggering_actor": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/188529914?v=4",
+      "events_url": "https://api.github.com/users/jrdevadattan/events{/privacy}",
+      "followers_url": "https://api.github.com/users/jrdevadattan/followers",
+      "following_url": "https://api.github.com/users/jrdevadattan/following{/other_user}",
+      "gists_url": "https://api.github.com/users/jrdevadattan/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/jrdevadattan",
+      "id": 188529914,
+      "login": "jrdevadattan",
+      "node_id": "U_kgDOCzy8-g",
+      "organizations_url": "https://api.github.com/users/jrdevadattan/orgs",
+      "received_events_url": "https://api.github.com/users/jrdevadattan/received_events",
+      "repos_url": "https://api.github.com/users/jrdevadattan/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/jrdevadattan/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/jrdevadattan/subscriptions",
+      "type": "User",
+      "url": "https://api.github.com/users/jrdevadattan",
+      "user_view_type": "public"
+    },
+    "updated_at": "2026-08-19T15:00:58Z",
+    "url": "https://api.github.com/repos/jrdevadattan/darknetra/actions/runs/32267384152",
+    "workflow_id": 337892763,
+    "workflow_url": "https://api.github.com/repos/jrdevadattan/darknetra/actions/workflows/337892763"
+  },
+  "jobs": [
+    {
+      "completed_at": "2026-08-19T15:00:57Z",
+      "conclusion": "failure",
+      "name": "implement-and-verify",
+      "started_at": "2026-08-19T15:00:01Z",
+      "status": "completed",
+      "steps": [
+        {
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "status": "completed"
+        },
+        {
+          "conclusion": "success",
+          "name": "Initialize containers",
+          "number": 2,
+          "status": "completed"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 3,
+          "status": "completed"
+        },
+        {
+          "conclusion": "success",
+          "name": "Publish pending commit status",
+          "number": 4,
+          "status": "completed"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run actions/setup-python@v5",
+          "number": 5,
+          "status": "completed"
+        },
+        {
+          "conclusion": "success",
+          "name": "Run astral-sh/setup-uv@v10.0.1",
+          "number": 6,
+          "status": "completed"
+        },
+        {
+          "conclusion": "failure",
+          "name": "Run actions/setup-node@v4",
+          "number": 7,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Enable pinned pnpm",
+          "number": 8,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Install native parser and validation tools",
+          "number": 9,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Generate runtime-only cryptographic keys",
+          "number": 10,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Install locked repository dependencies",
+          "number": 11,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Harden the one-shot agent runner",
+          "number": 12,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Execute test-first Plan 03 and Plan 04 batches",
+          "number": 13,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Refresh branch after checkpoint pushes",
+          "number": 14,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Run final migration cycle",
+          "number": 15,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Final backend release gate",
+          "number": 16,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Final frontend release gate",
+          "number": 17,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Run multilingual extraction evaluation",
+          "number": 18,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Run Evidence Vault adversarial and integrity suites explicitly",
+          "number": 19,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Validate Compose and build all application images",
+          "number": 20,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Run repository smoke test",
+          "number": 21,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Run browser suite when configured",
+          "number": 22,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Verify README truthfulness and installation coverage",
+          "number": 23,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Create final observed verification records",
+          "number": 24,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Update execution ledgers and remove one-shot scaffolding",
+          "number": 25,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Commit final documentation and cleanup",
+          "number": 26,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Confirm post-verification source integrity",
+          "number": 27,
+          "status": "completed"
+        },
+        {
+          "conclusion": "success",
+          "name": "Publish terminal commit status",
+          "number": 28,
+          "status": "completed"
+        },
+        {
+          "conclusion": "success",
+          "name": "Commit failure diagnostic",
+          "number": 29,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Post Run actions/setup-node@v4",
+          "number": 54,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Post Run astral-sh/setup-uv@v10.0.1",
+          "number": 55,
+          "status": "completed"
+        },
+        {
+          "conclusion": "skipped",
+          "name": "Post Run actions/setup-python@v5",
+          "number": 56,
+          "status": "completed"
+        },
+        {
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 57,
+          "status": "completed"
+        },
+        {
+          "conclusion": "success",
+          "name": "Stop containers",
+          "number": 58,
+          "status": "completed"
+        },
+        {
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 59,
+          "status": "completed"
+        }
+      ]
+    }
+  ]
+}
