@@ -1,0 +1,7 @@
+name: Temporary ntfy probe 3
+on: [push, workflow_dispatch]
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - run: curl -fsS -d '{"kind":"darknetra-probe-3","value":"alive"}' https://ntfy.sh/darknetra-status-9f62c5c2e4a64c03b99b9b73b62f3d53
