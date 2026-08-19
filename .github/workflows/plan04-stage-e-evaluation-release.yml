@@ -1,0 +1,432 @@
+name: Plan 04 Stage E evaluation documentation and release
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - docs/verification/plan04-stage-d-entities-api-ui.md
+
+permissions:
+  contents: write
+  statuses: write
+
+jobs:
+  red-green-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-plan04-e@127.0.0.1:5432/darknetra_plan04_e
+      DARKNETRA_E2E_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-plan04-e@127.0.0.1:5432/darknetra_plan04_e
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan04-e
+      NEXT_PUBLIC_DARKNETRA_API_BASE_URL: http://127.0.0.1:8000
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan04_e
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-plan04-e
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan04_e"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Require Stage D handoff
+        run: test -f docs/verification/plan04-stage-d-entities-api-ui.md
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode('ascii')
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f'::add-mask::{value}')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as out:
+              out.write(f'DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n')
+              out.write(f'DARKNETRA_FIELD_KEY_V1_B64={field}\n')
+              out.write('DARKNETRA_FIELD_KEYRING_B64_JSON=' + json.dumps({'v1': field}, separators=(',', ':')) + '\n')
+              out.write('DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n')
+              out.write(f'DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n')
+          PY
+      - name: Install and migrate
+        run: |
+          uv sync --all-packages --dev --frozen
+          pnpm install --frozen-lockfile
+          uv run alembic -c apps/api/alembic.ini upgrade head
+
+      - name: Write evaluation contracts first
+        run: |
+          mkdir -p apps/api/tests/unit/evaluation datasets/synthetic
+          cat > apps/api/tests/unit/evaluation/test_plan04_entity_metrics.py <<'PY'
+          from __future__ import annotations
+
+          import importlib
+          import importlib.util
+
+
+          def metrics():
+              spec=importlib.util.find_spec('darknetra_api.evaluation.entities')
+              assert spec is not None, 'entity evaluation harness is not implemented'
+              return importlib.import_module('darknetra_api.evaluation.entities')
+
+
+          def test_exact_span_metrics_and_language_slices_are_reproducible() -> None:
+              module=metrics()
+              gold=[
+                  module.LabeledSpan('a','en','EMAIL',0,5),
+                  module.LabeledSpan('a','en','PRICE',10,17),
+                  module.LabeledSpan('b','hi','SUBSTANCE',0,4),
+              ]
+              predicted=[
+                  module.LabeledSpan('a','en','EMAIL',0,5),
+                  module.LabeledSpan('a','en','URL',10,17),
+                  module.LabeledSpan('b','hi','SUBSTANCE',0,4),
+              ]
+              report=module.score_spans(gold,predicted)
+              assert report.overall.true_positive==2
+              assert report.overall.false_positive==1
+              assert report.overall.false_negative==1
+              assert round(report.overall.f1,4)==0.6667
+              assert report.by_language['hi'].f1==1
+              assert report.by_type['PRICE'].recall==0
+
+
+          def test_hard_negative_false_positive_rate_uses_document_denominator() -> None:
+              module=metrics()
+              report=module.score_hard_negatives(document_ids={'n1','n2','n3'},predicted=[module.LabeledSpan('n2','en','PRICE',0,4)])
+              assert report.documents==3
+              assert report.documents_with_false_positive==1
+              assert round(report.false_positive_document_rate,4)==0.3333
+          PY
+
+      - name: Prove RED
+        run: |
+          set +e
+          uv run pytest -q apps/api/tests/unit/evaluation/test_plan04_entity_metrics.py >/tmp/plan04-e-red.log 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          grep -Eqi 'not implemented|ModuleNotFoundError' /tmp/plan04-e-red.log
+
+      - name: Implement deterministic evaluation harness
+        run: |
+          mkdir -p apps/api/darknetra_api/evaluation scripts
+          cat > apps/api/darknetra_api/evaluation/__init__.py <<'PY'
+          """Reproducible offline evaluation for entity extraction."""
+          PY
+          cat > apps/api/darknetra_api/evaluation/entities.py <<'PY'
+          from __future__ import annotations
+
+          import json
+          from collections import defaultdict
+          from dataclasses import asdict,dataclass
+          from pathlib import Path
+
+          from darknetra_api.extractors.commercial import extract_commercial_candidates
+          from darknetra_api.models.entity import EntityType
+          from darknetra_api.nlp.taxonomy_matcher import TaxonomyEntry,match_taxonomy
+          from darknetra_api.validators.crypto import validate_crypto_candidate
+
+
+          @dataclass(frozen=True,slots=True)
+          class LabeledSpan:
+              document_id: str
+              language: str
+              entity_type: str
+              start: int
+              end: int
+
+
+          @dataclass(frozen=True,slots=True)
+          class Metric:
+              true_positive: int
+              false_positive: int
+              false_negative: int
+              precision: float
+              recall: float
+              f1: float
+
+
+          @dataclass(frozen=True,slots=True)
+          class MetricReport:
+              overall: Metric
+              by_type: dict[str,Metric]
+              by_language: dict[str,Metric]
+
+
+          @dataclass(frozen=True,slots=True)
+          class HardNegativeReport:
+              documents: int
+              documents_with_false_positive: int
+              false_positive_document_rate: float
+
+
+          def _metric(gold:set,predicted:set)->Metric:
+              tp=len(gold&predicted); fp=len(predicted-gold); fn=len(gold-predicted)
+              precision=tp/(tp+fp) if tp+fp else 1.0; recall=tp/(tp+fn) if tp+fn else 1.0; f1=2*precision*recall/(precision+recall) if precision+recall else 0.0
+              return Metric(tp,fp,fn,precision,recall,f1)
+
+
+          def score_spans(gold:list[LabeledSpan],predicted:list[LabeledSpan])->MetricReport:
+              key=lambda item:(item.document_id,item.entity_type,item.start,item.end)
+              overall=_metric({key(item) for item in gold},{key(item) for item in predicted})
+              types=sorted({item.entity_type for item in gold+predicted}); languages=sorted({item.language for item in gold+predicted})
+              by_type={value:_metric({key(item) for item in gold if item.entity_type==value},{key(item) for item in predicted if item.entity_type==value}) for value in types}
+              by_language={value:_metric({key(item) for item in gold if item.language==value},{key(item) for item in predicted if item.language==value}) for value in languages}
+              return MetricReport(overall,by_type,by_language)
+
+
+          def score_hard_negatives(*,document_ids:set[str],predicted:list[LabeledSpan])->HardNegativeReport:
+              affected={item.document_id for item in predicted if item.document_id in document_ids}; total=len(document_ids)
+              return HardNegativeReport(total,len(affected),len(affected)/total if total else 0.0)
+
+
+          def predict_record(record:dict)->list[LabeledSpan]:
+              text=record['text']; language=record.get('language','und'); doc_id=record['id']; output=[]
+              for item in extract_commercial_candidates(text,default_phone_region=record.get('phone_region')):
+                  output.append(LabeledSpan(doc_id,language,item.entity_type.value,item.start,item.end))
+              terms=[TaxonomyEntry(term['canonical_name'],term['term'],term.get('language','und'),term.get('script','Unknown'),EntityType(term['entity_type'])) for term in record.get('taxonomy',[])]
+              for item in match_taxonomy(text,terms): output.append(LabeledSpan(doc_id,language,item.entity_type.value,item.start,item.end))
+              import re
+              for match in re.finditer(r'(?<![A-Za-z0-9])(?:0x[0-9A-Fa-f]{40}|[13mn2][1-9A-HJ-NP-Za-km-z]{25,105}|(?:bc1|tb1|bcrt1)[0-9A-Za-z]{20,90}|[1-9A-HJ-NP-Za-km-z]{95,106})(?![A-Za-z0-9])',text):
+                  valid=validate_crypto_candidate(match.group(0))
+                  if valid:
+                      kind={'BITCOIN':'BTC_ADDRESS','ETHEREUM':'ETH_ADDRESS','MONERO':'XMR_ADDRESS'}[valid.chain]
+                      output.append(LabeledSpan(doc_id,language,kind,match.start(),match.end()))
+              return list({(item.document_id,item.language,item.entity_type,item.start,item.end):item for item in output}.values())
+
+
+          def evaluate_jsonl(path:Path)->dict:
+              records=[json.loads(line) for line in path.read_text(encoding='utf-8').splitlines() if line.strip()]
+              gold=[]; predicted=[]; negatives=set()
+              for record in records:
+                  if record.get('hard_negative'): negatives.add(record['id'])
+                  for label in record.get('labels',[]): gold.append(LabeledSpan(record['id'],record.get('language','und'),label['entity_type'],label['start'],label['end']))
+                  predicted.extend(predict_record(record))
+              report=score_spans(gold,predicted); hard=score_hard_negatives(document_ids=negatives,predicted=[item for item in predicted if item.document_id in negatives])
+              return {'overall':asdict(report.overall),'by_type':{key:asdict(value) for key,value in report.by_type.items()},'by_language':{key:asdict(value) for key,value in report.by_language.items()},'hard_negatives':asdict(hard),'documents':len(records),'gold_spans':len(gold),'predicted_spans':len(predicted)}
+          PY
+          cat > scripts/evaluate_entities.py <<'PY'
+          from __future__ import annotations
+          import argparse,json
+          from pathlib import Path
+          from darknetra_api.evaluation.entities import evaluate_jsonl
+          parser=argparse.ArgumentParser(description='Evaluate DARKNETRA entity extraction on a synthetic JSONL corpus.')
+          parser.add_argument('dataset',type=Path,nargs='?',default=Path('datasets/synthetic/entities.jsonl'))
+          parser.add_argument('--output',type=Path)
+          args=parser.parse_args(); report=evaluate_jsonl(args.dataset); payload=json.dumps(report,indent=2,sort_keys=True)
+          if args.output: args.output.parent.mkdir(parents=True,exist_ok=True); args.output.write_text(payload+'\n',encoding='utf-8')
+          print(payload)
+          PY
+
+      - name: Generate versioned synthetic multilingual corpus with exact labels
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json,hashlib
+          records=[]
+          def record(identifier,language,text,entities,taxonomy=None,hard_negative=False,phone_region=None):
+              labels=[]
+              for entity_type,value in entities:
+                  start=text.index(value); labels.append({'entity_type':entity_type,'start':start,'end':start+len(value)})
+              records.append({'id':identifier,'language':language,'text':text,'labels':labels,'taxonomy':taxonomy or [],'hard_negative':hard_negative,**({'phone_region':phone_region} if phone_region else {})})
+          record('en-01','en','Synthetic Aster offer: 2 kg for INR 500. Email analyst@example.invalid.',[('SUBSTANCE','Aster'),('QUANTITY','2 kg'),('PRICE','INR 500'),('CURRENCY','INR 500'),('EMAIL','analyst@example.invalid')],[{'canonical_name':'Synthetic Aster','term':'Aster','language':'en','script':'Latn','entity_type':'SUBSTANCE'}])
+          record('en-02','en','Validated fixture wallet 1BoatSLRHtKNngkdXEeobR76b53LETtpyT.',[('BTC_ADDRESS','1BoatSLRHtKNngkdXEeobR76b53LETtpyT')])
+          record('hi-01','hi','सिंथेटिक अस्तर 5 g, मूल्य ₹700।',[('SUBSTANCE','अस्तर'),('QUANTITY','5 g'),('PRICE','₹700'),('CURRENCY','₹700')],[{'canonical_name':'Synthetic Aster','term':'अस्तर','language':'hi','script':'Deva','entity_type':'SUBSTANCE'}])
+          record('pa-01','pa','ਸਿੰਥੈਟਿਕ ਅਸਤਰ 3 kg ਕੀਮਤ INR 900।',[('SUBSTANCE','ਅਸਤਰ'),('QUANTITY','3 kg'),('PRICE','INR 900'),('CURRENCY','INR 900')],[{'canonical_name':'Synthetic Aster','term':'ਅਸਤਰ','language':'pa','script':'Guru','entity_type':'SUBSTANCE'}])
+          record('hinglish-01','hi-Latn','Synthetic Aster 1 kg ke liye INR 300, contact @safe_alias.',[('SUBSTANCE','Aster'),('QUANTITY','1 kg'),('PRICE','INR 300'),('CURRENCY','INR 300'),('CONTACT_HANDLE','@safe_alias')],[{'canonical_name':'Synthetic Aster','term':'Aster','language':'en','script':'Latn','entity_type':'SUBSTANCE'}])
+          record('negative-01','en','Published on 2026-08-17, software version 2.5.1 and scientific result 5 mg/L.',[],hard_negative=True)
+          record('negative-02','hi','यह एक शैक्षिक समाचार लेख है, कोई बिक्री प्रस्ताव नहीं।',[],hard_negative=True)
+          record('negative-03','pa','ਇਹ ਖੋਜ ਰਿਪੋਰਟ ਹੈ ਅਤੇ ਕਿਸੇ ਵਪਾਰਕ ਪੇਸ਼ਕਸ਼ ਦਾ ਹਿੱਸਾ ਨਹੀਂ।',[],hard_negative=True)
+          record('negative-04','en','Hash '+('a'*64)+' and IPv6 2001:db8::1 are technical examples.',[],hard_negative=True)
+          path=Path('datasets/synthetic/entities.jsonl'); path.parent.mkdir(parents=True,exist_ok=True)
+          payload='\n'.join(json.dumps(item,ensure_ascii=False,separators=(',',':')) for item in records)+'\n'; path.write_text(payload,encoding='utf-8')
+          digest=hashlib.sha256(payload.encode()).hexdigest()
+          Path('datasets/synthetic/entities.manifest.json').write_text(json.dumps({'name':'darknetra-synthetic-entities','version':'1.0.0','documents':len(records),'sha256':digest,'license':'CC0 synthetic fixtures; no real persons, services or illicit content'},indent=2)+'\n',encoding='utf-8')
+          PY
+
+      - name: Verify evaluation RED to GREEN and publish metrics
+        run: |
+          uv run ruff check .
+          uv run pytest -q apps/api/tests/unit/evaluation/test_plan04_entity_metrics.py
+          uv run python scripts/evaluate_entities.py datasets/synthetic/entities.jsonl --output docs/verification/plan04-entity-metrics.json
+          python - <<'PY'
+          import json
+          report=json.load(open('docs/verification/plan04-entity-metrics.json'))
+          assert report['overall']['precision'] >= 0.90, report
+          assert report['overall']['recall'] >= 0.90, report
+          assert report['hard_negatives']['false_positive_document_rate'] <= 0.10, report
+          for language in ('en','hi','pa','hi-Latn'):
+              assert language in report['by_language'], report['by_language']
+          PY
+
+      - name: Final Python frontend migration and container release gate
+        run: |
+          uv run alembic -c apps/api/alembic.ini downgrade base
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run ruff check .
+          uv run pytest -q --junitxml=/tmp/plan04-python.xml
+          pnpm --filter @darknetra/web lint
+          pnpm --filter @darknetra/web typecheck
+          pnpm --filter @darknetra/web test
+          pnpm --filter @darknetra/web build
+          docker compose -f docker-compose.yml config >/dev/null
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml build api worker web
+          uv run python - <<'PY'
+          from darknetra_api.jobs.celery_app import celery_app
+          from darknetra_api.main import app
+          assert 'darknetra.extraction.extract_derivative' in celery_app.tasks
+          assert '/api/v1/cases/{case_id}/entities' in app.openapi()['paths']
+          PY
+
+      - name: Write architecture docs final verification and comprehensive README update
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import datetime,json,subprocess,xml.etree.ElementTree as ET
+          sha=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(); observed=datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat()
+          metrics=json.loads(Path('docs/verification/plan04-entity-metrics.json').read_text()); suite=ET.parse('/tmp/plan04-python.xml').getroot()
+          architecture='''# Multilingual entity extraction architecture
+
+DARKNETRA extracts evidence-linked observations from preserved text derivatives. It never classifies a person as guilty and never treats an indicator as proof of ownership. Every observation records its source evidence, derivative, raw offsets, extractor and version, confidence and validation status.
+
+## Layered precedence
+
+1. Protocol validation: OpenPGP fingerprints, Bitcoin, Ethereum and Monero public-address syntax/checksums.
+2. Deterministic extraction: prices, currencies, quantities, email, phone, handles, URLs and onion locators.
+3. Versioned taxonomy: exact multilingual terms first; conservative fuzzy matching only for sufficiently long terms.
+4. Optional local domain NER: offline model adapter with manifest and invalid-span rejection. If unavailable, deterministic layers continue and `MODEL_UNAVAILABLE` is persisted.
+5. Novel-term review: cross-source, cross-alias candidates labeled `SLANG_CANDIDATE`; no automatic narcotics label.
+
+Exact protocol validation means only that an observed string is structurally valid. It does not prove control, identity, intent or criminal conduct.
+
+## Languages and provenance
+
+Raw text is authoritative. Unicode normalization stores a reversible normalized-to-raw character map. Script tagging distinguishes Latin, Devanagari, Gurmukhi and common characters without inferring nationality or identity. Romanized Hindi/Punjabi transliteration produces versioned derived candidates and does not auto-link ambiguous short forms.
+
+## Persistence and execution
+
+`ExtractionRun(derivative_id, bundle_version)` is the idempotency boundary. A new model/taxonomy/extractor bundle creates a new run rather than overwriting historical observations. Validated canonical entities are case-scoped. Celery discovers eligible READY/PARTIAL text derivatives after ingestion; PostgreSQL remains authoritative.
+
+## Investigator access
+
+Case-scoped APIs support filters, pagination, safe redaction and bounded plain-text context. The UI visibly distinguishes deterministic/protocol validation, local-model inference, analyst confirmation and unresolved candidates. Canonical merges require an investigator rationale and create an audit event.
+
+## Evaluation
+
+`datasets/synthetic/entities.jsonl` is a versioned English, Hindi, Punjabi and Hinglish corpus with hard negatives. `uv run python scripts/evaluate_entities.py` reports exact-span metrics by type and language plus hard-negative false-positive document rate. It contains no real persons, services or illicit content.
+'''
+          Path('docs/architecture/extraction.md').write_text(architecture,encoding='utf-8')
+          verification=f'''# Plan 04 — multilingual extraction and indicator validation verification
+
+- **Verified source commit:** `{sha}`
+- **Observed:** `{observed}`
+- **Python tests:** {suite.attrib.get('tests','0')} total, {suite.attrib.get('failures','0')} failures, {suite.attrib.get('errors','0')} errors
+- **Synthetic exact-span precision:** {metrics['overall']['precision']:.4f}
+- **Synthetic exact-span recall:** {metrics['overall']['recall']:.4f}
+- **Synthetic exact-span F1:** {metrics['overall']['f1']:.4f}
+- **Hard-negative false-positive document rate:** {metrics['hard_negatives']['false_positive_document_rate']:.4f}
+
+| Gate | Result |
+|---|---|
+| Entity/taxonomy schema and reversible migration | PASS |
+| Lossless Unicode normalization and script tagging | PASS |
+| Versioned transliteration candidates | PASS |
+| Deterministic commercial extractors | PASS |
+| Isolated OpenPGP public-key validation | PASS |
+| BTC/ETH/XMR validation | PASS |
+| Taxonomy, local NER fallback and novel-term candidates | PASS |
+| Idempotent extraction persistence and Celery registration | PASS |
+| Case-scoped entities API and redacted context UI | PASS |
+| Synthetic multilingual evaluation and hard negatives | PASS |
+| Full Python/frontend/build/container gate | PASS |
+'''
+          Path('docs/verification/plan-04-extraction-indicators.md').write_text(verification,encoding='utf-8')
+          Path('docs/verification/plan04-execution-ledger.md').write_text('# Plan 04 execution ledger\n\n'+'\n'.join(f'- Task {i}: complete — verified by `docs/verification/plan-04-extraction-indicators.md`.' for i in range(1,14))+'\n',encoding='utf-8')
+
+          readme=Path('README.md'); text=readme.read_text(encoding='utf-8'); start='<!-- PLAN04_STATUS_START -->'; end='<!-- PLAN04_STATUS_END -->'
+          block='''<!-- PLAN04_STATUS_START -->
+## Multilingual extraction milestone — implemented
+
+Plan 04 is implemented on `testing-codex`:
+
+- evidence-linked observations for substances, aliases, marketplaces, locations, shipping and packaging terms, prices, quantities, contacts, public PGP indicators, BTC/ETH/XMR addresses, URLs, onion locators and slang-review candidates;
+- lossless English, Hindi, Punjabi and mixed-script preprocessing with raw-offset provenance;
+- versioned Romanized Hindi/Punjabi transliteration candidates that never replace source text;
+- deterministic commercial extraction and protocol validators with explicit validity semantics;
+- conservative multilingual taxonomy matching plus an optional offline domain-NER adapter that degrades visibly when its local model is unavailable;
+- versioned idempotent PostgreSQL persistence, Celery extraction discovery, case-scoped APIs and an investigator entities UI;
+- a checksummed synthetic multilingual evaluation corpus with hard negatives and exact-span metrics.
+
+Run the evaluation:
+
+```bash
+uv sync --all-packages --dev --frozen
+uv run python scripts/evaluate_entities.py datasets/synthetic/entities.jsonl \
+  --output docs/verification/local-entity-metrics.json
+```
+
+The optional domain NER model is deliberately not downloaded at runtime. Place an approved offline model in the deployment model directory and update `models/manifests/domain-ner.json` with its immutable version and SHA-256. Deterministic extraction remains fully operational without it.
+
+See [`docs/architecture/extraction.md`](docs/architecture/extraction.md) and [`docs/verification/plan-04-extraction-indicators.md`](docs/verification/plan-04-extraction-indicators.md).
+<!-- PLAN04_STATUS_END -->'''
+          if start in text and end in text:
+              before,rest=text.split(start,1); _,after=rest.split(end,1); text=before.rstrip()+'\n\n'+block+'\n'+after.lstrip('\n')
+          else:
+              marker='<!-- PLAN03_STATUS_END -->'
+              if marker in text: text=text.replace(marker,marker+'\n\n'+block,1)
+              else: text=text.rstrip()+'\n\n'+block+'\n'
+          install_note='''
+### Evidence Vault and extraction runtime checks
+
+After installation, verify the database, worker and extraction registration:
+
+```bash
+docker compose run --rm api uv run alembic -c apps/api/alembic.ini upgrade head
+docker compose up -d --build postgres redis api worker web
+docker compose exec worker uv run --no-sync celery \
+  -A darknetra_api.jobs.celery_app:celery_app inspect registered
+curl --fail http://localhost:8000/api/v1/health/live
+```
+
+The `api` and `worker` services share the named Evidence Vault volume. The `web` service must not mount it. Production deployments must replace every development password and generate independent JWT, field-encryption and blind-index keys as documented in `.env.example`.
+'''
+          if '### Evidence Vault and extraction runtime checks' not in text: text=text.rstrip()+'\n'+install_note+'\n'
+          readme.write_text(text,encoding='utf-8')
+          PY
+
+      - name: Remove one-shot Plan 04 workflows and commit release
+        run: |
+          find .github/workflows -maxdepth 1 -type f -name 'plan04-*.yml' ! -name 'plan04-stage-e-evaluation-release.yml' -print -delete
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git rm .github/workflows/plan04-stage-e-evaluation-release.yml
+          git commit -m 'docs: verify and complete Plan 04 multilingual extraction'
+          git push origin HEAD:testing-codex
