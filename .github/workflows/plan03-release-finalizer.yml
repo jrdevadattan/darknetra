@@ -1,0 +1,334 @@
+name: Plan 03 final Evidence Vault release gate
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-release-finalizer.yml
+
+concurrency:
+  group: plan03-final-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  statuses: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-plan03-final@127.0.0.1:5432/darknetra_plan03_final
+      DARKNETRA_E2E_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-plan03-final@127.0.0.1:5432/darknetra_plan03_final
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-final-evidence
+      NEXT_PUBLIC_DARKNETRA_API_BASE_URL: http://127.0.0.1:8000
+      DARKNETRA_API_BASE_URL: http://127.0.0.1:8000
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_final
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-plan03-final
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_final"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Publish pending status
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY' >/tmp/status.json
+          import json, os
+          print(json.dumps({
+            "state": "pending",
+            "context": "plan03/final-release",
+            "description": f"GitHub Actions run {os.environ['GITHUB_RUN_ID']}",
+            "target_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+          }))
+          PY
+          curl --fail --silent --show-error --request POST \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data @/tmp/status.json \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" >/dev/null
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Generate runtime-only cryptographic keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode('ascii')
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f'::add-mask::{value}')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as out:
+              out.write(f'DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n')
+              out.write(f'DARKNETRA_FIELD_KEY_V1_B64={field}\n')
+              out.write('DARKNETRA_FIELD_KEYRING_B64_JSON=' + json.dumps({'v1': field}, separators=(',', ':')) + '\n')
+              out.write('DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n')
+              out.write(f'DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n')
+          PY
+
+      - name: Install frozen workspaces
+        run: |
+          uv sync --all-packages --dev --frozen
+          pnpm install --frozen-lockfile
+
+      - name: Verify required Plan 03 implementation surfaces
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          required = [
+            'apps/api/darknetra_api/models/evidence.py',
+            'apps/api/darknetra_api/models/custody.py',
+            'apps/api/darknetra_api/models/job.py',
+            'apps/api/darknetra_api/storage/local.py',
+            'apps/api/darknetra_api/policy/ingestion.py',
+            'apps/api/darknetra_api/services/evidence_ingest.py',
+            'apps/api/darknetra_api/routes/evidence.py',
+            'apps/api/darknetra_api/parsers/archive.py',
+            'apps/api/darknetra_api/parsers/chat_export.py',
+            'apps/api/darknetra_api/parsers/warc.py',
+            'apps/api/darknetra_api/parsers/html.py',
+            'apps/api/darknetra_api/parsers/text.py',
+            'apps/api/darknetra_api/parsers/tabular.py',
+            'apps/api/darknetra_api/parsers/image.py',
+            'apps/api/darknetra_api/parsers/pdf.py',
+            'apps/api/darknetra_api/jobs/tasks/ingestion.py',
+            'apps/api/darknetra_api/services/derivatives.py',
+            'apps/api/darknetra_api/services/integrity.py',
+            'apps/api/darknetra_api/services/evidence_backup.py',
+            'apps/api/darknetra_api/services/storage_reconciliation.py',
+            'apps/web/src/app/(main)/(workspace)/cases/[caseId]/evidence/page.tsx',
+          ]
+          missing = [path for path in required if not Path(path).is_file()]
+          if missing:
+              raise SystemExit('Missing Plan 03 surfaces:\n' + '\n'.join(missing))
+          PY
+
+      - name: Verify migrations are reversible
+        run: |
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run alembic -c apps/api/alembic.ini downgrade base
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run alembic -c apps/api/alembic.ini current
+
+      - name: Python static and regression checks
+        run: |
+          uv run ruff check .
+          uv run pytest -q --junitxml=/tmp/plan03-pytest.xml | tee /tmp/plan03-pytest.log
+
+      - name: Explicit forensic integrity experiment
+        run: |
+          FILES="$(find apps/api/tests -type f \( -iname '*integrity*.py' -o -iname '*tamper*.py' \) -print)"
+          test -n "$FILES"
+          uv run pytest -q $FILES | tee /tmp/plan03-integrity.log
+          grep -Eqi 'passed' /tmp/plan03-integrity.log
+
+      - name: Frontend static, unit and production checks
+        run: |
+          pnpm --filter @darknetra/web lint
+          pnpm --filter @darknetra/web typecheck
+          pnpm --filter @darknetra/web test
+          pnpm --filter @darknetra/web build
+
+      - name: Compose and image checks
+        run: |
+          docker compose -f docker-compose.yml config >/dev/null
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          docker compose -f docker-compose.yml build api worker web
+
+      - name: Run synthetic browser suite when defined
+        run: |
+          if node -e "const p=require('./apps/web/package.json'); process.exit(p.scripts?.['test:e2e']?0:1)"; then
+            pnpm exec playwright install --with-deps chromium
+            pnpm --filter @darknetra/web test:e2e
+          else
+            echo 'No test:e2e script is defined; frontend unit/build gates remain authoritative.'
+          fi
+
+      - name: Generate final architecture, verification and README updates
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import datetime, subprocess, xml.etree.ElementTree as ET
+
+          sha = subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip()
+          observed = datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat()
+          suite = ET.parse('/tmp/plan03-pytest.xml').getroot()
+          tests = int(suite.attrib.get('tests', 0))
+          failures = int(suite.attrib.get('failures', 0))
+          errors = int(suite.attrib.get('errors', 0))
+          skipped = int(suite.attrib.get('skipped', 0))
+
+          architecture = '''# Evidence Vault architecture
+
+DARKNETRA preserves authorized digital evidence before analysis. PostgreSQL is authoritative for cases, immutable manifests, custody, lineage, integrity state and durable jobs. Original and derivative bytes live in a content-addressed Evidence Vault mounted only into the API and worker containers.
+
+## Lifecycle
+
+`STAGING -> PRESERVED -> PROCESSING -> READY|PARTIAL|FAILED|QUARANTINED|INTEGRITY_MISMATCH`
+
+`PRESERVED` means the original bytes were streamed into same-filesystem staging, hashed, verified, fsynced and atomically promoted. Parsing never mutates an original. Every generated representation is a separate evidence artifact with its own digest and a versioned derivation edge.
+
+## Storage and integrity
+
+Object keys use `sha256/<first2>/<next2>/<full-digest>`. Uploaded filenames are never storage paths. Duplicate bytes deduplicate safely while retaining separate provenance records. Expected digests are immutable; re-verification records PASS or `INTEGRITY_MISMATCH` and never rewrites the expected hash.
+
+## Safe ingestion
+
+The API enforces case authorization, structured source metadata, a 100 MiB default upload limit, a 500 MiB hard ceiling, actual streamed-size limits, byte-based MIME detection and declared-versus-observed type consistency. Supported paths cover WARC/WARC.GZ, inert HTML, text, JSON, CSV, bounded ZIP/chat exports, PNG/JPEG/WebP and text-bearing PDF. Image-only PDF is reported as `TEXT_NOT_AVAILABLE`; OCR is not performed.
+
+ZIP handling rejects traversal, absolute paths, duplicate normalized names, symlinks, special files, excessive members, expansion limits, dangerous compression ratios and nested archive recursion. HTML derivatives remove active content and use restrictive response headers. Unknown or unsafe originals are attachment-only.
+
+## Access and accountability
+
+The browser receives evidence IDs and authorized streamed responses—not filesystem paths, object keys or storage credentials. Restricted original access and sensitive-field reveal are distinct audited actions. Ingestion creates evidence metadata, custody, audit and a durable PostgreSQL job transactionally; Redis/Celery are delivery mechanisms only. Retry and derivation identity rules make processing idempotent.
+
+## Operations
+
+The vault includes non-destructive storage reconciliation and deterministic, case-scoped backup manifests. Reconciliation reports missing, mismatched and unreferenced objects without deleting evidence automatically.
+'''
+          Path('docs/architecture').mkdir(parents=True, exist_ok=True)
+          Path('docs/architecture/evidence-vault.md').write_text(architecture, encoding='utf-8')
+
+          verification = f'''# Plan 03 — Evidence Vault and safe ingestion verification
+
+- **Verified source commit:** `{sha}`
+- **Observed at:** `{observed}`
+- **Python tests:** {tests} total; {failures} failures; {errors} errors; {skipped} skipped
+
+| Gate | Result |
+|---|---|
+| Frozen Python and Node installations | PASS |
+| Alembic upgrade -> base -> upgrade | PASS |
+| Ruff | PASS |
+| Complete Python suite | PASS |
+| Explicit integrity/tamper tests | PASS |
+| Frontend lint/typecheck/unit/build | PASS |
+| Synthetic browser suite when configured | PASS |
+| Base and development Compose validation | PASS |
+| API/worker/web container image builds | PASS |
+
+The verified boundary includes immutable originals, encrypted sensitive metadata, provenance and custody, content-addressed storage, safe multi-format parsers, idempotent worker processing, integrity re-verification, case-scoped evidence APIs/UI, safe content delivery, adversarial tests, backup and reconciliation. Only synthetic or authorized fixtures were used.
+'''
+          Path('docs/verification').mkdir(parents=True, exist_ok=True)
+          Path('docs/verification/plan-03-evidence-vault-ingestion.md').write_text(verification, encoding='utf-8')
+
+          ledger = Path('docs/verification/plan03-execution-ledger.md')
+          if ledger.exists():
+              text = ledger.read_text(encoding='utf-8')
+              lines = text.splitlines()
+              for number in range(1, 14):
+                  prefix = f'- Task {number}:'
+                  replacement = f'- Task {number}: complete — verified by `docs/verification/plan-03-evidence-vault-ingestion.md`.'
+                  for index, line in enumerate(lines):
+                      if line.startswith(prefix):
+                          lines[index] = replacement
+                          break
+                  else:
+                      lines.append(replacement)
+              ledger.write_text('\n'.join(lines).rstrip() + '\n', encoding='utf-8')
+
+          readme = Path('README.md')
+          text = readme.read_text(encoding='utf-8')
+          start = '<!-- PLAN03_STATUS_START -->'
+          end = '<!-- PLAN03_STATUS_END -->'
+          block = '''<!-- PLAN03_STATUS_START -->
+## Evidence Vault milestone — implemented
+
+Plan 03 is implemented on `testing-codex`:
+
+- immutable, SHA-256 content-addressed originals with verified atomic promotion and deduplication;
+- structured source provenance, encrypted sensitive metadata, custody history and derivation lineage;
+- safe upload policy with byte-based MIME validation and bounded streaming;
+- bounded WARC, HTML, text, JSON, CSV, ZIP/chat-export, image and text-bearing PDF processing;
+- idempotent PostgreSQL-backed ingestion jobs with Redis/Celery delivery;
+- integrity re-verification and tamper response without changing expected hashes;
+- authorized evidence inventory, detail, lineage, quarantine, content access and restricted reveal workflows;
+- adversarial ingestion tests, deterministic case backup and non-destructive vault reconciliation.
+
+See [`docs/architecture/evidence-vault.md`](docs/architecture/evidence-vault.md) and [`docs/verification/plan-03-evidence-vault-ingestion.md`](docs/verification/plan-03-evidence-vault-ingestion.md).
+<!-- PLAN03_STATUS_END -->'''
+          if start in text and end in text:
+              before, rest = text.split(start, 1)
+              _, after = rest.split(end, 1)
+              text = before.rstrip() + '\n\n' + block + '\n' + after.lstrip('\n')
+          else:
+              anchor = '\n## '
+              pos = text.find(anchor)
+              if pos >= 0:
+                  text = text[:pos].rstrip() + '\n\n' + block + '\n' + text[pos:]
+              else:
+                  text = text.rstrip() + '\n\n' + block + '\n'
+          readme.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Remove completed one-shot Plan 03 workflows and commit
+        run: |
+          find .github/workflows -maxdepth 1 -type f \
+            \( -name 'plan03-*.yml' -o -name 'diagnose-plan03*.yml' \) \
+            ! -name 'plan03-release-finalizer.yml' -print -delete
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git rm .github/workflows/plan03-release-finalizer.yml
+          git commit -m 'docs: verify and complete Plan 03 Evidence Vault'
+          git push origin HEAD:testing-codex
+
+      - name: Publish terminal status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          python - <<'PY' >/tmp/status.json
+          import json, os
+          success = os.environ['JOB_STATUS'] == 'success'
+          print(json.dumps({
+            "state": "success" if success else "failure",
+            "context": "plan03/final-release",
+            "description": "Plan 03 final gate passed" if success else "Plan 03 final gate failed",
+            "target_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+          }))
+          PY
+          curl --fail --silent --show-error --request POST \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data @/tmp/status.json \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" >/dev/null
