@@ -1,0 +1,310 @@
+name: Supervise DARKNETRA Plans 03 and 04 completion
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/supervise-plan03-plan04.yml
+
+concurrency:
+  group: darknetra-plan03-plan04-supervisor
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  actions: write
+  models: read
+
+jobs:
+  supervise:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Supervise bounded repair cycles
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_MODELS_TOKEN: ${{ github.token }}
+        run: |
+          cat > /tmp/supervise.py <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          import re
+          import shutil
+          import subprocess
+          import time
+          import urllib.request
+          from pathlib import Path
+
+          ROOT = Path.cwd()
+          REPO = os.environ["GITHUB_REPOSITORY"]
+          TOKEN = os.environ["GH_TOKEN"]
+          MODELS_TOKEN = os.environ["GH_MODELS_TOKEN"]
+          MASTER = ".github/workflows/complete-plan03-plan04.yml"
+          MAX_CYCLES = 4
+
+
+          def run(command: str, *, check: bool = True, timeout: int = 1800) -> str:
+              print(f"$ {command}", flush=True)
+              completed = subprocess.run(
+                  ["bash", "-lc", command],
+                  cwd=ROOT,
+                  text=True,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.STDOUT,
+                  timeout=timeout,
+              )
+              print(completed.stdout, flush=True)
+              if check and completed.returncode:
+                  raise RuntimeError(f"command failed ({completed.returncode}): {command}\n{completed.stdout[-20000:]}")
+              return completed.stdout
+
+
+          def gh_json(path: str) -> object:
+              return json.loads(run(f"gh api {json.dumps(path)}", timeout=300))
+
+
+          def latest_master_run() -> dict[str, object] | None:
+              try:
+                  data = gh_json(
+                      f"/repos/{REPO}/actions/workflows/{MASTER.split('/')[-1]}/runs?branch=testing-codex&per_page=10"
+                  )
+              except Exception:
+                  return None
+              runs = data.get("workflow_runs", []) if isinstance(data, dict) else []
+              return runs[0] if runs else None
+
+
+          def wait_for_terminal(run_id: int) -> str:
+              while True:
+                  data = gh_json(f"/repos/{REPO}/actions/runs/{run_id}")
+                  status = str(data.get("status"))
+                  conclusion = data.get("conclusion")
+                  print(f"run={run_id} status={status} conclusion={conclusion}", flush=True)
+                  if status == "completed":
+                      return str(conclusion)
+                  time.sleep(60)
+
+
+          def reset_branch() -> None:
+              run("git fetch origin testing-codex")
+              run("git reset --hard origin/testing-codex")
+
+
+          def collect_failure(run_id: int) -> str:
+              output = run(
+                  f"gh run view {run_id} --repo {json.dumps(REPO)} --log-failed",
+                  check=False,
+                  timeout=600,
+              )
+              return output[-120000:]
+
+
+          def relevant_context(failure: str) -> str:
+              files = [
+                  MASTER,
+                  "scripts/plan_completion_agent.py",
+                  "apps/api/pyproject.toml",
+                  "apps/web/package.json",
+                  "pyproject.toml",
+                  "pnpm-workspace.yaml",
+                  "docker-compose.yml",
+                  "README.md",
+                  "docs/superpowers/plans/2026-08-17-03-evidence-vault-ingestion.md",
+                  "docs/superpowers/plans/2026-08-17-04-extraction-indicators.md",
+              ]
+              pattern = re.compile(
+                  r"(?:apps|scripts|docs|evaluation|datasets|models|infrastructure)/"
+                  r"[A-Za-z0-9_./@()\[\]-]+\.(?:py|ts|tsx|json|toml|yml|yaml|md|csv)"
+              )
+              files.extend(match.rstrip(".,:)]") for match in pattern.findall(failure))
+              blocks: list[str] = []
+              used = 0
+              for relative in dict.fromkeys(files):
+                  path = ROOT / relative
+                  if not path.is_file() or ".git" in path.parts or "node_modules" in path.parts:
+                      continue
+                  content = path.read_text(encoding="utf-8", errors="replace")
+                  if len(content) > 30000:
+                      content = content[:30000] + "\n...truncated...\n"
+                  block = f"\n===== FILE {relative} =====\n{content}"
+                  if used + len(block) > 300000:
+                      continue
+                  blocks.append(block)
+                  used += len(block)
+              return "".join(blocks)
+
+
+          def model_repair(failure: str) -> dict[str, object]:
+              system = """You are the final root-cause repair engineer for DARKNETRA Plans 03 and 04. Return one JSON object only: {\"summary\":string,\"files\":[{\"path\":string,\"content\":string}],\"delete\":[string]}. Each file entry is the complete UTF-8 content. Make the smallest real repair supported by the failed logs. Never change/delete/skip/weaken tests or synthetic labels. Never add blanket ignores, fake success, network model downloads at runtime, live darknet access, credential/encryption bypass, seller contact, purchases, secrets, real criminal identifiers or operational procurement instructions. Preserve immutable originals, case authorization, encrypted metadata, audit/custody, exact source spans, protocol validation and fail-closed behavior."""
+              user = (
+                  "The canonical Plans 03/04 release workflow failed. Diagnose the first root cause and repair it. "
+                  "The same workflow will be rerun from the beginning, so fix source, dependencies, migrations, Docker, README or workflow only as evidence requires.\n\n"
+                  "FAILURE LOG:\n" + failure + "\n\nREPOSITORY CONTEXT:\n" + relevant_context(failure)
+              )
+              errors = []
+              models = (
+                  "openai/gpt-4.1",
+                  "openai/gpt-4.1-mini",
+                  "openai/gpt-4o",
+                  "deepseek/DeepSeek-V3-0324",
+                  "mistral-ai/Codestral-2501",
+              )
+              for model in models:
+                  payload = {
+                      "model": model,
+                      "messages": [
+                          {"role": "system", "content": system},
+                          {"role": "user", "content": user},
+                      ],
+                      "temperature": 0.1,
+                      "max_tokens": 16000,
+                  }
+                  request = urllib.request.Request(
+                      "https://models.github.ai/inference/chat/completions",
+                      data=json.dumps(payload).encode("utf-8"),
+                      headers={
+                          "Authorization": f"Bearer {MODELS_TOKEN}",
+                          "Content-Type": "application/json",
+                          "Accept": "application/json",
+                      },
+                      method="POST",
+                  )
+                  try:
+                      with urllib.request.urlopen(request, timeout=300) as handle:
+                          response = json.loads(handle.read().decode("utf-8"))
+                      content = response["choices"][0]["message"]["content"].strip()
+                      content = re.sub(r"^```(?:json)?\s*", "", content)
+                      content = re.sub(r"\s*```$", "", content)
+                      content = content[content.find("{") : content.rfind("}") + 1]
+                      return json.loads(content)
+                  except Exception as exc:
+                      errors.append(f"{model}: {type(exc).__name__}: {str(exc)[:500]}")
+                      time.sleep(12)
+              raise RuntimeError("No repair model succeeded: " + " | ".join(errors))
+
+
+          def is_test_path(relative: str) -> bool:
+              normalized = relative.replace("\\", "/")
+              return (
+                  normalized.startswith("apps/api/tests/")
+                  or normalized.startswith("apps/web/e2e/")
+                  or normalized.startswith("datasets/synthetic/")
+                  or normalized.endswith((".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx"))
+              )
+
+
+          def apply_repair(response: dict[str, object]) -> None:
+              for item in response.get("files", []):
+                  if not isinstance(item, dict):
+                      raise RuntimeError("invalid repair file entry")
+                  relative = str(item.get("path", ""))
+                  content = item.get("content")
+                  path = Path(relative)
+                  if (
+                      not relative
+                      or not isinstance(content, str)
+                      or path.is_absolute()
+                      or ".." in path.parts
+                      or is_test_path(relative)
+                      or relative.startswith("docs/superpowers/plans/")
+                  ):
+                      raise RuntimeError(f"forbidden repair file: {relative}")
+                  destination = ROOT / path
+                  destination.parent.mkdir(parents=True, exist_ok=True)
+                  destination.write_text(content, encoding="utf-8")
+              for relative in response.get("delete", []):
+                  relative = str(relative)
+                  path = Path(relative)
+                  if path.is_absolute() or ".." in path.parts or is_test_path(relative):
+                      raise RuntimeError(f"forbidden repair deletion: {relative}")
+                  destination = ROOT / path
+                  if destination.is_file():
+                      destination.unlink()
+                  elif destination.is_dir():
+                      shutil.rmtree(destination)
+
+
+          def commit_and_retrigger(cycle: int, summary: str) -> None:
+              master = ROOT / MASTER
+              if not master.exists():
+                  raise RuntimeError("canonical completion workflow is absent before a successful release gate")
+              with master.open("a", encoding="utf-8") as handle:
+                  handle.write(f"\n# supervisor-repair-cycle-{cycle}\n")
+              docs = ROOT / "docs/verification"
+              docs.mkdir(parents=True, exist_ok=True)
+              (docs / "plans-03-04-supervisor-repair.md").write_text(
+                  "# Plans 03 and 04 supervisor repair\n\n"
+                  f"- Cycle: {cycle}\n"
+                  f"- Summary: {summary}\n",
+                  encoding="utf-8",
+              )
+              run("git config user.name 'github-actions[bot]'")
+              run("git config user.email '41898282+github-actions[bot]@users.noreply.github.com'")
+              run("git add -A")
+              run(f"git commit -m 'fix: repair Plans 03 and 04 release cycle {cycle}'")
+              run("git pull --rebase origin testing-codex")
+              run("git push origin HEAD:testing-codex")
+
+
+          def success_already_recorded() -> bool:
+              return (
+                  (ROOT / "docs/verification/plans-03-04-release-gate.md").is_file()
+                  and (ROOT / "docs/verification/plan-03-evidence-vault-ingestion.md").is_file()
+                  and (ROOT / "docs/verification/plan-04-extraction-indicators.md").is_file()
+              )
+
+
+          reset_branch()
+          for cycle in range(1, MAX_CYCLES + 1):
+              if success_already_recorded():
+                  conclusion = "success"
+                  break
+              latest = latest_master_run()
+              if latest is None:
+                  raise RuntimeError("no canonical completion run exists")
+              run_id = int(latest["id"])
+              conclusion = wait_for_terminal(run_id)
+              reset_branch()
+              if conclusion == "success" and success_already_recorded():
+                  break
+              failure = collect_failure(run_id)
+              Path("docs/verification").mkdir(parents=True, exist_ok=True)
+              Path("docs/verification/plans-03-04-supervisor-last-failure.log").write_text(
+                  failure,
+                  encoding="utf-8",
+              )
+              repair = model_repair(failure)
+              apply_repair(repair)
+              # Basic syntax checks catch malformed model output before another expensive run.
+              run("python -m compileall -q apps/api/darknetra_api scripts", check=False)
+              run("git diff --check")
+              commit_and_retrigger(cycle, str(repair.get("summary", "root-cause repair")))
+              time.sleep(30)
+          else:
+              raise RuntimeError("bounded supervisor repair limit exhausted")
+
+          reset_branch()
+          if not success_already_recorded():
+              raise RuntimeError("release run concluded without complete verification records")
+          marker = ROOT / "docs/verification/plans-03-04-supervisor-success.md"
+          marker.write_text(
+              "# Plans 03 and 04 supervisor\n\n"
+              "- Outcome: **success**\n"
+              f"- Observed: `{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}`\n",
+              encoding="utf-8",
+          )
+          run("git config user.name 'github-actions[bot]'")
+          run("git config user.email '41898282+github-actions[bot]@users.noreply.github.com'")
+          run("git add docs/verification/plans-03-04-supervisor-success.md")
+          run("git commit -m 'docs: record supervised Plans 03 and 04 success [skip ci]'")
+          run("git pull --rebase origin testing-codex")
+          run("git push origin HEAD:testing-codex")
+          PY
+          python /tmp/supervise.py
