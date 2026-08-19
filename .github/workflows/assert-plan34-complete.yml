@@ -1,0 +1,159 @@
+name: Assert DARKNETRA Plans 03 and 04 complete
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/assert-plan34-complete.yml
+
+concurrency:
+  group: darknetra-plan34-final-assertion
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  assert-complete:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-final-assert@127.0.0.1:5432/darknetra_plan34_final_assert
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan34-final-assert
+      CI: 'true'
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan34_final_assert
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-final-assert
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan34_final_assert"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Wait for implementation and README finalization
+        run: |
+          set -euo pipefail
+          for ATTEMPT in $(seq 1 300); do
+            git fetch origin testing-codex
+            git reset --hard origin/testing-codex
+            if test -f docs/verification/plans-03-04-release-gate.md \
+              && grep -q 'Outcome: success' docs/verification/plans-03-04-release-gate.md \
+              && grep -q '<!-- PLAN34_VERIFIED_START -->' README.md; then
+              exit 0
+            fi
+            sleep 60
+          done
+          echo 'Timed out before implementation and README reached verified state.' >&2
+          exit 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Install native prerequisites and runtime-only keys
+        run: |
+          corepack enable
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gnupg libmagic1 libmagic-dev
+          python - <<'PY'
+          import base64, json, os, secrets
+          def key(): return base64.b64encode(secrets.token_bytes(32)).decode('ascii')
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind): print(f'::add-mask::{value}')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              output.write(f'DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n')
+              output.write(f'DARKNETRA_FIELD_KEY_V1_B64={field}\n')
+              output.write('DARKNETRA_FIELD_KEYRING_B64_JSON=' + json.dumps({'v1': field}, separators=(',', ':')) + '\n')
+              output.write('DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n')
+              output.write(f'DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n')
+          PY
+
+      - name: Run final independent assertion
+        run: |
+          set -euo pipefail
+          uv sync --all-packages --dev --frozen
+          pnpm install --frozen-lockfile
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run alembic -c apps/api/alembic.ini downgrade base
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run ruff check . | tee /tmp/assert-ruff.log
+          uv run pytest -q | tee /tmp/assert-pytest.log
+          pnpm --filter @darknetra/web lint | tee /tmp/assert-lint.log
+          pnpm --filter @darknetra/web typecheck | tee /tmp/assert-typecheck.log
+          pnpm --filter @darknetra/web test | tee /tmp/assert-web-test.log
+          pnpm --filter @darknetra/web build | tee /tmp/assert-web-build.log
+          rm -rf /tmp/assert-extraction
+          uv run python evaluation/extraction/score.py \
+            --dataset datasets/synthetic/extraction \
+            --output /tmp/assert-extraction | tee /tmp/assert-evaluation.log
+          test -n "$(find /tmp/assert-extraction -type f -print -quit)"
+          docker compose -f docker-compose.yml config >/tmp/assert-compose-base.yml
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/tmp/assert-compose-dev.yml
+          docker compose -f docker-compose.yml build api worker web | tee /tmp/assert-docker.log
+
+      - name: Create completion certificate
+        run: |
+          VERIFIED="$(git rev-parse HEAD)"
+          OBSERVED="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          PYTEST="$(tail -n 5 /tmp/assert-pytest.log | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
+          WEB="$(tail -n 8 /tmp/assert-web-test.log | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
+          EVAL="$(tail -n 10 /tmp/assert-evaluation.log | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
+          mkdir -p docs/verification
+          cat > docs/verification/PLANS_03_04_COMPLETE.md <<EOF
+          # DARKNETRA Plans 03 and 04 — completion certificate
+
+          - **Verified source:** \`${VERIFIED}\`
+          - **Observed:** \`${OBSERVED}\`
+          - **Branch:** \`testing-codex\`
+          - **Outcome:** **COMPLETE**
+
+          This independent fresh runner passed migration reversibility, Ruff, the full Python suite, frontend lint, TypeScript, frontend tests, the Next.js production build, multilingual extraction evaluation, both Compose configurations, and API/worker/web image builds.
+
+          - Python: ${PYTEST}
+          - Frontend: ${WEB}
+          - Evaluation: ${EVAL}
+
+          The certificate covers the implementation contracted by the two immutable plan files. It does not authorize live restricted collection, credential or encryption bypass, seller contact, purchases, or any claim of guilt based solely on an extracted indicator.
+          EOF
+
+      - name: Commit certificate and remove assertion workflow
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/verification/PLANS_03_04_COMPLETE.md
+          git rm .github/workflows/assert-plan34-complete.yml || true
+          git commit -m 'release: certify DARKNETRA Plans 03 and 04 complete'
+          git pull --rebase origin testing-codex
+          git push origin HEAD:testing-codex
