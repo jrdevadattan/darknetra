@@ -1,0 +1,15 @@
+name: Temporary ntfy connectivity probe 2
+on:
+  push:
+    branches: [testing-codex]
+    paths: [.github/workflows/ntfy-probe-2.yml]
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          set -x
+          curl --http1.1 --retry 5 --retry-all-errors --fail-with-body \
+            -H 'Title: DARKNETRA probe 2' \
+            -d '{"kind":"darknetra-probe-2","value":"alive"}' \
+            https://ntfy.sh/darknetra-status-9f62c5c2e4a64c03b99b9b73b62f3d53
