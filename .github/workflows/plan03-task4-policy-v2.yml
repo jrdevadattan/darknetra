@@ -1,0 +1,626 @@
+name: Plan 03 Task 4 ingestion policy TDD v2
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan03-task4-policy-v2.yml
+
+concurrency:
+  group: plan03-task4-policy
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  statuses: write
+
+jobs:
+  red-green:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task4-policy@127.0.0.1:5432/darknetra_plan03_task4_policy_test
+      DARKNETRA_E2E_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task4-policy@127.0.0.1:5432/darknetra_plan03_task4_policy_test
+      DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-task4-policy
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra_plan03_task4_policy_test
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-task4-policy
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task4_policy_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Publish run locator
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY' >/tmp/status.json
+          import json, os
+          print(json.dumps({
+              "state": "pending",
+              "context": "plan03/task4-policy",
+              "description": f"GitHub Actions run {os.environ['GITHUB_RUN_ID']}",
+              "target_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+          }))
+          PY
+          curl --fail --silent --show-error --request POST \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data @/tmp/status.json \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" >/dev/null
+
+      - name: Require the verified content-addressed storage boundary
+        run: |
+          test -f docs/verification/plan03-task3-content-addressed-storage.md
+          grep -q '| Complete Python suite | success |' \
+            docs/verification/plan03-task3-content-addressed-storage.md
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Generate runtime-only keys
+        run: |
+          python - <<'PY'
+          import base64, json, os, secrets
+
+          def key() -> str:
+              return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+
+          jwt, field, blind = key(), key(), key()
+          for value in (jwt, field, blind):
+              print(f"::add-mask::{value}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n")
+              out.write(f"DARKNETRA_FIELD_KEY_V1_B64={field}\n")
+              out.write(
+                  "DARKNETRA_FIELD_KEYRING_B64_JSON="
+                  + json.dumps({"v1": field}, separators=(",", ":"))
+                  + "\n"
+              )
+              out.write("DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n")
+              out.write(f"DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n")
+          PY
+
+      - name: Install frozen Python workspace and migrate
+        run: |
+          uv sync --all-packages --dev --frozen
+          uv run alembic -c apps/api/alembic.ini upgrade head
+
+      - name: Write the Task 4 policy contracts first
+        run: |
+          mkdir -p apps/api/tests/unit/policy
+          cat > apps/api/tests/unit/policy/test_ingestion.py <<'PY'
+          from __future__ import annotations
+
+          import importlib
+          from datetime import UTC, datetime
+
+          import pytest
+          from pydantic import ValidationError
+
+
+          def ingestion():
+              try:
+                  return importlib.import_module("darknetra_api.policy.ingestion")
+              except ModuleNotFoundError as exc:
+                  raise AssertionError("ingestion policy module is not implemented") from exc
+
+
+          def metadata_payload(source_class: str = "SYNTHETIC") -> dict[str, object]:
+              return {
+                  "source_class": source_class,
+                  "source_type": "synthetic.fixture",
+                  "acquisition_method": "authorized_test_generation",
+                  "captured_at": datetime.now(UTC),
+                  "original_timezone": "UTC",
+              }
+
+
+          def test_limits_default_to_100_mib_with_an_absolute_500_mib_ceiling() -> None:
+              policy = ingestion()
+              limits = policy.IngestionLimits()
+              assert limits.max_upload_bytes == 100 * 1024 * 1024
+              assert limits.hard_ceiling_bytes == 500 * 1024 * 1024
+              with pytest.raises(ValueError, match="hard ceiling"):
+                  policy.IngestionLimits(max_upload_bytes=501 * 1024 * 1024)
+              with pytest.raises(ValueError, match="absolute hard ceiling"):
+                  policy.IngestionLimits(hard_ceiling_bytes=501 * 1024 * 1024)
+              with pytest.raises(ValueError, match="positive"):
+                  policy.IngestionLimits(max_upload_bytes=0)
+
+
+          @pytest.mark.parametrize("source_class", ["PUBLIC_OBSERVATION", "AUTHORIZED_IMPORT"])
+          def test_governed_sources_require_an_authority_reference(source_class: str) -> None:
+              policy = ingestion()
+              with pytest.raises(ValidationError, match="authority_reference"):
+                  policy.EvidenceSourceMetadata.model_validate(metadata_payload(source_class))
+
+              payload = metadata_payload(source_class)
+              payload["authority_reference"] = "AUTH-REF-001"
+              parsed = policy.EvidenceSourceMetadata.model_validate(payload)
+              assert parsed.authority_reference == "AUTH-REF-001"
+
+
+          @pytest.mark.parametrize("source_class", ["SYNTHETIC", "RESEARCH_ARCHIVE"])
+          def test_non_live_sources_do_not_invent_an_authority_reference(source_class: str) -> None:
+              policy = ingestion()
+              parsed = policy.EvidenceSourceMetadata.model_validate(metadata_payload(source_class))
+              assert parsed.authority_reference is None
+
+
+          def test_metadata_rejects_naive_capture_time_and_unknown_fields() -> None:
+              policy = ingestion()
+              naive = metadata_payload()
+              naive["captured_at"] = datetime(2026, 8, 19, 10, 30)
+              with pytest.raises(ValidationError, match="timezone-aware"):
+                  policy.EvidenceSourceMetadata.model_validate(naive)
+
+              extra = metadata_payload()
+              extra["uploaded_filename"] = "do-not-trust.exe"
+              with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+                  policy.EvidenceSourceMetadata.model_validate(extra)
+
+
+          def test_declared_length_is_rejected_before_streaming_when_over_limit() -> None:
+              policy = ingestion()
+              limits = policy.IngestionLimits(max_upload_bytes=128)
+              assert policy.validate_content_length(None, limits=limits) is None
+              assert policy.validate_content_length("128", limits=limits) == 128
+              with pytest.raises(policy.UploadSizeExceeded, match="128"):
+                  policy.validate_content_length("129", limits=limits)
+              with pytest.raises(policy.InvalidContentLength):
+                  policy.validate_content_length("not-a-number", limits=limits)
+              with pytest.raises(policy.InvalidContentLength):
+                  policy.validate_content_length("-1", limits=limits)
+
+
+          @pytest.mark.parametrize(
+              ("payload", "media_type", "family"),
+              [
+                  (b"%PDF-1.7\n", "application/pdf", "pdf"),
+                  (b"\x89PNG\r\n\x1a\nrest", "image/png", "image"),
+                  (b"\xff\xd8\xff\xe0rest", "image/jpeg", "image"),
+                  (b"RIFF\x10\x00\x00\x00WEBPrest", "image/webp", "image"),
+                  (b"PK\x03\x04rest", "application/zip", "archive"),
+                  (b"WARC/1.1\r\nWARC-Type: response\r\n", "application/warc", "warc"),
+                  (b"\x1f\x8b\x08\x00rest", "application/gzip", "warc_gzip_candidate"),
+                  (b"<!doctype html><html><body>safe</body></html>", "text/html", "html"),
+                  (b'{"messages": [{"text": "safe"}]}', "application/json", "json"),
+                  (b"plain UTF-8 evidence text\n", "text/plain", "text"),
+              ],
+          )
+          def test_byte_signatures_select_only_allowlisted_parser_families(
+              payload: bytes,
+              media_type: str,
+              family: str,
+          ) -> None:
+              policy = ingestion()
+              detected = policy.detect_media_type(payload)
+              assert detected.media_type == media_type
+              assert detected.parser_family == family
+
+
+          def test_csv_requires_textual_bytes_and_an_explicit_csv_declaration() -> None:
+              policy = ingestion()
+              payload = b"vendor,price,quantity\nalpha,10,1\n"
+              generic = policy.detect_media_type(payload)
+              assert generic.media_type == "text/plain"
+              detected = policy.detect_media_type(
+                  payload,
+                  declared_media_type="text/csv; charset=utf-8",
+              )
+              assert detected.media_type == "text/csv"
+              assert detected.parser_family == "csv"
+
+
+          @pytest.mark.parametrize(
+              "payload",
+              [
+                  b"",
+                  b"\x7fELF\x02\x01\x01\x00",
+                  b"MZ\x90\x00\x03\x00",
+                  b"#!/bin/sh\necho unsafe\n",
+                  b"text\x00with-nul",
+                  b"\xff\xfe\xfd\xfc",
+              ],
+          )
+          def test_empty_binary_and_executable_payloads_are_rejected(payload: bytes) -> None:
+              policy = ingestion()
+              with pytest.raises(policy.UnsupportedMediaType):
+                  policy.detect_media_type(payload)
+
+
+          def test_concrete_declared_mime_must_match_detected_bytes() -> None:
+              policy = ingestion()
+              with pytest.raises(policy.MediaTypeMismatch):
+                  policy.detect_media_type(
+                      b"%PDF-1.7\n",
+                      declared_media_type="image/png",
+                  )
+              detected = policy.detect_media_type(
+                  b"%PDF-1.7\n",
+                  declared_media_type="application/octet-stream",
+              )
+              assert detected.media_type == "application/pdf"
+
+
+          def test_malformed_json_declared_as_json_is_not_silently_accepted_as_text() -> None:
+              policy = ingestion()
+              with pytest.raises(policy.MediaTypeMismatch):
+                  policy.detect_media_type(
+                      b'{"messages": [}',
+                      declared_media_type="application/json",
+                  )
+          PY
+
+      - name: Prove RED before implementation
+        run: |
+          set +e
+          uv run pytest -q apps/api/tests/unit/policy/test_ingestion.py \
+            >/tmp/plan03-task4-policy-red.log 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          grep -q "ingestion policy module is not implemented" \
+            /tmp/plan03-task4-policy-red.log
+
+      - name: Implement the minimal fail-closed ingestion policy
+        run: |
+          mkdir -p apps/api/darknetra_api/policy
+          cat > apps/api/darknetra_api/policy/__init__.py <<'PY'
+          """Fail-closed policy boundaries for untrusted evidence ingestion."""
+          PY
+
+          cat > apps/api/darknetra_api/policy/ingestion.py <<'PY'
+          from __future__ import annotations
+
+          import json
+          import re
+          from dataclasses import dataclass
+          from datetime import datetime
+          from typing import Annotated
+
+          from pydantic import BaseModel, StringConstraints, model_validator
+
+          from darknetra_api.models.evidence import EvidenceSourceClass
+
+          _MIB = 1024 * 1024
+          _DEFAULT_MAX_UPLOAD_BYTES = 100 * _MIB
+          _ABSOLUTE_HARD_CEILING_BYTES = 500 * _MIB
+          _MEDIA_TYPE_TOKEN = re.compile(r"^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$")
+          _CONTROL_BYTES = frozenset(range(0, 9)) | frozenset(range(11, 13)) | frozenset(
+              range(14, 32)
+          )
+          _EXECUTABLE_PREFIXES = (b"\x7fELF", b"MZ", b"#!")
+
+
+          class IngestionPolicyError(ValueError):
+              """Base class for fail-closed ingestion-policy failures."""
+
+
+          class UploadSizeExceeded(IngestionPolicyError):
+              """The declared or observed upload exceeds the active policy."""
+
+
+          class InvalidContentLength(IngestionPolicyError):
+              """A declared content length is malformed or negative."""
+
+
+          class UnsupportedMediaType(IngestionPolicyError):
+              """Bytes do not match an approved evidence parser family."""
+
+
+          class MediaTypeMismatch(IngestionPolicyError):
+              """A concrete caller declaration contradicts byte-level detection."""
+
+
+          @dataclass(frozen=True, slots=True)
+          class IngestionLimits:
+              max_upload_bytes: int = _DEFAULT_MAX_UPLOAD_BYTES
+              hard_ceiling_bytes: int = _ABSOLUTE_HARD_CEILING_BYTES
+              sniff_bytes: int = 64 * 1024
+              stream_chunk_bytes: int = 1024 * 1024
+
+              def __post_init__(self) -> None:
+                  if self.max_upload_bytes <= 0 or self.hard_ceiling_bytes <= 0:
+                      raise ValueError("upload limits must be positive")
+                  if self.hard_ceiling_bytes > _ABSOLUTE_HARD_CEILING_BYTES:
+                      raise ValueError("configured hard ceiling exceeds the absolute hard ceiling")
+                  if self.max_upload_bytes > self.hard_ceiling_bytes:
+                      raise ValueError("max upload size exceeds the hard ceiling")
+                  if not 4096 <= self.sniff_bytes <= 1024 * 1024:
+                      raise ValueError("sniff byte limit must be between 4096 and 1048576")
+                  if not 4096 <= self.stream_chunk_bytes <= 8 * 1024 * 1024:
+                      raise ValueError("stream chunk size is outside the supported range")
+
+
+          NonEmptyShort = Annotated[
+              str,
+              StringConstraints(strip_whitespace=True, min_length=1, max_length=160),
+          ]
+
+
+          class EvidenceSourceMetadata(BaseModel):
+              model_config = {"extra": "forbid"}
+
+              source_class: EvidenceSourceClass
+              source_type: NonEmptyShort
+              acquisition_method: NonEmptyShort
+              captured_at: datetime
+              original_timezone: Annotated[
+                  str,
+                  StringConstraints(strip_whitespace=True, min_length=1, max_length=80),
+              ]
+              authority_reference: Annotated[
+                  str | None,
+                  StringConstraints(strip_whitespace=True, min_length=1, max_length=500),
+              ] = None
+              source_locator: Annotated[
+                  str | None,
+                  StringConstraints(strip_whitespace=True, min_length=1, max_length=4096),
+              ] = None
+              notes: Annotated[
+                  str | None,
+                  StringConstraints(strip_whitespace=True, min_length=1, max_length=4000),
+              ] = None
+              tool_name: Annotated[
+                  str | None,
+                  StringConstraints(strip_whitespace=True, min_length=1, max_length=120),
+              ] = None
+              tool_version: Annotated[
+                  str | None,
+                  StringConstraints(strip_whitespace=True, min_length=1, max_length=80),
+              ] = None
+
+              @model_validator(mode="after")
+              def validate_governance_and_time(self) -> "EvidenceSourceMetadata":
+                  if self.captured_at.tzinfo is None or self.captured_at.utcoffset() is None:
+                      raise ValueError("captured_at must be timezone-aware")
+                  if self.source_class in {
+                      EvidenceSourceClass.PUBLIC_OBSERVATION,
+                      EvidenceSourceClass.AUTHORIZED_IMPORT,
+                  } and not self.authority_reference:
+                      raise ValueError(
+                          "authority_reference is required for PUBLIC_OBSERVATION "
+                          "and AUTHORIZED_IMPORT"
+                      )
+                  return self
+
+
+          @dataclass(frozen=True, slots=True)
+          class DetectedMedia:
+              media_type: str
+              parser_family: str
+
+
+          _ALIASES = {
+              "application/x-gzip": "application/gzip",
+              "application/x-zip-compressed": "application/zip",
+              "image/jpg": "image/jpeg",
+              "application/xhtml+xml": "text/html",
+              "application/warc+gzip": "application/gzip",
+          }
+
+
+          def normalize_media_type(value: str | None) -> str | None:
+              if value is None:
+                  return None
+              token = value.split(";", 1)[0].strip().lower()
+              token = _ALIASES.get(token, token)
+              if not token or not _MEDIA_TYPE_TOKEN.fullmatch(token):
+                  raise UnsupportedMediaType("declared media type is malformed")
+              return token
+
+
+          def validate_content_length(
+              value: str | int | None,
+              *,
+              limits: IngestionLimits,
+          ) -> int | None:
+              if value is None:
+                  return None
+              if isinstance(value, bool):
+                  raise InvalidContentLength("Content-Length must be a non-negative integer")
+              try:
+                  parsed = int(value)
+              except (TypeError, ValueError) as exc:
+                  raise InvalidContentLength(
+                      "Content-Length must be a non-negative integer"
+                  ) from exc
+              if parsed < 0:
+                  raise InvalidContentLength("Content-Length must be a non-negative integer")
+              if parsed > limits.max_upload_bytes:
+                  raise UploadSizeExceeded(
+                      f"declared upload size exceeds {limits.max_upload_bytes} bytes"
+                  )
+              return parsed
+
+
+          def _looks_like_text(data: bytes) -> bool:
+              if not data or b"\x00" in data:
+                  return False
+              try:
+                  data.decode("utf-8")
+              except UnicodeDecodeError:
+                  return False
+              control_count = sum(byte in _CONTROL_BYTES for byte in data)
+              return control_count / len(data) <= 0.01
+
+
+          def _require_declared_match(declared: str | None, detected: str) -> None:
+              if declared in {None, "application/octet-stream"}:
+                  return
+              if declared == detected:
+                  return
+              if (declared, detected) == ("text/plain", "text/csv"):
+                  return
+              raise MediaTypeMismatch(
+                  f"declared media type {declared!r} does not match detected {detected!r}"
+              )
+
+
+          def detect_media_type(
+              data: bytes,
+              *,
+              declared_media_type: str | None = None,
+          ) -> DetectedMedia:
+              if not isinstance(data, bytes):
+                  raise TypeError("sniff data must be bytes")
+              if not data:
+                  raise UnsupportedMediaType("empty evidence is not supported")
+              if data.startswith(_EXECUTABLE_PREFIXES):
+                  raise UnsupportedMediaType("executable content is not an approved evidence type")
+
+              declared = normalize_media_type(declared_media_type)
+              stripped = data.lstrip()
+              lower = stripped[:4096].lower()
+
+              if data.startswith(b"%PDF-"):
+                  detected = DetectedMedia("application/pdf", "pdf")
+              elif data.startswith(b"\x89PNG\r\n\x1a\n"):
+                  detected = DetectedMedia("image/png", "image")
+              elif data.startswith(b"\xff\xd8\xff"):
+                  detected = DetectedMedia("image/jpeg", "image")
+              elif len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+                  detected = DetectedMedia("image/webp", "image")
+              elif data.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")):
+                  detected = DetectedMedia("application/zip", "archive")
+              elif data.startswith((b"WARC/1.0", b"WARC/1.1")):
+                  detected = DetectedMedia("application/warc", "warc")
+              elif data.startswith(b"\x1f\x8b"):
+                  detected = DetectedMedia("application/gzip", "warc_gzip_candidate")
+              elif (
+                  lower.startswith(b"<!doctype html")
+                  or lower.startswith(b"<html")
+                  or b"<html" in lower
+              ):
+                  detected = DetectedMedia("text/html", "html")
+              elif _looks_like_text(data):
+                  text = data.decode("utf-8")
+                  if stripped.startswith((b"{", b"[")):
+                      try:
+                          json.loads(text)
+                      except json.JSONDecodeError:
+                          detected = DetectedMedia("text/plain", "text")
+                      else:
+                          detected = DetectedMedia("application/json", "json")
+                  elif declared == "text/csv":
+                      detected = DetectedMedia("text/csv", "csv")
+                  else:
+                      detected = DetectedMedia("text/plain", "text")
+              else:
+                  raise UnsupportedMediaType(
+                      "bytes do not match an approved evidence parser family"
+                  )
+
+              _require_declared_match(declared, detected.media_type)
+              return detected
+          PY
+
+      - name: Verify GREEN and the full regression suite
+        run: |
+          uv run ruff check .
+          uv run pytest -q apps/api/tests/unit/policy/test_ingestion.py \
+            | tee /tmp/plan03-task4-policy-focused.log
+          uv run pytest -q | tee /tmp/plan03-task4-policy-full.log
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+
+      - name: Record the policy TDD checkpoint and commit
+        run: |
+          source_sha="$(git rev-parse HEAD)"
+          mkdir -p docs/verification
+          cat > docs/verification/plan03-task4-ingestion-policy.md <<EOF
+          # Plan 03 Task 4 — fail-closed ingestion policy verification
+
+          - **Source before implementation:** \`${source_sha}\`
+          - **Observed (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Runner:** GitHub Actions \`ubuntu-latest\`
+
+          ## TDD evidence
+
+          The policy contracts were written first. The focused test command failed with the expected message \`ingestion policy module is not implemented\` before production code existed.
+
+          | GREEN gate | Outcome |
+          |---|---|
+          | Ruff | success |
+          | Focused ingestion-policy suite | success |
+          | Complete Python regression suite | success |
+          | Docker Compose validation | success |
+
+          ## Verified boundary
+
+          - Default artifact limit: 100 MiB; absolute configurable ceiling: 500 MiB.
+          - Governed live/import source classes require an authority reference.
+          - Capture timestamps must be timezone-aware and metadata rejects unknown fields.
+          - File type is selected from byte signatures, not caller filenames.
+          - Empty, binary, NUL-bearing, ELF, PE and shebang executable payloads fail closed.
+          - A concrete declared MIME type must match detected bytes.
+          - Approved parser families are PDF, image, ZIP archive, WARC, WARC/GZIP candidate, HTML, JSON, CSV and UTF-8 text.
+          EOF
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/api/darknetra_api/policy \
+            apps/api/tests/unit/policy/test_ingestion.py \
+            docs/verification/plan03-task4-ingestion-policy.md
+          for workflow in \
+            .github/workflows/plan03-task4-policy.yml \
+            .github/workflows/plan03-task4-policy-green.yml \
+            .github/workflows/plan03-task4-policy-v2.yml; do
+            test ! -f "$workflow" || git rm "$workflow"
+          done
+          git commit -m 'feat: add fail closed evidence ingestion policy'
+          git pull --rebase origin testing-codex
+          git push origin HEAD:testing-codex
+
+      - name: Publish terminal status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          python - <<'PY' >/tmp/status.json
+          import json, os
+          success = os.environ["JOB_STATUS"] == "success"
+          print(json.dumps({
+              "state": "success" if success else "failure",
+              "context": "plan03/task4-policy",
+              "description": "Task 4 policy gate passed" if success else "Task 4 policy gate failed",
+              "target_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+          }))
+          PY
+          curl --fail --silent --show-error --request POST \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data @/tmp/status.json \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" >/dev/null
