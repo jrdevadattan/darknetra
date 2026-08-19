@@ -1,0 +1,50 @@
+name: Export current testing tree
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/export-current-tree.yml
+
+permissions:
+  contents: write
+
+env:
+  EXPORT_NAME: darknetra-testing-tree
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Create deterministic source archive
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/darknetra-export
+          git archive --format=tar.gz --output=/tmp/darknetra-export/darknetra-testing-codex.tar.gz HEAD
+          sha256sum /tmp/darknetra-export/darknetra-testing-codex.tar.gz > /tmp/darknetra-export/SHA256SUMS
+          printf '%s\n' "$GITHUB_RUN_ID" > /tmp/darknetra-export/run-id.txt
+          printf '%s\n' "$(git rev-parse HEAD)" > /tmp/darknetra-export/commit-sha.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.EXPORT_NAME }}
+          path: /tmp/darknetra-export
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish run locator to branch
+        run: |
+          set -euo pipefail
+          mkdir -p docs/verification
+          printf '%s\n' "$GITHUB_RUN_ID" > docs/verification/current-tree-export-run-id.txt
+          printf '%s\n' "$(git rev-parse HEAD)" > docs/verification/current-tree-export-source-sha.txt
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/verification/current-tree-export-run-id.txt docs/verification/current-tree-export-source-sha.txt
+          git commit -m 'docs: record current tree export [skip ci]'
+          git push origin HEAD:testing-codex
