@@ -1,0 +1,56 @@
+name: Ensure fresh canonical Plans 03 and 04 run
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/retrigger-plan34-if-needed.yml
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  retrigger:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - name: Retrigger only when canonical verification is absent
+        id: trigger
+        run: |
+          set -euo pipefail
+          if test -f docs/verification/plans-03-04-release-gate.md \
+            && grep -q 'Outcome: success' docs/verification/plans-03-04-release-gate.md; then
+            echo 'needed=false' >> "$GITHUB_OUTPUT"
+          else
+            test -f .github/workflows/complete-plan03-plan04.yml
+            test -f scripts/plan_completion_agent.py
+            echo "# fresh-canonical-run-${GITHUB_RUN_ID}" >> .github/workflows/complete-plan03-plan04.yml
+            echo 'needed=true' >> "$GITHUB_OUTPUT"
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/retrigger-plan34-if-needed.yml
+          git add -A
+          git commit -m 'ci: trigger fresh canonical Plans 03 and 04 gate [skip ci]'
+          git pull --rebase origin testing-codex
+          git push origin HEAD:testing-codex
+      - name: Keep only newest primary run
+        if: steps.trigger.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sleep 20
+          mapfile -t RUNS < <(
+            gh api "/repos/${GITHUB_REPOSITORY}/actions/workflows/complete-plan03-plan04.yml/runs?branch=testing-codex&per_page=100" \
+              --jq '.workflow_runs | map(select(.status == "queued" or .status == "in_progress" or .status == "waiting" or .status == "requested" or .status == "pending")) | sort_by(.created_at) | reverse | .[].id'
+          )
+          if test "${#RUNS[@]}" -gt 0; then
+            echo "Keeping newest primary run ${RUNS[0]}"
+            for RUN_ID in "${RUNS[@]:1}"; do
+              gh api --method POST "/repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/cancel" || true
+            done
+          fi
