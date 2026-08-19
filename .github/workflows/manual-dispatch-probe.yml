@@ -1,0 +1,8 @@
+name: Manual dispatch status probe
+on:
+  workflow_dispatch:
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - run: curl -fsS -d '{"kind":"darknetra-manual-dispatch","value":"alive"}' https://ntfy.sh/darknetra-status-9f62c5c2e4a64c03b99b9b73b62f3d53
