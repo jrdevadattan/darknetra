@@ -1,0 +1,44 @@
+name: Repair Plan 03 Task 3 test database name
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/repair-plan03-task3-test-database.yml
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Apply the isolated CI environment fix
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/plan03-task3-finalize-v2.yml')
+          text = path.read_text(encoding='utf-8')
+          old = 'darknetra_plan03_task3_v2'
+          new = 'darknetra_plan03_task3_v2_test'
+          count = text.count(old)
+          if count < 3:
+              raise SystemExit(f'expected at least three Task 3 database-name references, found {count}')
+          path.write_text(text.replace(old, new), encoding='utf-8')
+          PY
+
+      - name: Commit repair and retrigger the release gate
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/plan03-task3-finalize-v2.yml
+          git rm .github/workflows/repair-plan03-task3-test-database.yml
+          git commit -m 'ci: scope Task 3 database explicitly to tests'
+          git pull --rebase origin testing-codex
+          git push origin HEAD:testing-codex
