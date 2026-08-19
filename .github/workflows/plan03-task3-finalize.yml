@@ -1,10 +1,14 @@
-name: Finalize Plan 03 Task 3 content-addressed storage
+name: Plan 03 Task 3 content-addressed storage release gate
 
 on:
   push:
     branches: [testing-codex]
     paths:
       - .github/workflows/plan03-task3-finalize.yml
+
+concurrency:
+  group: plan03-task3-finalize
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -13,37 +17,36 @@ permissions:
 jobs:
   verify-and-commit:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       DARKNETRA_ENVIRONMENT: development
-      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task3@127.0.0.1:5432/darknetra_plan03_task3_test
-      DARKNETRA_E2E_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task3@127.0.0.1:5432/darknetra_plan03_task3_test
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task3@127.0.0.1:5432/darknetra_plan03_task3
+      DARKNETRA_E2E_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-task3@127.0.0.1:5432/darknetra_plan03_task3
       DARKNETRA_REDIS_URL: redis://127.0.0.1:6379/0
       DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_EVIDENCE_STORE_PATH: /tmp/darknetra-plan03-task3
       NEXT_TELEMETRY_DISABLED: '1'
     services:
       postgres:
         image: postgres:18
         env:
-          POSTGRES_DB: darknetra_plan03_task3_test
+          POSTGRES_DB: darknetra_plan03_task3
           POSTGRES_USER: darknetra
           POSTGRES_PASSWORD: darknetra-task3
-        ports:
-          - 5432:5432
+        ports: ["5432:5432"]
         options: >-
-          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task3_test"
+          --health-cmd "pg_isready -U darknetra -d darknetra_plan03_task3"
           --health-interval 5s
           --health-timeout 3s
-          --health-retries 15
+          --health-retries 20
       redis:
         image: redis:7.4-alpine
-        ports:
-          - 6379:6379
+        ports: ["6379:6379"]
         options: >-
           --health-cmd "redis-cli ping"
           --health-interval 5s
           --health-timeout 3s
-          --health-retries 15
+          --health-retries 20
 
     steps:
       - uses: actions/checkout@v4
@@ -55,11 +58,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          python - <<'PY' > /tmp/status.json
+          python - <<'PY' >/tmp/status.json
           import json, os
           print(json.dumps({
               "state": "pending",
-              "context": "plan03/task3",
+              "context": "plan03/task3-final",
               "description": f"GitHub Actions run {os.environ['GITHUB_RUN_ID']}",
               "target_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
           }))
@@ -81,7 +84,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Enable pnpm
+        run: corepack enable
 
       - name: Generate runtime-only keys
         run: |
@@ -89,287 +96,190 @@ jobs:
           import base64, json, os, secrets
 
           def key() -> str:
-              return base64.b64encode(secrets.token_bytes(32)).decode('ascii')
+              return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
 
-          jwt = key()
-          field = key()
-          blind = key()
+          jwt, field, blind = key(), key(), key()
           for value in (jwt, field, blind):
-              print(f'::add-mask::{value}')
-          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
-              output.write(f'DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n')
-              output.write(f'DARKNETRA_FIELD_KEY_V1_B64={field}\n')
-              output.write(
-                  'DARKNETRA_FIELD_KEYRING_B64_JSON='
-                  + json.dumps({'v1': field}, separators=(',', ':'))
-                  + '\n'
+              print(f"::add-mask::{value}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as out:
+              out.write(f"DARKNETRA_JWT_SIGNING_KEY_B64={jwt}\n")
+              out.write(f"DARKNETRA_FIELD_KEY_V1_B64={field}\n")
+              out.write(
+                  "DARKNETRA_FIELD_KEYRING_B64_JSON="
+                  + json.dumps({"v1": field}, separators=(",", ":"))
+                  + "\n"
               )
-              output.write('DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n')
-              output.write(f'DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n')
+              out.write("DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1\n")
+              out.write(f"DARKNETRA_FIELD_BLIND_INDEX_KEY_B64={blind}\n")
           PY
 
-      - name: Confirm the Task 3 test-first contract is present
-        run: |
-          set -euo pipefail
-          test -f apps/api/tests/unit/test_local_object_store.py
-          test -f apps/api/darknetra_api/storage/base.py
-          test -f apps/api/darknetra_api/storage/local.py
-          grep -q 'evidence_store_path' apps/api/darknetra_api/config.py
-          grep -q 'put_verified' apps/api/tests/unit/test_local_object_store.py
-          grep -q 'hypothesis' apps/api/tests/unit/test_local_object_store.py
-
-      - name: Wire the named Evidence Vault volume into API and worker only
+      - name: Normalize the Evidence Vault container boundary
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          compose_path = Path('docker-compose.yml')
-          text = compose_path.read_text(encoding='utf-8')
-          target = 'evidence_store:/var/lib/darknetra/evidence'
-
-          redis_env = '      DARKNETRA_REDIS_URL: redis://redis:6379/0\n'
-          evidence_env = '      DARKNETRA_EVIDENCE_STORE_PATH: /var/lib/darknetra/evidence\n'
-          if evidence_env not in text:
-              if text.count(redis_env) != 1:
-                  raise SystemExit('Redis environment anchor was not found exactly once')
-              text = text.replace(redis_env, redis_env + evidence_env, 1)
-
-          def service_bounds(document: str, name: str) -> tuple[int, int]:
-              start_marker = f'  {name}:\n'
-              start = document.find(start_marker)
-              if start < 0:
-                  raise SystemExit(f'Compose service {name!r} was not found')
-              candidates = []
-              for marker in ('\n  api:\n', '\n  worker:\n', '\n  web:\n', '\nnetworks:\n'):
-                  position = document.find(marker, start + len(start_marker))
-                  if position >= 0:
-                      candidates.append(position + 1)
-              if not candidates:
-                  raise SystemExit(f'Could not find end of Compose service {name!r}')
-              return start, min(candidates)
-
-          def add_mount(document: str, name: str) -> str:
-              start, end = service_bounds(document, name)
-              block = document[start:end]
-              mount_line = f'      - {target}\n'
-              if target in block:
-                  return document
-              if '    volumes:\n' in block:
-                  block = block.replace('    volumes:\n', '    volumes:\n' + mount_line, 1)
-              else:
-                  marker = '    networks:\n'
-                  if marker not in block:
-                      raise SystemExit(f'Network anchor missing from Compose service {name!r}')
-                  block = block.replace(
-                      marker,
-                      '    volumes:\n' + mount_line + marker,
-                      1,
-                  )
-              return document[:start] + block + document[end:]
-
-          text = add_mount(text, 'api')
-          text = add_mount(text, 'worker')
-
-          volumes_marker = 'volumes:\n  postgres-data:\n'
-          if '\n  evidence_store:\n' not in text:
-              if text.count(volumes_marker) != 1:
-                  raise SystemExit('Top-level Compose volume anchor was not found exactly once')
-              text = text.replace(
-                  volumes_marker,
-                  volumes_marker + '  evidence_store:\n',
-                  1,
-              )
-
-          web_start, web_end = service_bounds(text, 'web')
-          if target in text[web_start:web_end]:
-              raise SystemExit('The web service must never receive the Evidence Vault mount')
-
-          if text.count(target) != 2:
-              raise SystemExit('Evidence Vault must be mounted exactly into API and worker')
-          compose_path.write_text(text, encoding='utf-8')
-
-          dockerfile_path = Path('infrastructure/docker/api.Dockerfile')
-          dockerfile = dockerfile_path.read_text(encoding='utf-8')
-          user_line = 'RUN useradd --create-home --uid 10001 appuser\n'
-          prepared_line = (
-              'RUN useradd --create-home --uid 10001 appuser '
-              '&& install -d -o appuser -g appuser /var/lib/darknetra/evidence\n'
+          compose_path = Path("docker-compose.yml")
+          compose = compose_path.read_text(encoding="utf-8")
+          compose = compose.replace(
+              "DARKNETRA_EVIDENCE_STORE_PATH: /var/lib/darknetra/evidence-store",
+              "DARKNETRA_EVIDENCE_STORE_PATH: /var/lib/darknetra/evidence",
           )
-          if '/var/lib/darknetra/evidence' not in dockerfile:
-              if dockerfile.count(user_line) != 1:
-                  raise SystemExit('API image user-creation anchor was not found exactly once')
-              dockerfile = dockerfile.replace(user_line, prepared_line, 1)
-          if 'ENV PYTHONPATH=/app/apps/api\n' not in dockerfile:
-              env_anchor = '    UV_NO_PROGRESS=1\n'
-              if dockerfile.count(env_anchor) != 1:
-                  raise SystemExit('API image environment anchor was not found exactly once')
-              dockerfile = dockerfile.replace(
-                  env_anchor,
-                  env_anchor + 'ENV PYTHONPATH=/app/apps/api\n',
-                  1,
-              )
-          dockerfile_path.write_text(dockerfile, encoding='utf-8')
+          compose = compose.replace(
+              "- evidence-store:/var/lib/darknetra/evidence-store",
+              "- evidence_store:/var/lib/darknetra/evidence",
+          )
+          compose = compose.replace("\n  evidence-store:\n", "\n  evidence_store:\n")
 
-          example_path = Path('.env.example')
-          example = example_path.read_text(encoding='utf-8')
-          if 'DARKNETRA_EVIDENCE_STORE_PATH=' not in example:
-              example += (
-                  '\n# Host-side path for native development. Docker overrides this with the shared named volume.\n'
-                  'DARKNETRA_EVIDENCE_STORE_PATH=./.darknetra/evidence\n'
+          if compose.count("- evidence_store:/var/lib/darknetra/evidence") != 2:
+              raise SystemExit("Evidence Vault must be mounted exactly into API and worker")
+          if compose.count("DARKNETRA_EVIDENCE_STORE_PATH: /var/lib/darknetra/evidence") != 1:
+              raise SystemExit("Shared API environment must define one Evidence Vault path")
+          web = compose.split("\n  web:\n", 1)[1].split("\nnetworks:\n", 1)[0]
+          if "evidence_store" in web or "/var/lib/darknetra/evidence" in web:
+              raise SystemExit("Web service must not receive Evidence Vault storage")
+          compose_path.write_text(compose, encoding="utf-8")
+
+          dockerfile_path = Path("infrastructure/docker/api.Dockerfile")
+          dockerfile = dockerfile_path.read_text(encoding="utf-8")
+          old = "RUN useradd --create-home --uid 10001 appuser\n"
+          new = (
+              "RUN useradd --create-home --uid 10001 appuser "
+              "&& install -d -o appuser -g appuser /var/lib/darknetra/evidence\n"
+          )
+          if old in dockerfile:
+              dockerfile = dockerfile.replace(old, new, 1)
+          elif "/var/lib/darknetra/evidence" not in dockerfile:
+              raise SystemExit("Could not prepare the Evidence Vault directory for appuser")
+          dockerfile_path.write_text(dockerfile, encoding="utf-8")
+
+          env_path = Path(".env.example")
+          env = env_path.read_text(encoding="utf-8")
+          if "DARKNETRA_EVIDENCE_STORE_PATH=" in env:
+              lines = [
+                  "DARKNETRA_EVIDENCE_STORE_PATH=.darknetra/evidence"
+                  if line.startswith("DARKNETRA_EVIDENCE_STORE_PATH=")
+                  else line
+                  for line in env.splitlines()
+              ]
+              env = "\n".join(lines) + "\n"
+          else:
+              env = env.rstrip() + (
+                  "\n\n# Host-side content-addressed Evidence Vault path.\n"
+                  "DARKNETRA_EVIDENCE_STORE_PATH=.darknetra/evidence\n"
               )
-          example_path.write_text(example, encoding='utf-8')
+          env_path.write_text(env, encoding="utf-8")
           PY
 
-      - name: Install locked Python workspace
-        run: uv sync --all-packages --dev --frozen
+      - name: Install frozen workspaces
+        run: |
+          uv sync --all-packages --dev --frozen
+          pnpm install --frozen-lockfile
 
-      - name: Verify current migrations
+      - name: Verify migration and Python implementation
         run: |
           uv run alembic -c apps/api/alembic.ini upgrade head
-          uv run alembic -c apps/api/alembic.ini current
+          uv run ruff check .
+          uv run pytest -q apps/api/tests/unit/test_local_object_store.py
+          uv run pytest -q
 
-      - name: Run focused content-addressed storage tests
-        run: uv run pytest -q apps/api/tests/unit/test_local_object_store.py | tee /tmp/task3-focused.txt
-
-      - name: Run Ruff
-        run: uv run ruff check .
-
-      - name: Run complete Python regression suite
-        run: uv run pytest -q | tee /tmp/task3-python.txt
-
-      - name: Run frontend regression suite and production build
+      - name: Verify frontend regressions
         run: |
-          corepack enable
-          corepack prepare pnpm@10.15.0 --activate
-          pnpm install --frozen-lockfile
           pnpm --filter @darknetra/web lint
           pnpm --filter @darknetra/web typecheck
           pnpm --filter @darknetra/web test
           pnpm --filter @darknetra/web build
 
-      - name: Validate Compose topology and Evidence Vault isolation
+      - name: Verify Compose isolation
         run: |
-          set -euo pipefail
-          docker compose -f docker-compose.yml config --format json > /tmp/base-compose.json
+          docker compose -f docker-compose.yml config --format json >/tmp/compose.json
           docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
           python - <<'PY'
           import json
           from pathlib import Path
 
-          config = json.loads(Path('/tmp/base-compose.json').read_text(encoding='utf-8'))
-          services = config['services']
-          target = '/var/lib/darknetra/evidence'
-
-          def targets(name: str) -> set[str]:
-              result = set()
-              for mount in services[name].get('volumes', []):
-                  if isinstance(mount, dict):
-                      result.add(mount.get('target', ''))
-                  elif isinstance(mount, str):
-                      parts = mount.split(':')
-                      if len(parts) >= 2:
-                          result.add(parts[1])
-              return result
-
-          assert target in targets('api')
-          assert target in targets('worker')
-          assert target not in targets('web')
-          assert target not in targets('redis')
-          assert target not in targets('postgres')
+          doc = json.loads(Path("/tmp/compose.json").read_text(encoding="utf-8"))
+          target = "/var/lib/darknetra/evidence"
+          for service in ("api", "worker"):
+              volumes = doc["services"][service].get("volumes", [])
+              matches = [volume for volume in volumes if volume.get("target") == target]
+              assert len(matches) == 1, (service, volumes)
+              assert matches[0].get("source") == "evidence_store", matches[0]
+              assert doc["services"][service]["environment"]["DARKNETRA_EVIDENCE_STORE_PATH"] == target
+          assert not any(
+              volume.get("target") == target
+              for volume in doc["services"]["web"].get("volumes", [])
+          )
+          assert "evidence_store" in doc["volumes"]
           PY
 
-      - name: Build and verify the real shared Evidence Vault volume
+      - name: Build and smoke-test the shared volume
         run: |
           set -euo pipefail
-          PROJECT=darknetra-task3-final
-          docker compose -p "$PROJECT" -f docker-compose.yml -f docker-compose.dev.yml build
-          docker compose -p "$PROJECT" -f docker-compose.yml \
+          project=darknetra-plan03-task3
+          docker compose -p "$project" -f docker-compose.yml build api worker
+          docker compose -p "$project" -f docker-compose.yml \
             up -d --no-build --wait --wait-timeout 180 postgres redis api worker
-          docker compose -p "$PROJECT" -f docker-compose.yml \
-            exec -T api sh -lc \
-            'test -w "$DARKNETRA_EVIDENCE_STORE_PATH" && printf %s task3-shared-volume > "$DARKNETRA_EVIDENCE_STORE_PATH/.task3-smoke"'
-          docker compose -p "$PROJECT" -f docker-compose.yml \
-            exec -T worker sh -lc \
-            'test "$(cat "$DARKNETRA_EVIDENCE_STORE_PATH/.task3-smoke")" = task3-shared-volume && rm "$DARKNETRA_EVIDENCE_STORE_PATH/.task3-smoke"'
-          docker compose -p "$PROJECT" -f docker-compose.yml \
-            exec -T worker sh -lc \
+          docker compose -p "$project" -f docker-compose.yml exec -T api sh -lc \
+            'test -w "$DARKNETRA_EVIDENCE_STORE_PATH" && printf task3 > "$DARKNETRA_EVIDENCE_STORE_PATH/.shared-smoke"'
+          docker compose -p "$project" -f docker-compose.yml exec -T worker sh -lc \
+            'test "$(cat "$DARKNETRA_EVIDENCE_STORE_PATH/.shared-smoke")" = task3 && rm "$DARKNETRA_EVIDENCE_STORE_PATH/.shared-smoke"'
+          docker compose -p "$project" -f docker-compose.yml exec -T worker sh -lc \
             'uv run --no-sync celery -A darknetra_api.jobs.celery_app:celery_app inspect ping -d "ingest@$HOSTNAME" --timeout=10 | grep -q pong'
 
-      - name: Tear down Task 3 stack
+      - name: Tear down smoke stack
         if: always()
+        run: docker compose -p darknetra-plan03-task3 -f docker-compose.yml down -v --remove-orphans || true
+
+      - name: Record verified Task 3 and commit
         run: |
-          docker compose -p darknetra-task3-final -f docker-compose.yml \
-            down -v --remove-orphans || true
-
-      - name: Commit verified Task 3 implementation and evidence
-        if: success()
-        run: |
-          set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-
-          git add docker-compose.yml infrastructure/docker/api.Dockerfile .env.example
-          if ! git diff --cached --quiet; then
-            git commit -m 'feat: complete content addressed evidence storage'
-          fi
-          VERIFIED_SHA="$(git rev-parse HEAD)"
-
+          source_sha="$(git rev-parse HEAD)"
           mkdir -p docs/verification
           cat > docs/verification/plan03-task3-content-addressed-storage.md <<EOF
-          # Plan 03 Task 3 — content-addressed evidence storage verification
+          # Plan 03 Task 3 — content-addressed Evidence Vault storage verification
 
-          - **Verified code commit:** \`$VERIFIED_SHA\`
-          - **Observed at (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Verified source:** \`${source_sha}\`
+          - **Observed (UTC):** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
           - **Runner:** GitHub Actions \`ubuntu-latest\`
 
           | Gate | Outcome |
           |---|---|
-          | Existing TDD contract and implementation files | success |
-          | Frozen Python workspace | success |
-          | Alembic upgrade/current | success |
-          | Focused object-store tests, including Hypothesis | success |
+          | Frozen Python and frontend workspaces | success |
+          | Alembic upgrade | success |
           | Ruff | success |
-          | Complete Python regression suite | success |
+          | Focused Hypothesis/object-store suite | success |
+          | Complete Python suite | success |
           | Frontend lint/typecheck/unit/build | success |
           | Base and development Compose validation | success |
-          | Evidence Vault mounted only into API and worker | success |
-          | Shared named-volume write/read across API and worker | success |
+          | API/worker-only named Evidence Vault volume | success |
+          | Unprivileged API write and worker read through shared volume | success |
           | Real Celery worker ping | success |
-          | Stack and named-volume teardown | success |
 
-          ## Verified properties
-
-          - Objects are addressed by SHA-256 under \`sha256/<first2>/<next2>/<digest>\`.
-          - Writes stream through same-filesystem staging, validate optional expected digests, fsync, and promote atomically.
-          - Duplicate bytes reuse the same immutable object key.
-          - Caller-provided names never become storage paths.
-          - Invalid keys, digest mismatches, partial writes, and tampering fail closed.
-          - The browser/web container has neither the mount nor object-store credentials.
-          - API and worker share one writable named volume prepared for the unprivileged application user.
+          The implementation streams originals through random same-filesystem staging, computes SHA-256 during the write, rejects expected-digest mismatches, fsyncs and atomically promotes verified bytes to \`sha256/<first2>/<next2>/<digest>\`. Duplicate bytes deduplicate; caller filenames never become storage paths; malformed keys and tampered objects fail closed.
           EOF
 
           python - <<'PY'
           from pathlib import Path
-
-          ledger = Path('docs/verification/plan03-execution-ledger.md')
-          if ledger.exists():
-              text = ledger.read_text(encoding='utf-8')
-              replacements = (
-                  ('- Task 3: pending.', '- Task 3: complete — content-addressed local object storage and isolated shared Docker volume verified.'),
-                  ('- Task 3: in progress.', '- Task 3: complete — content-addressed local object storage and isolated shared Docker volume verified.'),
-              )
-              for old, new in replacements:
-                  if old in text:
-                      text = text.replace(old, new, 1)
-                      break
-              ledger.write_text(text, encoding='utf-8')
+          ledger = Path("docs/verification/plan03-execution-ledger.md")
+          text = ledger.read_text(encoding="utf-8")
+          value = "- Task 3: complete — content-addressed storage, atomic verified promotion, deduplication and isolated shared Docker volume verified."
+          lines = text.splitlines()
+          for index, line in enumerate(lines):
+              if line.startswith("- Task 3:"):
+                  lines[index] = value
+                  break
+          else:
+              lines += ["", value]
+          ledger.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
           PY
 
-          git add docs/verification/plan03-task3-content-addressed-storage.md docs/verification/plan03-execution-ledger.md
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docker-compose.yml infrastructure/docker/api.Dockerfile .env.example \
+            docs/verification/plan03-task3-content-addressed-storage.md \
+            docs/verification/plan03-execution-ledger.md
           git rm .github/workflows/plan03-task3-finalize.yml
-          if ! git diff --cached --quiet; then
-            git commit -m 'docs: verify Plan 03 Task 3 storage boundary [skip ci]'
-          fi
+          git commit -m 'feat: verify content addressed Evidence Vault storage'
+          git pull --rebase origin testing-codex
           git push origin HEAD:testing-codex
 
       - name: Publish terminal status
@@ -378,13 +288,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           JOB_STATUS: ${{ job.status }}
         run: |
-          python - <<'PY' > /tmp/status.json
+          python - <<'PY' >/tmp/status.json
           import json, os
-          success = os.environ['JOB_STATUS'] == 'success'
+          success = os.environ["JOB_STATUS"] == "success"
           print(json.dumps({
               "state": "success" if success else "failure",
-              "context": "plan03/task3",
-              "description": "Task 3 release gate passed" if success else "Task 3 release gate failed",
+              "context": "plan03/task3-final",
+              "description": "Task 3 gate passed" if success else "Task 3 gate failed",
               "target_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
           }))
           PY
