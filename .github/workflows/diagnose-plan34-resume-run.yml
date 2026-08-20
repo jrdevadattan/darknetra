@@ -1,0 +1,156 @@
+name: Diagnose Plans 03 and 04 resume run
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/diagnose-plan34-resume-run.yml
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: darknetra-plan34-resume-diagnostic
+  cancel-in-progress: true
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Inspect workflow registration, runs, jobs, and steps
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p docs/verification
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          import subprocess
+          from datetime import UTC, datetime
+          from pathlib import Path
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          target = "resume-plan03-plan04.yml"
+
+          def api(path: str):
+              completed = subprocess.run(
+                  ["gh", "api", path],
+                  text=True,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.STDOUT,
+              )
+              if completed.returncode:
+                  return {"api_error": completed.stdout.strip(), "path": path}
+              try:
+                  return json.loads(completed.stdout)
+              except json.JSONDecodeError:
+                  return {"decode_error": completed.stdout.strip(), "path": path}
+
+          workflow = api(f"/repos/{repo}/actions/workflows/{target}")
+          runs_payload = api(
+              f"/repos/{repo}/actions/workflows/{target}/runs"
+              "?branch=testing-codex&event=push&per_page=20"
+          )
+          runs = runs_payload.get("workflow_runs", []) if isinstance(runs_payload, dict) else []
+          current_head = subprocess.check_output(
+              ["git", "rev-parse", "HEAD"], text=True
+          ).strip()
+          matching = [run for run in runs if run.get("head_sha") == current_head]
+          latest = matching[0] if matching else (runs[0] if runs else None)
+          jobs_payload = None
+          if latest and latest.get("id"):
+              jobs_payload = api(
+                  f"/repos/{repo}/actions/runs/{latest['id']}/jobs?filter=latest&per_page=100"
+              )
+
+          lines = [
+              "# Plans 03 and 04 resume-run diagnostic",
+              "",
+              f"- **Probe run:** `{os.environ.get('GITHUB_RUN_ID', 'unknown')}`",
+              f"- **Probe source:** `{current_head}`",
+              f"- **Observed:** `{datetime.now(UTC).strftime('%Y-%m-%dT%H:%M:%SZ')}`",
+              f"- **Target workflow:** `{target}`",
+              "",
+              "## Workflow registration",
+              "",
+          ]
+          if isinstance(workflow, dict) and "api_error" not in workflow:
+              for key in ("id", "name", "path", "state", "created_at", "updated_at"):
+                  lines.append(f"- {key}: `{workflow.get(key)}`")
+          else:
+              lines.append(f"```json\n{json.dumps(workflow, indent=2, sort_keys=True)}\n```")
+
+          lines.extend(["", "## Recent target runs", ""])
+          if not runs:
+              lines.append("- No push-triggered run was returned for the target workflow.")
+          for run in runs[:10]:
+              lines.append(
+                  "- "
+                  f"id=`{run.get('id')}` "
+                  f"head=`{run.get('head_sha')}` "
+                  f"status=`{run.get('status')}` "
+                  f"conclusion=`{run.get('conclusion')}` "
+                  f"attempt=`{run.get('run_attempt')}` "
+                  f"created=`{run.get('created_at')}` "
+                  f"started=`{run.get('run_started_at')}` "
+                  f"updated=`{run.get('updated_at')}`"
+              )
+
+          lines.extend(["", "## Selected run jobs", ""])
+          if latest is None:
+              lines.append("- No target run exists, so no jobs can be inspected.")
+          elif not isinstance(jobs_payload, dict) or "jobs" not in jobs_payload:
+              lines.append(f"```json\n{json.dumps(jobs_payload, indent=2, sort_keys=True)}\n```")
+          else:
+              jobs = jobs_payload.get("jobs", [])
+              if not jobs:
+                  lines.append(
+                      "- The selected run has no jobs. This usually means it is still queued, "
+                      "was rejected before job creation, or was cancelled before scheduling."
+                  )
+              for job in jobs:
+                  lines.append(
+                      "- "
+                      f"job_id=`{job.get('id')}` "
+                      f"name=`{job.get('name')}` "
+                      f"status=`{job.get('status')}` "
+                      f"conclusion=`{job.get('conclusion')}` "
+                      f"started=`{job.get('started_at')}` "
+                      f"completed=`{job.get('completed_at')}` "
+                      f"runner=`{job.get('runner_name')}`"
+                  )
+                  for step in job.get("steps", []):
+                      lines.append(
+                          "  - "
+                          f"step=`{step.get('name')}` "
+                          f"status=`{step.get('status')}` "
+                          f"conclusion=`{step.get('conclusion')}` "
+                          f"number=`{step.get('number')}`"
+                      )
+
+          Path("docs/verification/plan34-resume-run-diagnostic.md").write_text(
+              "\n".join(lines).rstrip() + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Commit diagnostic and remove one-shot probe
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/verification/plan34-resume-run-diagnostic.md
+          git rm .github/workflows/diagnose-plan34-resume-run.yml
+          git commit -m 'docs: record Plans 03 and 04 resume diagnostic [skip ci]'
+          git pull --rebase origin testing-codex
+          git push origin HEAD:testing-codex
