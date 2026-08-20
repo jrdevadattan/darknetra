@@ -1,0 +1,324 @@
+name: Conditional second-stage Plans 03 and 04 canonical repair
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan34-canonical-node-second-stage-20260820.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: darknetra-plan34-canonical-second-stage
+  cancel-in-progress: false
+
+jobs:
+  diagnose-repair-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Locate the fresh canonical run
+        id: locate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BASELINE="$(date -u -d '45 minutes ago' +'%Y-%m-%dT%H:%M:%SZ')"
+          RUN_ID=''
+          for attempt in $(seq 1 120); do
+            RUN_ID="$(
+              gh run list \
+                --workflow complete-plan03-plan04.yml \
+                --branch testing-codex \
+                --limit 20 \
+                --json databaseId,createdAt,status \
+                --jq ".[] | select(.createdAt >= \"${BASELINE}\") | .databaseId" \
+                | head -n 1
+            )"
+            if test -n "$RUN_ID"; then
+              STATUS="$(gh run view "$RUN_ID" --json status --jq .status)"
+              if test "$STATUS" = completed; then
+                echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
+            sleep 10
+          done
+          echo 'No fresh terminal canonical run was found.' >&2
+          exit 2
+
+      - name: Classify terminal result
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.locate.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          CONCLUSION="$(gh run view "$RUN_ID" --json conclusion --jq .conclusion)"
+          FAILED_STEPS="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs?per_page=100" \
+              --jq '[.jobs[] | .name as $job | .steps[] | select(.conclusion == "failure") | "\($job) :: \(.name)"] | unique | if length == 0 then ["none"] else . end | join(", ")'
+          )"
+          echo "conclusion=$CONCLUSION" >> "$GITHUB_OUTPUT"
+          {
+            echo 'failed_steps<<EOF'
+            echo "$FAILED_STEPS"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+          if grep -Eqi 'setup-node|node setup|canonical Node inputs' <<<"$FAILED_STEPS"; then
+            echo 'classification=setup-node' >> "$GITHUB_OUTPUT"
+          elif test "$CONCLUSION" = success; then
+            echo 'classification=success' >> "$GITHUB_OUTPUT"
+          else
+            echo 'classification=other-failure' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Apply unconditional setup-node hardening
+        if: steps.classify.outputs.classification == 'setup-node'
+        id: repair
+        run: |
+          set -euo pipefail
+          git fetch origin testing-codex
+          git reset --hard origin/testing-codex
+          python - <<'PY'
+          from __future__ import annotations
+
+          import re
+          from pathlib import Path
+
+          path = Path('.github/workflows/complete-plan03-plan04.yml')
+          text = path.read_text(encoding='utf-8')
+          original = text
+
+          # Every setup-node step gets an explicit supported LTS version. This
+          # removes version-file and package-manager cache as failure sources.
+          lines = text.splitlines(keepends=True)
+          output: list[str] = []
+          index = 0
+          while index < len(lines):
+              line = lines[index]
+              if re.match(r'^\s*-\s+uses:\s+actions/setup-node@v4\s*$', line.rstrip('\n')):
+                  indent = len(line) - len(line.lstrip(' '))
+                  step = [line]
+                  index += 1
+                  while index < len(lines):
+                      candidate = lines[index]
+                      candidate_indent = len(candidate) - len(candidate.lstrip(' '))
+                      if re.match(r'^\s*-\s+(?:uses|name|run):', candidate) and candidate_indent == indent:
+                          break
+                      step.append(candidate)
+                      index += 1
+
+                  filtered: list[str] = []
+                  with_indent: str | None = None
+                  for item in step:
+                      stripped = item.lstrip(' ')
+                      item_indent = len(item) - len(stripped)
+                      if re.match(r'^with:\s*$', stripped):
+                          with_indent = ' ' * item_indent
+                          filtered.append(item)
+                          continue
+                      if re.match(r'^(?:node-version|node-version-file|cache|cache-dependency-path):', stripped):
+                          continue
+                      filtered.append(item)
+
+                  if with_indent is None:
+                      filtered.append(' ' * (indent + 2) + 'with:\n')
+                      value_indent = ' ' * (indent + 4)
+                  else:
+                      value_indent = with_indent + '  '
+                  insert_at = next(
+                      (i + 1 for i, item in enumerate(filtered) if re.match(r'^\s*with:\s*$', item)),
+                      len(filtered),
+                  )
+                  filtered.insert(insert_at, value_indent + "node-version: '22'\n")
+                  output.extend(filtered)
+                  continue
+
+              output.append(line)
+              index += 1
+
+          text = ''.join(output)
+
+          # Install pnpm before setup-node only when the workflow requests pnpm
+          # later and no setup action is already present. setup-node caching is
+          # intentionally disabled; frozen-lockfile remains the reproducibility gate.
+          if ('pnpm ' in text or 'pnpm\n' in text) and 'pnpm/action-setup@' not in text:
+              match = re.search(r'(?m)^(?P<indent>\s*)- uses: actions/setup-node@v4\s*$', text)
+              if not match:
+                  raise SystemExit('setup-node step disappeared during repair')
+              indent = match.group('indent')
+              setup = (
+                  f'{indent}- uses: pnpm/action-setup@v4\n'
+                  f'{indent}  with:\n'
+                  f'{indent}    version: 10\n\n'
+              )
+              text = text[:match.start()] + setup + text[match.start():]
+
+          # Keep a direct path preflight adjacent to the first Node step.
+          if 'Validate canonical Node inputs' not in text:
+              match = re.search(r'(?m)^(?P<indent>\s*)- uses: (?:pnpm/action-setup@v4|actions/setup-node@v4)\s*$', text)
+              if not match:
+                  raise SystemExit('Node setup insertion point not found')
+              indent = match.group('indent')
+              lock = 'pnpm-lock.yaml' if Path('pnpm-lock.yaml').exists() else 'apps/web/pnpm-lock.yaml'
+              preflight = (
+                  f'{indent}- name: Validate canonical Node inputs\n'
+                  f'{indent}  run: |\n'
+                  f'{indent}    test -f apps/web/package.json\n'
+                  f'{indent}    test -f {lock}\n\n'
+              )
+              text = text[:match.start()] + preflight + text[match.start():]
+
+          if text == original:
+              raise SystemExit('second-stage repair found nothing to change')
+          path.write_text(text, encoding='utf-8')
+          PY
+          git diff --check
+
+      - name: Commit second-stage repair and dispatch retry
+        if: steps.classify.outputs.classification == 'setup-node'
+        id: retry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/complete-plan03-plan04.yml
+          git rm .github/workflows/plan34-canonical-node-second-stage-20260820.yml
+          git commit -m 'ci: make canonical Node setup deterministic'
+          git fetch origin testing-codex
+          git rebase origin/testing-codex
+          git push origin HEAD:testing-codex
+          gh workflow run complete-plan03-plan04.yml --ref testing-codex
+          sleep 8
+          RETRY_RUN_ID="$(gh run list --workflow complete-plan03-plan04.yml --branch testing-codex --limit 1 --json databaseId --jq '.[0].databaseId')"
+          test -n "$RETRY_RUN_ID"
+          echo "retry_run_id=$RETRY_RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for retry and refresh authoritative status
+        if: steps.classify.outputs.classification == 'setup-node'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.retry.outputs.retry_run_id }}
+        run: |
+          set -euo pipefail
+          gh run watch "$RUN_ID" --exit-status || true
+          git fetch origin testing-codex
+          git reset --hard origin/testing-codex
+          STATUS="$(gh run view "$RUN_ID" --json status --jq .status)"
+          CONCLUSION="$(gh run view "$RUN_ID" --json conclusion --jq .conclusion)"
+          FAILED_STEPS="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs?per_page=100" \
+              --jq '[.jobs[] | .name as $job | .steps[] | select(.conclusion == "failure") | "\($job) :: \(.name)"] | unique | if length == 0 then ["none"] else . end | join(", ")'
+          )"
+          CERT=false; PLAN03=false; PLAN04=false; RELEASE=false; README_FINAL=false
+          test -f docs/verification/PLANS_03_04_COMPLETE.md && CERT=true
+          test -f docs/verification/plan-03-evidence-vault-ingestion.md && PLAN03=true
+          test -f docs/verification/plan-04-extraction-indicators.md && PLAN04=true
+          test -f docs/verification/plans-03-04-release-gate.md \
+            && grep -q 'Outcome: success' docs/verification/plans-03-04-release-gate.md \
+            && RELEASE=true
+          grep -q '<!-- PLAN34_VERIFIED_START -->' README.md && README_FINAL=true || true
+          if test "$CONCLUSION" = success \
+             && test "$CERT" = true \
+             && test "$PLAN03" = true \
+             && test "$PLAN04" = true \
+             && test "$RELEASE" = true \
+             && test "$README_FINAL" = true; then
+            OUTCOME=COMPLETE
+          else
+            OUTCOME=BLOCKED
+          fi
+          mkdir -p docs/verification
+          cat > docs/verification/CURRENT_PLAN34_STATUS.md <<EOF
+          # DARKNETRA Plans 03 and 04 — authoritative current status
+
+          - **Outcome:** ${OUTCOME}
+          - **Observed:** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Branch head:** \`$(git rev-parse HEAD)\`
+          - **Latest canonical run:** \`${RUN_ID}\`
+          - **Run status:** \`${STATUS}\`
+          - **Run conclusion:** \`${CONCLUSION}\`
+          - **Failed steps:** ${FAILED_STEPS}
+          - **Plan 03 record present:** \`${PLAN03}\`
+          - **Plan 04 record present:** \`${PLAN04}\`
+          - **Canonical release record present:** \`${RELEASE}\`
+          - **Independent certificate present:** \`${CERT}\`
+          - **Verified README block present:** \`${README_FINAL}\`
+
+          This status was produced by the conditional second-stage canonical repair. No completion claim is valid unless Outcome is COMPLETE.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/verification/CURRENT_PLAN34_STATUS.md
+          git commit -m 'docs: record second-stage Plan 03/04 result [skip ci]'
+          git fetch origin testing-codex
+          git rebase origin/testing-codex
+          git push origin HEAD:testing-codex
+
+      - name: Record non-Node terminal blocker and remove workflow
+        if: steps.classify.outputs.classification != 'setup-node'
+        env:
+          RUN_ID: ${{ steps.locate.outputs.run_id }}
+          CLASSIFICATION: ${{ steps.classify.outputs.classification }}
+          CONCLUSION: ${{ steps.classify.outputs.conclusion }}
+          FAILED_STEPS: ${{ steps.classify.outputs.failed_steps }}
+        run: |
+          set -euo pipefail
+          git fetch origin testing-codex
+          git reset --hard origin/testing-codex
+          mkdir -p docs/verification
+          cat > docs/verification/plan34-next-terminal-state.md <<EOF
+          # Plans 03/04 next terminal state
+
+          - **Observed:** \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - **Canonical run:** \`${RUN_ID}\`
+          - **Classification:** \`${CLASSIFICATION}\`
+          - **Conclusion:** \`${CONCLUSION}\`
+          - **Failed steps:** ${FAILED_STEPS}
+
+          No speculative repair was applied because the terminal blocker was not the recorded setup-node failure.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/verification/plan34-next-terminal-state.md
+          git rm .github/workflows/plan34-canonical-node-second-stage-20260820.yml
+          git commit -m 'docs: record next Plan 03/04 terminal state [skip ci]'
+          git fetch origin testing-codex
+          git rebase origin/testing-codex
+          git push origin HEAD:testing-codex
+
+      - name: Record second-stage failure
+        if: failure()
+        run: |
+          set -euo pipefail
+          mkdir -p docs/verification
+          cat > docs/verification/plan34-second-stage-repair-failure.md <<EOF
+          # Plans 03/04 second-stage repair failure
+
+          - Source: \`$(git rev-parse HEAD)\`
+          - Observed: \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - Located run: \`${{ steps.locate.outputs.run_id }}\`
+          - Classification: \`${{ steps.classify.outputs.classification }}\`
+          - Repair step: \`${{ steps.repair.outcome }}\`
+          - Retry run: \`${{ steps.retry.outputs.retry_run_id }}\`
+
+          The conditional repair did not produce a verified terminal state. No completion claim is valid.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/verification/plan34-second-stage-repair-failure.md
+          git commit -m 'docs: record second-stage Plan 03/04 failure [skip ci]' || true
+          git fetch origin testing-codex
+          git rebase origin/testing-codex || true
+          git push origin HEAD:testing-codex || true
