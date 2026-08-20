@@ -1,0 +1,65 @@
+name: Repair Plan 03/04 completion runner
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/repair-plan34-runner.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: darknetra-plan34-runner-repair
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Repair Node and pnpm bootstrap order
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/complete-plan03-plan04.yml')
+          text = path.read_text(encoding='utf-8')
+          original = text
+
+          text = text.replace("          node-version: '22'\n", "          node-version: '24'\n", 1)
+          text = text.replace("          cache: pnpm\n", "", 1)
+          text = text.replace(
+              "      - name: Enable pinned pnpm\n        run: corepack enable\n",
+              "      - name: Enable pinned pnpm\n        run: |\n          corepack enable\n          corepack prepare pnpm@10.15.0 --activate\n          pnpm --version\n",
+              1,
+          )
+
+          if text == original:
+              raise SystemExit('canonical workflow did not contain the expected broken Node/pnpm bootstrap')
+          if "node-version: '24'" not in text:
+              raise SystemExit('Node 24 repair was not applied')
+          if 'cache: pnpm' in text:
+              raise SystemExit('setup-node still attempts pnpm caching before pnpm exists')
+          if 'corepack prepare pnpm@10.15.0 --activate' not in text:
+              raise SystemExit('pinned pnpm activation is missing')
+
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Commit repair and remove one-shot workflow
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/repair-plan34-runner.yml
+          git add .github/workflows/complete-plan03-plan04.yml
+          git diff --cached --check
+          git commit -m 'ci: repair Plan 03 and 04 runner bootstrap'
+          git fetch origin testing-codex
+          git rebase origin/testing-codex
+          git push origin HEAD:testing-codex
