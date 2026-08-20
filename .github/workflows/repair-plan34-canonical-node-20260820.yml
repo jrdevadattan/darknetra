@@ -1,0 +1,229 @@
+name: Repair canonical Plans 03 and 04 Node setup gate
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/repair-plan34-canonical-node-20260820.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: darknetra-plan34-canonical-repair
+  cancel-in-progress: false
+
+jobs:
+  repair-and-dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - name: Refresh authoritative branch
+        run: |
+          set -euo pipefail
+          git fetch origin testing-codex
+          git reset --hard origin/testing-codex
+
+      - name: Diagnose and repair setup-node inputs
+        id: repair
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import re
+          from pathlib import Path
+
+          workflow = Path('.github/workflows/complete-plan03-plan04.yml')
+          if not workflow.exists():
+              raise SystemExit(f'canonical workflow is missing: {workflow}')
+
+          original = workflow.read_text(encoding='utf-8')
+          text = original
+          repo = Path('.')
+
+          lockfiles = [
+              candidate
+              for candidate in (
+                  'pnpm-lock.yaml',
+                  'apps/web/pnpm-lock.yaml',
+                  'package-lock.json',
+                  'apps/web/package-lock.json',
+                  'yarn.lock',
+                  'apps/web/yarn.lock',
+              )
+              if (repo / candidate).exists()
+          ]
+
+          # A missing node-version-file makes actions/setup-node fail before any
+          # project command runs. Replace only invalid references.
+          for match in list(
+              re.finditer(
+                  r'(?m)^(?P<indent>\s*)node-version-file:\s*["\']?(?P<path>[^"\'\s#]+)["\']?\s*(?:#.*)?$',
+                  text,
+              )
+          ):
+              if not (repo / match.group('path')).exists():
+                  text = text.replace(match.group(0), f"{match.group('indent')}node-version: '22'")
+
+          # setup-node's pnpm cache executes pnpm during the setup action. If
+          # pnpm/action-setup has not already run, that cache configuration is
+          # fragile and was the recorded failure boundary. Keep version setup,
+          # remove only cache inputs, and preserve the later frozen install.
+          lines = text.splitlines(keepends=True)
+          output: list[str] = []
+          index = 0
+          while index < len(lines):
+              line = lines[index]
+              if re.match(r'^\s*-\s+uses:\s+actions/setup-node@v4\s*$', line.rstrip('\n')):
+                  indent = len(line) - len(line.lstrip(' '))
+                  step = [line]
+                  index += 1
+                  while index < len(lines):
+                      candidate = lines[index]
+                      candidate_indent = len(candidate) - len(candidate.lstrip(' '))
+                      if re.match(r'^\s*-\s+(?:uses|name|run):', candidate) and candidate_indent == indent:
+                          break
+                      step.append(candidate)
+                      index += 1
+
+                  step_text = ''.join(step)
+                  cache = re.search(r'(?m)^\s*cache:\s*["\']?([^"\'\s#]+)', step_text)
+                  manager = cache.group(1) if cache else None
+                  manager_ready = manager != 'pnpm' or 'pnpm/action-setup@' in ''.join(output)
+
+                  declared_paths = re.findall(
+                      r'(?m)^\s*cache-dependency-path:\s*["\']?([^"\'\n#]+)',
+                      step_text,
+                  )
+                  paths_valid = True
+                  for value in declared_paths:
+                      value = value.strip()
+                      if value and not any(char in value for char in '*?[') and not (repo / value).exists():
+                          paths_valid = False
+
+                  if manager and (not manager_ready or not paths_valid or not lockfiles):
+                      filtered: list[str] = []
+                      skip_children_of: int | None = None
+                      for step_line in step:
+                          stripped = step_line.lstrip(' ')
+                          step_indent = len(step_line) - len(stripped)
+                          if re.match(r'^cache:\s*', stripped):
+                              continue
+                          if re.match(r'^cache-dependency-path:\s*', stripped):
+                              skip_children_of = step_indent if stripped.rstrip().endswith('|') else None
+                              continue
+                          if skip_children_of is not None and step_indent > skip_children_of:
+                              continue
+                          skip_children_of = None
+                          filtered.append(step_line)
+                      step = filtered
+
+                  output.extend(step)
+                  continue
+
+              output.append(line)
+              index += 1
+
+          text = ''.join(output)
+
+          # Make future failures explain themselves before setup-node executes.
+          marker = 'Validate canonical Node inputs'
+          if marker not in text:
+              match = re.search(r'(?m)^(?P<indent>\s*)- uses: actions/setup-node@v4\s*$', text)
+              if not match:
+                  raise SystemExit('canonical workflow has no actions/setup-node@v4 step')
+              indent = match.group('indent')
+              preflight = (
+                  f'{indent}- name: {marker}\n'
+                  f'{indent}  run: |\n'
+                  f'{indent}    test -f apps/web/package.json\n'
+              )
+              if lockfiles:
+                  preflight += f'{indent}    test -f {lockfiles[0]}\n'
+              text = text[:match.start()] + preflight + text[match.start():]
+
+          if text == original:
+              print('canonical workflow already has deterministic setup-node inputs')
+          else:
+              workflow.write_text(text, encoding='utf-8')
+              print('repaired canonical workflow')
+          PY
+
+      - name: Validate repaired workflow and repository paths
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          workflow = Path('.github/workflows/complete-plan03-plan04.yml')
+          text = workflow.read_text(encoding='utf-8')
+          assert 'actions/setup-node@v4' in text
+          assert 'Validate canonical Node inputs' in text
+          assert Path('apps/web/package.json').exists()
+          for path in re.findall(r'(?m)^\s*node-version-file:\s*["\']?([^"\'\s#]+)', text):
+              assert Path(path).exists(), path
+          for path in re.findall(r'(?m)^\s*cache-dependency-path:\s*["\']?([^"\'\n#]+)', text):
+              value = path.strip()
+              if value and not any(char in value for char in '*?['):
+                  assert Path(value).exists(), value
+          PY
+          git diff --check
+
+      - name: Commit repair and remove one-shot workflow
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          rm -f docs/verification/.continuation-probe
+          git add -A
+          git rm .github/workflows/repair-plan34-canonical-node-20260820.yml
+          if git diff --cached --quiet; then
+            echo 'No branch change was required.'
+          else
+            git commit -m 'ci: harden canonical Plan 03/04 Node setup gate'
+            git fetch origin testing-codex
+            git rebase origin/testing-codex
+            git push origin HEAD:testing-codex
+          fi
+
+      - name: Dispatch fresh canonical release gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh workflow run complete-plan03-plan04.yml --ref testing-codex
+          sleep 8
+          RUN_ID="$(gh run list --workflow complete-plan03-plan04.yml --branch testing-codex --limit 1 --json databaseId --jq '.[0].databaseId')"
+          test -n "$RUN_ID"
+          echo "Canonical run dispatched: $RUN_ID"
+
+      - name: Record repair failure
+        if: failure()
+        run: |
+          set -euo pipefail
+          mkdir -p docs/verification
+          cat > docs/verification/plan34-node-repair-failure.md <<EOF
+          # Plans 03/04 canonical Node repair failure
+
+          - Source: \`$(git rev-parse HEAD)\`
+          - Observed: \`$(date -u +'%Y-%m-%dT%H:%M:%SZ')\`
+          - Repair step: \`${{ steps.repair.outcome }}\`
+
+          The one-shot repair did not dispatch a fresh canonical release gate. No completion claim is valid.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/verification/plan34-node-repair-failure.md
+          git commit -m 'docs: record Plan 03/04 Node repair failure [skip ci]' || true
+          git fetch origin testing-codex
+          git rebase origin/testing-codex || true
+          git push origin HEAD:testing-codex || true
