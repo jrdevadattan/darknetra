@@ -17,7 +17,7 @@ jobs:
       DARKNETRA_POSTGRES_PASSWORD: darknetra-dev-only
       DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-dev-only@127.0.0.1:5432/darknetra
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: testing-codex
           fetch-depth: 0

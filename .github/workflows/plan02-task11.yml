@@ -17,7 +17,7 @@ jobs:
       NEXT_TELEMETRY_DISABLED: '1'
       NEXT_PUBLIC_DARKNETRA_API_BASE_URL: http://127.0.0.1:8000
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: testing-codex
           fetch-depth: 0
