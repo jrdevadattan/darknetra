@@ -27,7 +27,7 @@ jobs:
       DARKNETRA_E2E_BOOTSTRAP_PASSWORD: Synthetic-Bootstrap-42!
       DARKNETRA_E2E_BOOTSTRAP_NEW_PASSWORD: Synthetic-Bootstrap-Replaced-42!
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: testing-codex
           fetch-depth: 0
