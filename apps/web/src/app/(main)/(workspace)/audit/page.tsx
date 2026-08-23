@@ -1,0 +1,1 @@
+import { PlannedSurface } from '@/components/darknetra/planned-surface'; export default function Page(){return <PlannedSurface eyebrow="Governance" title="Audit" description="Authorized mutations, reveals, reviews, custody events, and security-sensitive actions will be recorded here." ownerPlan="Plan 02 · Audit foundation" />;}

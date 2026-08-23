@@ -1,0 +1,1 @@
+import { PlannedSurface } from '@/components/darknetra/planned-surface'; export default function Page(){return <PlannedSurface eyebrow="Administration" title="System Settings" description="Security, model, retention, and deployment settings will appear only when backed by validated configuration." ownerPlan="Plan 02+ · Platform configuration" />;}

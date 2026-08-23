@@ -1,0 +1,276 @@
+name: Task 08 Docker baseline
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/task08-docker.yml
+
+permissions:
+  contents: write
+
+jobs:
+  task08:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Prepare locked Python workspace
+        run: uv sync --all-packages --dev
+
+      - name: Write failing Compose security contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > tests/repo/test_compose_contract.py <<'EOF'
+          from pathlib import Path
+
+          ROOT = Path(__file__).resolve().parents[2]
+
+
+          def test_compose_baseline_is_non_privileged_and_has_no_host_or_docker_socket_access() -> None:
+              compose = (ROOT / 'docker-compose.yml').read_text(encoding='utf-8')
+              overlay = (ROOT / 'docker-compose.dev.yml').read_text(encoding='utf-8')
+              combined = f'{compose}\n{overlay}'
+              assert 'privileged: true' not in combined
+              assert 'network_mode: host' not in combined
+              assert '/var/run/docker.sock' not in combined
+
+
+          def test_runtime_images_drop_root_privileges() -> None:
+              api = (ROOT / 'infrastructure' / 'docker' / 'api.Dockerfile').read_text(encoding='utf-8')
+              web = (ROOT / 'infrastructure' / 'docker' / 'web.Dockerfile').read_text(encoding='utf-8')
+              assert 'USER appuser' in api
+              assert 'USER appuser' in web
+              assert 'latest' not in api.lower()
+          EOF
+
+          set +e
+          uv run pytest tests/repo/test_compose_contract.py -v > /tmp/task08-red.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/task08-red.log
+          if [ "$status" -eq 0 ]; then
+            echo 'Task 08 Compose contract unexpectedly passed before implementation.' >&2
+            exit 1
+          fi
+
+      - name: Create non-root API and web images
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p infrastructure/docker
+          cat > infrastructure/docker/api.Dockerfile <<'EOF'
+          FROM python:3.12-slim AS runtime
+          ENV PYTHONDONTWRITEBYTECODE=1 \
+              PYTHONUNBUFFERED=1 \
+              UV_NO_PROGRESS=1
+          RUN useradd --create-home --uid 10001 appuser
+          WORKDIR /app
+          COPY --from=ghcr.io/astral-sh/uv:0.12.4 /uv /uvx /bin/
+          COPY pyproject.toml uv.lock ./
+          COPY apps/api/pyproject.toml apps/api/pyproject.toml
+          RUN uv sync --frozen --all-packages --no-dev
+          COPY apps/api apps/api
+          USER appuser
+          EXPOSE 8000
+          CMD ["uv", "run", "--no-sync", "uvicorn", "--app-dir", "apps/api", "darknetra_api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+          EOF
+
+          cat > infrastructure/docker/web.Dockerfile <<'EOF'
+          FROM node:24-slim AS deps
+          ENV PNPM_HOME=/pnpm \
+              PATH=/pnpm:$PATH \
+              NEXT_TELEMETRY_DISABLED=1
+          RUN corepack enable && corepack prepare pnpm@10.15.0 --activate
+          WORKDIR /app
+          COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
+          COPY apps/web/package.json apps/web/package.json
+          RUN pnpm install --frozen-lockfile
+
+          FROM deps AS builder
+          ARG NEXT_PUBLIC_DARKNETRA_API_BASE_URL=http://localhost:8000
+          ENV NEXT_PUBLIC_DARKNETRA_API_BASE_URL=$NEXT_PUBLIC_DARKNETRA_API_BASE_URL
+          COPY apps/web apps/web
+          RUN pnpm --filter @darknetra/web build
+
+          FROM node:24-slim AS runtime
+          ENV NODE_ENV=production \
+              NEXT_TELEMETRY_DISABLED=1 \
+              PORT=3000 \
+              HOSTNAME=0.0.0.0
+          RUN useradd --create-home --uid 10001 appuser
+          WORKDIR /app
+          COPY --from=builder --chown=appuser:appuser /app/node_modules ./node_modules
+          COPY --from=builder --chown=appuser:appuser /app/apps/web/.next/standalone ./
+          COPY --from=builder --chown=appuser:appuser /app/apps/web/.next/static ./apps/web/.next/static
+          USER appuser
+          EXPOSE 3000
+          CMD ["node", "apps/web/server.js"]
+          EOF
+
+          cat > .dockerignore <<'EOF'
+          .git
+          .github
+          **/node_modules
+          **/.next
+          .venv
+          .pytest_cache
+          .ruff_cache
+          coverage
+          playwright-report
+          test-results
+          /data
+          /evidence-store
+          .env
+          .env.*
+          !.env.example
+          EOF
+
+      - name: Enable Next standalone output and remove stale template redirect
+        shell: bash
+        run: |
+          cat > apps/web/next.config.mjs <<'EOF'
+          import path from "node:path";
+
+          /** @type {import('next').NextConfig} */
+          const nextConfig = {
+            output: "standalone",
+            outputFileTracingRoot: path.join(process.cwd(), "../.."),
+            reactCompiler: true,
+            compiler: {
+              removeConsole: process.env.NODE_ENV === "production",
+            },
+          };
+
+          export default nextConfig;
+          EOF
+
+      - name: Create internal Compose baseline and dev port overlay
+        shell: bash
+        run: |
+          cat > docker-compose.yml <<'EOF'
+          name: darknetra
+
+          services:
+            api:
+              build:
+                context: .
+                dockerfile: infrastructure/docker/api.Dockerfile
+              environment:
+                DARKNETRA_ENVIRONMENT: development
+                DARKNETRA_BUILD_VERSION: docker-dev
+              networks:
+                - app
+              healthcheck:
+                test:
+                  - CMD
+                  - python
+                  - -c
+                  - "import json,urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/live',timeout=3)); assert data['status']=='ok'"
+                interval: 5s
+                timeout: 4s
+                retries: 12
+                start_period: 5s
+
+            web:
+              build:
+                context: .
+                dockerfile: infrastructure/docker/web.Dockerfile
+                args:
+                  NEXT_PUBLIC_DARKNETRA_API_BASE_URL: http://localhost:8000
+              environment:
+                DARKNETRA_API_BASE_URL: http://api:8000
+                NEXT_PUBLIC_DARKNETRA_API_BASE_URL: http://localhost:8000
+              depends_on:
+                api:
+                  condition: service_healthy
+              networks:
+                - app
+
+          networks:
+            app:
+              driver: bridge
+          EOF
+
+          cat > docker-compose.dev.yml <<'EOF'
+          services:
+            api:
+              ports:
+                - "127.0.0.1:8000:8000"
+            web:
+              ports:
+                - "127.0.0.1:3000:3000"
+          EOF
+
+      - name: Create deterministic Docker smoke script
+        shell: bash
+        run: |
+          cat > scripts/smoke.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          compose=(docker compose -f docker-compose.yml -f docker-compose.dev.yml)
+          cleanup() { "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true; }
+          finish() {
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              echo '--- docker compose ps (failure) ---' >&2
+              "${compose[@]}" ps -a >&2 || true
+              echo '--- docker compose logs (failure) ---' >&2
+              "${compose[@]}" logs --no-color >&2 || true
+            fi
+            cleanup
+            exit "$status"
+          }
+          trap finish EXIT
+
+          "${compose[@]}" up --build -d --wait
+          "${compose[@]}" ps
+
+          api_uid="$("${compose[@]}" exec -T api id -u)"
+          web_uid="$("${compose[@]}" exec -T web id -u)"
+          test "$api_uid" = "10001"
+          test "$web_uid" = "10001"
+
+          python - <<'PY'
+          import json
+          import urllib.request
+
+          with urllib.request.urlopen('http://localhost:8000/api/v1/health/live', timeout=5) as response:
+              body = json.load(response)
+          assert body['status'] == 'ok', body
+
+          with urllib.request.urlopen('http://localhost:3000/dashboard', timeout=15) as response:
+              sample = response.read(2048)
+              assert response.status == 200
+              assert sample
+          PY
+          EOF
+          chmod +x scripts/smoke.sh
+
+      - name: Verify Compose contract before container build
+        run: |
+          uv run pytest tests/repo/test_compose_contract.py -v
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+
+      - name: Build and smoke the full local stack
+        run: bash scripts/smoke.sh
+
+      - name: Commit Task 08
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add infrastructure/docker docker-compose.yml docker-compose.dev.yml .dockerignore scripts/smoke.sh tests/repo/test_compose_contract.py apps/web/next.config.mjs
+          git commit -m 'chore: dockerize DARKNETRA web and API baseline [skip ci]'
+          git push origin HEAD:testing-codex

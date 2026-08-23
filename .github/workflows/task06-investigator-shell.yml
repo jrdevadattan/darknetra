@@ -1,0 +1,1148 @@
+name: Task 06 investigator route shell
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/task06-investigator-shell.yml
+
+permissions:
+  contents: write
+
+jobs:
+  task06:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Prepare workspace
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.15.0 --activate
+          pnpm install --frozen-lockfile
+
+      - name: Write failing investigator component contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p apps/web/src/components/darknetra apps/web/src/features/cases
+          cat > apps/web/src/components/darknetra/investigator-primitives.test.tsx <<'EOF'
+          import { render, screen } from '@testing-library/react';
+          import { describe, expect, it } from 'vitest';
+
+          import { AsyncState } from './async-state';
+          import { MetricLinkCard } from './metric-link-card';
+          import { SourceClassBadge } from './source-class-badge';
+          import { StatusBadge } from './status-badge';
+
+          describe('investigator primitives', () => {
+            it('renders epistemic status as visible text', () => {
+              render(<StatusBadge status="pending-review" />);
+              expect(screen.getByText('Pending analyst review')).toBeInTheDocument();
+            });
+
+            it('renders source class as visible text', () => {
+              render(<SourceClassBadge sourceClass="SYNTHETIC" />);
+              expect(screen.getByText('SYNTHETIC')).toBeInTheDocument();
+            });
+
+            it('makes every metric card a real navigation link', () => {
+              render(
+                <MetricLinkCard
+                  label="Pending link reviews"
+                  value={4}
+                  description="Requires analyst attention"
+                  href="/cases?review=pending"
+                />,
+              );
+              expect(screen.getByRole('link', { name: /Pending link reviews/i })).toHaveAttribute(
+                'href',
+                '/cases?review=pending',
+              );
+            });
+
+            it.each(['loading', 'empty', 'error', 'partial', 'stale', 'offline'] as const)(
+              'exposes %s as a visible state',
+              (state) => {
+                const { unmount } = render(<AsyncState state={state} />);
+                expect(screen.getByTestId(`async-state-${state}`)).toBeInTheDocument();
+                unmount();
+              },
+            );
+          });
+          EOF
+
+          cat > apps/web/src/features/cases/cases-table.test.tsx <<'EOF'
+          import { render, screen } from '@testing-library/react';
+          import userEvent from '@testing-library/user-event';
+          import { describe, expect, it } from 'vitest';
+
+          import { CasesTable } from './cases-table';
+          import { FIXTURE_CASES } from './fixtures';
+
+          describe('CasesTable', () => {
+            it('supports visible search and links rows to a case', async () => {
+              const user = userEvent.setup();
+              render(<CasesTable cases={FIXTURE_CASES} />);
+
+              expect(screen.getByRole('textbox', { name: /search cases/i })).toBeInTheDocument();
+              expect(screen.getByRole('combobox', { name: /status/i })).toBeInTheDocument();
+              expect(screen.getByRole('combobox', { name: /sensitivity/i })).toBeInTheDocument();
+              expect(screen.getByRole('combobox', { name: /sort/i })).toBeInTheDocument();
+
+              await user.type(screen.getByRole('textbox', { name: /search cases/i }), 'SYN-DEMO-004');
+              expect(screen.getByRole('link', { name: /Image reuse hard-negative/i })).toHaveAttribute(
+                'href',
+                '/cases/SYN-DEMO-004',
+              );
+              expect(screen.queryByText('Alias correlation training case')).not.toBeInTheDocument();
+            });
+          });
+          EOF
+
+          set +e
+          pnpm --filter @darknetra/web test -- \
+            src/components/darknetra/investigator-primitives.test.tsx \
+            src/features/cases/cases-table.test.tsx > /tmp/task06-red.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/task06-red.log
+          if [ "$status" -eq 0 ]; then
+            echo 'Task 06 tests unexpectedly passed before implementation.' >&2
+            exit 1
+          fi
+
+      - name: Implement DARKNETRA investigator primitives and fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > apps/web/src/components/darknetra/status-badge.tsx <<'EOF'
+          import { Badge } from '@/components/ui/badge';
+
+          export type InvestigatorStatus =
+            | 'candidate'
+            | 'lead'
+            | 'pending-review'
+            | 'analyst-confirmed'
+            | 'rejected'
+            | 'verified'
+            | 'warning'
+            | 'failed'
+            | 'offline';
+
+          const STATUS_COPY: Record<InvestigatorStatus, string> = {
+            candidate: 'Candidate',
+            lead: 'Lead',
+            'pending-review': 'Pending analyst review',
+            'analyst-confirmed': 'Analyst-confirmed',
+            rejected: 'Rejected',
+            verified: 'Verified',
+            warning: 'Warning',
+            failed: 'Failed',
+            offline: 'Offline',
+          };
+
+          export function StatusBadge({ status }: { status: InvestigatorStatus }) {
+            const destructive = status === 'failed' || status === 'rejected';
+            const outline = status === 'candidate' || status === 'pending-review' || status === 'offline';
+            return (
+              <Badge variant={destructive ? 'destructive' : outline ? 'outline' : 'secondary'}>
+                {STATUS_COPY[status]}
+              </Badge>
+            );
+          }
+          EOF
+
+          cat > apps/web/src/components/darknetra/source-class-badge.tsx <<'EOF'
+          import { Badge } from '@/components/ui/badge';
+
+          export type SourceClass = 'SYNTHETIC' | 'RESEARCH_ARCHIVE';
+
+          export function SourceClassBadge({ sourceClass }: { sourceClass: SourceClass }) {
+            return (
+              <Badge variant="outline" title="Source class">
+                {sourceClass}
+              </Badge>
+            );
+          }
+          EOF
+
+          cat > apps/web/src/components/darknetra/metric-link-card.tsx <<'EOF'
+          import Link from 'next/link';
+          import { ArrowUpRight } from 'lucide-react';
+
+          import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+
+          export function MetricLinkCard({
+            label,
+            value,
+            description,
+            href,
+          }: {
+            label: string;
+            value: string | number;
+            description: string;
+            href: string;
+          }) {
+            return (
+              <Link
+                href={href}
+                className="group rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                aria-label={`${label}: ${value}. ${description}`}
+              >
+                <Card className="h-full transition-colors group-hover:bg-muted/30">
+                  <CardHeader>
+                    <CardDescription>{label}</CardDescription>
+                    <CardTitle className="flex items-center justify-between text-2xl">
+                      <span>{value}</span>
+                      <ArrowUpRight className="size-4 text-muted-foreground" aria-hidden="true" />
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="text-muted-foreground text-xs">{description}</CardContent>
+                </Card>
+              </Link>
+            );
+          }
+          EOF
+
+          cat > apps/web/src/components/darknetra/async-state.tsx <<'EOF'
+          import { AlertCircle, CircleOff, Clock3, Info, WifiOff } from 'lucide-react';
+
+          import { Skeleton } from '@/components/ui/skeleton';
+
+          export type AsyncStateKind = 'loading' | 'empty' | 'error' | 'partial' | 'stale' | 'offline';
+
+          const COPY: Record<Exclude<AsyncStateKind, 'loading'>, { title: string; detail: string }> = {
+            empty: { title: 'No records', detail: 'No records match the current scope.' },
+            error: { title: 'Unable to load', detail: 'The requested data could not be loaded.' },
+            partial: { title: 'Partial data', detail: 'Some data is unavailable or not implemented yet.' },
+            stale: { title: 'Stale data', detail: 'This view may not include the latest analysis.' },
+            offline: { title: 'Offline', detail: 'The required service is not currently reachable.' },
+          };
+
+          const ICONS = {
+            empty: CircleOff,
+            error: AlertCircle,
+            partial: Info,
+            stale: Clock3,
+            offline: WifiOff,
+          } as const;
+
+          export function AsyncState({
+            state,
+            title,
+            description,
+          }: {
+            state: AsyncStateKind;
+            title?: string;
+            description?: string;
+          }) {
+            if (state === 'loading') {
+              return (
+                <div data-testid="async-state-loading" role="status" className="space-y-2 rounded-xl border p-4">
+                  <span className="sr-only">Loading</span>
+                  <Skeleton className="h-4 w-40" />
+                  <Skeleton className="h-4 w-2/3" />
+                </div>
+              );
+            }
+
+            const copy = COPY[state];
+            const Icon = ICONS[state];
+            return (
+              <div
+                data-testid={`async-state-${state}`}
+                role={state === 'error' ? 'alert' : 'status'}
+                className="flex gap-3 rounded-xl border bg-muted/20 p-4"
+              >
+                <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                <div>
+                  <p className="font-medium">{title ?? copy.title}</p>
+                  <p className="mt-1 text-muted-foreground text-sm">{description ?? copy.detail}</p>
+                </div>
+              </div>
+            );
+          }
+          EOF
+
+          cat > apps/web/src/components/darknetra/page-header.tsx <<'EOF'
+          import type { ReactNode } from 'react';
+
+          export function PageHeader({
+            eyebrow,
+            title,
+            description,
+            actions,
+          }: {
+            eyebrow?: string;
+            title: string;
+            description?: string;
+            actions?: ReactNode;
+          }) {
+            return (
+              <div className="flex flex-col justify-between gap-4 border-b pb-5 sm:flex-row sm:items-end">
+                <div className="min-w-0">
+                  {eyebrow ? <p className="font-medium text-muted-foreground text-xs uppercase tracking-wider">{eyebrow}</p> : null}
+                  <h1 className="mt-1 font-semibold text-2xl tracking-tight sm:text-3xl">{title}</h1>
+                  {description ? <p className="mt-2 max-w-3xl text-muted-foreground text-sm">{description}</p> : null}
+                </div>
+                {actions ? <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div> : null}
+              </div>
+            );
+          }
+          EOF
+
+          cat > apps/web/src/components/darknetra/scope-placeholder.tsx <<'EOF'
+          import { Badge } from '@/components/ui/badge';
+          import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+
+          export function ScopePlaceholder({
+            title,
+            description,
+            ownerPlan,
+          }: {
+            title: string;
+            description: string;
+            ownerPlan: string;
+          }) {
+            return (
+              <Card>
+                <CardHeader>
+                  <CardTitle>{title}</CardTitle>
+                  <CardDescription>{description}</CardDescription>
+                </CardHeader>
+                <CardContent className="flex flex-wrap items-center gap-2 text-sm">
+                  <Badge variant="outline">Interface ready</Badge>
+                  <span className="text-muted-foreground">Live data boundary: {ownerPlan}</span>
+                </CardContent>
+              </Card>
+            );
+          }
+          EOF
+
+          cat > apps/web/src/features/cases/types.ts <<'EOF'
+          import type { SourceClass } from '@/components/darknetra/source-class-badge';
+
+          export type CaseStatus = 'OPEN' | 'REVIEW' | 'CLOSED';
+          export type CaseSensitivity = 'STANDARD' | 'RESTRICTED';
+
+          export interface CaseSummary {
+            id: string;
+            title: string;
+            status: CaseStatus;
+            sensitivity: CaseSensitivity;
+            sourceClass: SourceClass;
+            owner: string;
+            evidenceCount: number;
+            pendingReviews: number;
+            openAlerts: number;
+            updatedAt: string;
+          }
+          EOF
+
+          cat > apps/web/src/features/cases/fixtures.ts <<'EOF'
+          import type { CaseSummary } from './types';
+
+          export const FIXTURE_CASES: CaseSummary[] = [
+            {
+              id: 'SYN-DEMO-001',
+              title: 'Alias correlation training case',
+              status: 'OPEN',
+              sensitivity: 'STANDARD',
+              sourceClass: 'SYNTHETIC',
+              owner: 'Demo Administrator',
+              evidenceCount: 37,
+              pendingReviews: 4,
+              openAlerts: 2,
+              updatedAt: '2026-08-17T15:45:00Z',
+            },
+            {
+              id: 'RES-ARCH-002',
+              title: 'Research archive terminology review',
+              status: 'REVIEW',
+              sensitivity: 'RESTRICTED',
+              sourceClass: 'RESEARCH_ARCHIVE',
+              owner: 'Demo Analyst',
+              evidenceCount: 19,
+              pendingReviews: 2,
+              openAlerts: 1,
+              updatedAt: '2026-08-16T10:20:00Z',
+            },
+            {
+              id: 'SYN-DEMO-003',
+              title: 'Parcel-language pattern simulation',
+              status: 'OPEN',
+              sensitivity: 'STANDARD',
+              sourceClass: 'SYNTHETIC',
+              owner: 'Demo Analyst',
+              evidenceCount: 24,
+              pendingReviews: 1,
+              openAlerts: 0,
+              updatedAt: '2026-08-15T12:05:00Z',
+            },
+            {
+              id: 'SYN-DEMO-004',
+              title: 'Image reuse hard-negative exercise',
+              status: 'OPEN',
+              sensitivity: 'RESTRICTED',
+              sourceClass: 'SYNTHETIC',
+              owner: 'Demo Reviewer',
+              evidenceCount: 16,
+              pendingReviews: 3,
+              openAlerts: 1,
+              updatedAt: '2026-08-14T08:35:00Z',
+            },
+            {
+              id: 'SYN-DEMO-005',
+              title: 'Closed baseline corpus validation',
+              status: 'CLOSED',
+              sensitivity: 'STANDARD',
+              sourceClass: 'SYNTHETIC',
+              owner: 'Demo Administrator',
+              evidenceCount: 42,
+              pendingReviews: 0,
+              openAlerts: 0,
+              updatedAt: '2026-08-12T17:00:00Z',
+            },
+            {
+              id: 'RES-ARCH-006',
+              title: 'Archived marketplace structure study',
+              status: 'REVIEW',
+              sensitivity: 'RESTRICTED',
+              sourceClass: 'RESEARCH_ARCHIVE',
+              owner: 'Demo Reviewer',
+              evidenceCount: 28,
+              pendingReviews: 2,
+              openAlerts: 0,
+              updatedAt: '2026-08-11T11:40:00Z',
+            },
+          ];
+
+          export function getFixtureCase(caseId: string): CaseSummary | undefined {
+            return FIXTURE_CASES.find((item) => item.id === caseId);
+          }
+          EOF
+
+          mkdir -p apps/web/src/features/overview
+          cat > apps/web/src/features/overview/fixture-overview.ts <<'EOF'
+          import { FIXTURE_CASES } from '@/features/cases/fixtures';
+
+          export interface OverviewMetric {
+            id: string;
+            label: string;
+            value: number;
+            description: string;
+            href: string;
+          }
+
+          export interface FixtureOverviewSnapshot {
+            metrics: OverviewMetric[];
+            recentCases: typeof FIXTURE_CASES;
+          }
+
+          export function getFixtureOverviewSnapshot(): FixtureOverviewSnapshot {
+            const activeCases = FIXTURE_CASES.filter((item) => item.status !== 'CLOSED').length;
+            const pendingReviews = FIXTURE_CASES.reduce((sum, item) => sum + item.pendingReviews, 0);
+            const openAlerts = FIXTURE_CASES.reduce((sum, item) => sum + item.openAlerts, 0);
+
+            return {
+              metrics: [
+                {
+                  id: 'active-cases',
+                  label: 'Active fixture cases',
+                  value: activeCases,
+                  description: 'Open or review-stage controlled cases',
+                  href: '/cases?scope=active',
+                },
+                {
+                  id: 'integrity-warnings',
+                  label: 'Fixture integrity warnings',
+                  value: 1,
+                  description: 'Exercises awaiting integrity review',
+                  href: '/cases?integrity=warning',
+                },
+                {
+                  id: 'pending-reviews',
+                  label: 'Pending link reviews',
+                  value: pendingReviews,
+                  description: 'Fixture candidates requiring human disposition',
+                  href: '/cases?review=pending',
+                },
+                {
+                  id: 'open-alerts',
+                  label: 'Open fixture alerts',
+                  value: openAlerts,
+                  description: 'Controlled alerts awaiting review',
+                  href: '/cases?alerts=open',
+                },
+                {
+                  id: 'failed-jobs',
+                  label: 'Failed jobs',
+                  value: 0,
+                  description: 'Real worker health begins in Plan 01 · Task 7',
+                  href: '/system/health?jobs=failed',
+                },
+              ],
+              recentCases: [...FIXTURE_CASES]
+                .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
+                .slice(0, 4),
+            };
+          }
+          EOF
+
+      - name: Implement case table, shell, and route components
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > apps/web/src/features/cases/cases-table.tsx <<'EOF'
+          'use client';
+
+          import { useMemo, useState } from 'react';
+          import Link from 'next/link';
+
+          import { SourceClassBadge } from '@/components/darknetra/source-class-badge';
+          import { Badge } from '@/components/ui/badge';
+          import { Button } from '@/components/ui/button';
+          import { Input } from '@/components/ui/input';
+          import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+          import type { CaseStatus, CaseSummary } from './types';
+
+          const PAGE_SIZE = 4;
+
+          function CaseStatusBadge({ status }: { status: CaseStatus }) {
+            return <Badge variant={status === 'CLOSED' ? 'outline' : 'secondary'}>{status}</Badge>;
+          }
+
+          export function CasesTable({ cases }: { cases: CaseSummary[] }) {
+            const [query, setQuery] = useState('');
+            const [status, setStatus] = useState('ALL');
+            const [sensitivity, setSensitivity] = useState('ALL');
+            const [sort, setSort] = useState('updated-desc');
+            const [page, setPage] = useState(1);
+
+            const filtered = useMemo(() => {
+              const normalized = query.trim().toLowerCase();
+              const result = cases.filter((item) => {
+                const matchesQuery =
+                  !normalized ||
+                  [item.id, item.title, item.owner].some((value) => value.toLowerCase().includes(normalized));
+                const matchesStatus = status === 'ALL' || item.status === status;
+                const matchesSensitivity = sensitivity === 'ALL' || item.sensitivity === sensitivity;
+                return matchesQuery && matchesStatus && matchesSensitivity;
+              });
+
+              return [...result].sort((a, b) => {
+                if (sort === 'title-asc') return a.title.localeCompare(b.title);
+                if (sort === 'alerts-desc') return b.openAlerts - a.openAlerts;
+                return Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
+              });
+            }, [cases, query, sensitivity, sort, status]);
+
+            const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+            const safePage = Math.min(page, pageCount);
+            const visible = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+
+            const resetPage = () => setPage(1);
+
+            return (
+              <div className="space-y-4">
+                <div className="grid gap-3 md:grid-cols-4">
+                  <Input
+                    aria-label="Search cases"
+                    placeholder="Search case ID, title, owner…"
+                    value={query}
+                    onChange={(event) => {
+                      setQuery(event.target.value);
+                      resetPage();
+                    }}
+                  />
+                  <select
+                    aria-label="Status"
+                    className="h-9 rounded-md border bg-background px-3 text-sm"
+                    value={status}
+                    onChange={(event) => {
+                      setStatus(event.target.value);
+                      resetPage();
+                    }}
+                  >
+                    <option value="ALL">All statuses</option>
+                    <option value="OPEN">Open</option>
+                    <option value="REVIEW">Review</option>
+                    <option value="CLOSED">Closed</option>
+                  </select>
+                  <select
+                    aria-label="Sensitivity"
+                    className="h-9 rounded-md border bg-background px-3 text-sm"
+                    value={sensitivity}
+                    onChange={(event) => {
+                      setSensitivity(event.target.value);
+                      resetPage();
+                    }}
+                  >
+                    <option value="ALL">All sensitivity</option>
+                    <option value="STANDARD">Standard</option>
+                    <option value="RESTRICTED">Restricted</option>
+                  </select>
+                  <select
+                    aria-label="Sort"
+                    className="h-9 rounded-md border bg-background px-3 text-sm"
+                    value={sort}
+                    onChange={(event) => setSort(event.target.value)}
+                  >
+                    <option value="updated-desc">Recently updated</option>
+                    <option value="title-asc">Title A–Z</option>
+                    <option value="alerts-desc">Open alerts</option>
+                  </select>
+                </div>
+
+                <div className="rounded-xl border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Case</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead>Source class</TableHead>
+                        <TableHead>Owner</TableHead>
+                        <TableHead className="text-right">Evidence</TableHead>
+                        <TableHead className="text-right">Reviews</TableHead>
+                        <TableHead className="text-right">Alerts</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {visible.length ? (
+                        visible.map((item) => (
+                          <TableRow key={item.id}>
+                            <TableCell className="min-w-72 whitespace-normal">
+                              <Link href={`/cases/${item.id}`} className="font-medium hover:underline">
+                                {item.title}
+                              </Link>
+                              <div className="mt-1 text-muted-foreground text-xs">{item.id}</div>
+                            </TableCell>
+                            <TableCell><CaseStatusBadge status={item.status} /></TableCell>
+                            <TableCell><SourceClassBadge sourceClass={item.sourceClass} /></TableCell>
+                            <TableCell>{item.owner}</TableCell>
+                            <TableCell className="text-right tabular-nums">{item.evidenceCount}</TableCell>
+                            <TableCell className="text-right tabular-nums">{item.pendingReviews}</TableCell>
+                            <TableCell className="text-right tabular-nums">{item.openAlerts}</TableCell>
+                          </TableRow>
+                        ))
+                      ) : (
+                        <TableRow>
+                          <TableCell colSpan={7} className="h-24 text-center text-muted-foreground">
+                            No fixture cases match the current filters.
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                </div>
+
+                <div className="flex items-center justify-between gap-3 text-sm">
+                  <span className="text-muted-foreground">
+                    {filtered.length} case{filtered.length === 1 ? '' : 's'} · Page {safePage} of {pageCount}
+                  </span>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={safePage <= 1}
+                      onClick={() => setPage((current) => Math.max(1, current - 1))}
+                    >
+                      Previous
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={safePage >= pageCount}
+                      onClick={() => setPage((current) => Math.min(pageCount, current + 1))}
+                    >
+                      Next
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            );
+          }
+          EOF
+
+          cat > apps/web/src/components/darknetra/case-tabs.tsx <<'EOF'
+          'use client';
+
+          import Link from 'next/link';
+          import { usePathname } from 'next/navigation';
+
+          import { cn } from '@/lib/utils';
+          import { CASE_NAVIGATION } from '@/navigation/darknetra-navigation';
+
+          export function CaseTabs({ caseId }: { caseId: string }) {
+            const pathname = usePathname();
+            const base = `/cases/${caseId}`;
+
+            return (
+              <nav aria-label="Case sections" className="overflow-x-auto border-b">
+                <div className="flex min-w-max gap-1">
+                  {CASE_NAVIGATION.map((item) => {
+                    const href = item.segment ? `${base}/${item.segment}` : base;
+                    const active = item.segment ? pathname.startsWith(href) : pathname === base;
+                    return (
+                      <Link
+                        key={item.title}
+                        href={href}
+                        aria-current={active ? 'page' : undefined}
+                        className={cn(
+                          'border-b-2 border-transparent px-3 py-2 text-sm text-muted-foreground hover:text-foreground',
+                          active && 'border-primary font-medium text-foreground',
+                        )}
+                      >
+                        {item.title}
+                      </Link>
+                    );
+                  })}
+                </div>
+              </nav>
+            );
+          }
+          EOF
+
+          cat > apps/web/src/components/darknetra/investigator-shell.tsx <<'EOF'
+          import type { CSSProperties, ReactNode } from 'react';
+          import { cookies } from 'next/headers';
+
+          import { AppSidebar } from '@/app/(main)/dashboard/_components/sidebar/app-sidebar';
+          import { LayoutControls } from '@/app/(main)/dashboard/_components/header/layout-controls';
+          import { SearchDialog } from '@/app/(main)/dashboard/_components/header/search-dialog';
+          import { ThemeSwitcher } from '@/app/(main)/dashboard/_components/header/theme-switcher';
+          import { Badge } from '@/components/ui/badge';
+          import { Separator } from '@/components/ui/separator';
+          import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar';
+          import { cn } from '@/lib/utils';
+          import { getPreference } from '@/server/server-actions';
+
+          export async function InvestigatorShell({ children }: { children: ReactNode }) {
+            const cookieStore = await cookies();
+            const defaultOpen = cookieStore.get('sidebar_state')?.value !== 'false';
+            const [variant, collapsible] = await Promise.all([
+              getPreference('sidebar_variant'),
+              getPreference('sidebar_collapsible'),
+            ]);
+
+            return (
+              <SidebarProvider
+                defaultOpen={defaultOpen}
+                style={{ '--sidebar-width': 'calc(var(--spacing) * 68)' } as CSSProperties}
+              >
+                <AppSidebar variant={variant} collapsible={collapsible} />
+                <SidebarInset
+                  className={cn(
+                    '[html[data-content-layout=centered]_&>*]:mx-auto',
+                    '[html[data-content-layout=centered]_&>*]:w-full',
+                    '[html[data-content-layout=centered]_&>*]:max-w-screen-2xl',
+                    'peer-data-[variant=inset]:border',
+                    '[--dashboard-header-height:--spacing(12)]',
+                    'min-w-0 overflow-x-clip',
+                  )}
+                >
+                  <header className="flex h-12 shrink-0 items-center border-b bg-background/95 backdrop-blur">
+                    <div className="flex w-full items-center justify-between px-4 lg:px-6">
+                      <div className="flex items-center gap-1 lg:gap-2">
+                        <SidebarTrigger className="-ml-1" />
+                        <Separator orientation="vertical" className="mx-2 h-4" />
+                        <SearchDialog />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Badge variant="outline" className="hidden sm:inline-flex">Fixture mode · ADMIN</Badge>
+                        <LayoutControls />
+                        <ThemeSwitcher />
+                      </div>
+                    </div>
+                  </header>
+                  <main className="min-h-0 min-w-0 flex-1 overflow-x-hidden p-4 md:p-6">{children}</main>
+                </SidebarInset>
+              </SidebarProvider>
+            );
+          }
+          EOF
+
+          cat > 'apps/web/src/app/(main)/dashboard/layout.tsx' <<'EOF'
+          import type { ReactNode } from 'react';
+
+          import { InvestigatorShell } from '@/components/darknetra/investigator-shell';
+
+          export default function DashboardLayout({ children }: { children: ReactNode }) {
+            return <InvestigatorShell>{children}</InvestigatorShell>;
+          }
+          EOF
+
+          mkdir -p 'apps/web/src/app/(main)/(workspace)'
+          cat > 'apps/web/src/app/(main)/(workspace)/layout.tsx' <<'EOF'
+          import type { ReactNode } from 'react';
+
+          import { InvestigatorShell } from '@/components/darknetra/investigator-shell';
+
+          export default function WorkspaceLayout({ children }: { children: ReactNode }) {
+            return <InvestigatorShell>{children}</InvestigatorShell>;
+          }
+          EOF
+
+          cat > apps/web/src/data/users.ts <<'EOF'
+          export const users = [
+            {
+              id: 'demo-admin',
+              name: 'Demo Administrator',
+              username: 'demo-admin',
+              email: 'admin@darknetra.local',
+              avatar: '',
+              role: 'ADMIN',
+            },
+            {
+              id: 'demo-analyst',
+              name: 'Demo Analyst',
+              username: 'demo-analyst',
+              email: 'analyst@darknetra.local',
+              avatar: '',
+              role: 'ANALYST',
+            },
+          ] as const;
+
+          export const rootUser = users[0];
+          EOF
+
+          cat > 'apps/web/src/app/(main)/dashboard/_components/sidebar/nav-user.tsx' <<'EOF'
+          import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+          import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from '@/components/ui/sidebar';
+          import { getInitials } from '@/lib/utils';
+
+          export function NavUser({
+            user,
+          }: {
+            readonly user: {
+              readonly name: string;
+              readonly email: string;
+              readonly avatar: string;
+              readonly role: string;
+            };
+          }) {
+            return (
+              <SidebarMenu>
+                <SidebarMenuItem>
+                  <SidebarMenuButton size="lg" className="cursor-default">
+                    <Avatar className="h-8 w-8 rounded-lg grayscale">
+                      <AvatarImage src={user.avatar || undefined} alt={user.name} />
+                      <AvatarFallback className="rounded-lg">{getInitials(user.name)}</AvatarFallback>
+                    </Avatar>
+                    <div className="grid flex-1 text-left text-sm leading-tight">
+                      <span className="truncate font-medium">{user.name}</span>
+                      <span className="truncate text-muted-foreground text-xs">{user.role} · fixture session</span>
+                    </div>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              </SidebarMenu>
+            );
+          }
+          EOF
+
+      - name: Implement overview, cases, role matrix, and honest route shells
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > 'apps/web/src/app/(main)/dashboard/page.tsx' <<'EOF'
+          import Link from 'next/link';
+
+          import { AsyncState } from '@/components/darknetra/async-state';
+          import { MetricLinkCard } from '@/components/darknetra/metric-link-card';
+          import { PageHeader } from '@/components/darknetra/page-header';
+          import { SourceClassBadge } from '@/components/darknetra/source-class-badge';
+          import { Button } from '@/components/ui/button';
+          import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+          import { getFixtureOverviewSnapshot } from '@/features/overview/fixture-overview';
+
+          export default function DashboardPage() {
+            const snapshot = getFixtureOverviewSnapshot();
+            return (
+              <div className="space-y-6">
+                <PageHeader
+                  eyebrow="Controlled demonstration environment"
+                  title="Investigator overview"
+                  description="Action-oriented fixture queues for validating DARKNETRA workflows before the evidence and analytics APIs are connected."
+                  actions={<SourceClassBadge sourceClass="SYNTHETIC" />}
+                />
+                <AsyncState
+                  state="partial"
+                  title="Fixture-backed interface"
+                  description="Counts on this screen are controlled demonstration data. Live case, evidence, alert, and worker state begins in later implementation plans."
+                />
+                <section aria-label="Investigator work queues" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+                  {snapshot.metrics.map((metric) => <MetricLinkCard key={metric.id} {...metric} />)}
+                </section>
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Recent controlled cases</CardTitle>
+                    <CardDescription>Only synthetic or research-archive fixtures are shown in Plan 01.</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    {snapshot.recentCases.map((item) => (
+                      <div key={item.id} className="flex flex-col justify-between gap-3 rounded-lg border p-3 sm:flex-row sm:items-center">
+                        <div className="min-w-0">
+                          <Link href={`/cases/${item.id}`} className="font-medium hover:underline">{item.title}</Link>
+                          <p className="mt-1 text-muted-foreground text-xs">{item.id} · {item.owner}</p>
+                        </div>
+                        <div className="flex items-center gap-2"><SourceClassBadge sourceClass={item.sourceClass} /></div>
+                      </div>
+                    ))}
+                    <Button asChild variant="outline"><Link href="/cases">Open case inventory</Link></Button>
+                  </CardContent>
+                </Card>
+              </div>
+            );
+          }
+          EOF
+
+          mkdir -p 'apps/web/src/app/(main)/(workspace)/cases'
+          cat > 'apps/web/src/app/(main)/(workspace)/cases/page.tsx' <<'EOF'
+          import { PageHeader } from '@/components/darknetra/page-header';
+          import { CasesTable } from '@/features/cases/cases-table';
+          import { FIXTURE_CASES } from '@/features/cases/fixtures';
+
+          export default function CasesPage() {
+            return (
+              <div className="space-y-6">
+                <PageHeader
+                  eyebrow="Fixture inventory"
+                  title="Cases"
+                  description="Search, filter, sort, and inspect controlled cases. Persistent case APIs and membership enforcement begin in Plan 02."
+                />
+                <CasesTable cases={FIXTURE_CASES} />
+              </div>
+            );
+          }
+          EOF
+
+          mkdir -p 'apps/web/src/app/(main)/(workspace)/cases/[caseId]'
+          cat > 'apps/web/src/app/(main)/(workspace)/cases/[caseId]/layout.tsx' <<'EOF'
+          import type { ReactNode } from 'react';
+          import { notFound } from 'next/navigation';
+
+          import { CaseTabs } from '@/components/darknetra/case-tabs';
+          import { PageHeader } from '@/components/darknetra/page-header';
+          import { SourceClassBadge } from '@/components/darknetra/source-class-badge';
+          import { Badge } from '@/components/ui/badge';
+          import { getFixtureCase } from '@/features/cases/fixtures';
+
+          export default async function CaseLayout({
+            children,
+            params,
+          }: {
+            children: ReactNode;
+            params: Promise<{ caseId: string }>;
+          }) {
+            const { caseId } = await params;
+            const currentCase = getFixtureCase(caseId);
+            if (!currentCase) notFound();
+
+            return (
+              <div className="space-y-5">
+                <PageHeader
+                  eyebrow={currentCase.id}
+                  title={currentCase.title}
+                  description={`Fixture owner: ${currentCase.owner} · Sensitivity: ${currentCase.sensitivity}`}
+                  actions={
+                    <>
+                      <Badge variant="secondary">{currentCase.status}</Badge>
+                      <SourceClassBadge sourceClass={currentCase.sourceClass} />
+                    </>
+                  }
+                />
+                <CaseTabs caseId={currentCase.id} />
+                {children}
+              </div>
+            );
+          }
+          EOF
+
+          cat > 'apps/web/src/app/(main)/(workspace)/cases/[caseId]/page.tsx' <<'EOF'
+          import { notFound } from 'next/navigation';
+
+          import { MetricLinkCard } from '@/components/darknetra/metric-link-card';
+          import { AsyncState } from '@/components/darknetra/async-state';
+          import { getFixtureCase } from '@/features/cases/fixtures';
+
+          export default async function CaseOverviewPage({ params }: { params: Promise<{ caseId: string }> }) {
+            const { caseId } = await params;
+            const item = getFixtureCase(caseId);
+            if (!item) notFound();
+
+            return (
+              <div className="space-y-4">
+                <AsyncState
+                  state="partial"
+                  title="Controlled case fixture"
+                  description="This case demonstrates navigation and review workflow only. Evidence integrity and analytic results are not simulated here."
+                />
+                <div className="grid gap-4 sm:grid-cols-3">
+                  <MetricLinkCard label="Evidence artifacts" value={item.evidenceCount} description="Evidence Vault begins in Plan 03" href={`/cases/${item.id}/evidence`} />
+                  <MetricLinkCard label="Pending reviews" value={item.pendingReviews} description="Analyst decisions begin in the correlation plan" href={`/cases/${item.id}/links`} />
+                  <MetricLinkCard label="Open fixture alerts" value={item.openAlerts} description="Trend alerts begin in the graph/trends plan" href={`/cases/${item.id}/alerts`} />
+                </div>
+              </div>
+            );
+          }
+          EOF
+
+          cat > apps/web/src/components/darknetra/case-scope-page.tsx <<'EOF'
+          import { ScopePlaceholder } from './scope-placeholder';
+
+          export function CaseScopePage({
+            title,
+            description,
+            ownerPlan,
+          }: {
+            title: string;
+            description: string;
+            ownerPlan: string;
+          }) {
+            return <ScopePlaceholder title={title} description={description} ownerPlan={ownerPlan} />;
+          }
+          EOF
+
+          create_case_page() {
+            segment="$1" title="$2" description="$3" owner="$4"
+            mkdir -p "apps/web/src/app/(main)/(workspace)/cases/[caseId]/$segment"
+            cat > "apps/web/src/app/(main)/(workspace)/cases/[caseId]/$segment/page.tsx" <<EOF
+          import { CaseScopePage } from '@/components/darknetra/case-scope-page';
+
+          export default function Page() {
+            return <CaseScopePage title="$title" description="$description" ownerPlan="$owner" />;
+          }
+          EOF
+          }
+
+          create_case_page evidence "Evidence" "Evidence inventory, integrity verification, custody, previews, and lineage will appear here without overwriting original artifacts." "Plan 03 · Evidence Vault"
+          create_case_page entities "Entities" "Evidence-linked substance, alias, price, quantity, location, contact, wallet, PGP, and image entities will appear here." "Plan 04 · Extraction"
+          create_case_page activity "Activity Candidates" "Explainable transactional-activity candidates will show feature decomposition, negative context, source evidence, and analyst disposition." "Plan 05 · Activity correlation"
+          create_case_page links "Link Analysis" "Side-by-side alias candidates will expose supporting and contradicting signals before any human decision." "Plan 05 · Identity correlation"
+          create_case_page graph "NarcoGraph" "Accepted and pending relationships will be explored as a case-scoped evidence-linked graph with accessible alternatives." "Plan 06 · Graph projection"
+          create_case_page timeline "Timeline" "Capture, observation, first/last-seen, analyst decision, and alert events will be displayed with UTC and source timezone context." "Plan 06 · Timeline"
+          create_case_page alerts "Alerts" "Deduplicated emerging-term and activity alerts will show source diversity, evidence drill-down, severity, and disposition." "Plan 06 · Trends"
+          create_case_page reports "Reports" "Evidence-linked Markdown/PDF investigation packs will support redaction preview, template versioning, and report digests." "Plan 06 · Reporting"
+
+          mkdir -p apps/web/src/features/admin/roles
+          cat > apps/web/src/features/admin/roles/role-matrix.tsx <<'EOF'
+          import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+
+          const rows = [
+            ['ADMIN', 'Yes', 'Yes', 'Yes', 'Yes', 'Yes'],
+            ['CASE_OWNER', 'No', 'Yes', 'Scoped', 'Yes', 'Scoped'],
+            ['COLLECTOR', 'No', 'Assigned', 'Upload', 'No', 'No'],
+            ['ANALYST', 'No', 'Assigned', 'Review', 'Analyze', 'No'],
+            ['REVIEWER', 'No', 'Assigned', 'Read', 'Review', 'Scoped'],
+            ['AUDITOR', 'No', 'Assigned', 'Integrity', 'Read', 'Yes'],
+            ['VIEWER', 'No', 'Assigned', 'Redacted', 'Read', 'No'],
+          ] as const;
+
+          export function RoleMatrix() {
+            return (
+              <div className="rounded-xl border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Role</TableHead>
+                      <TableHead>Admin</TableHead>
+                      <TableHead>Case access</TableHead>
+                      <TableHead>Evidence</TableHead>
+                      <TableHead>Analysis</TableHead>
+                      <TableHead>Audit</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {rows.map((row) => (
+                      <TableRow key={row[0]}>{row.map((cell) => <TableCell key={cell}>{cell}</TableCell>)}</TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            );
+          }
+          EOF
+
+          cat > apps/web/src/components/darknetra/planned-surface.tsx <<'EOF'
+          import { PageHeader } from './page-header';
+          import { ScopePlaceholder } from './scope-placeholder';
+
+          export function PlannedSurface({
+            eyebrow,
+            title,
+            description,
+            ownerPlan,
+          }: {
+            eyebrow: string;
+            title: string;
+            description: string;
+            ownerPlan: string;
+          }) {
+            return (
+              <div className="space-y-6">
+                <PageHeader eyebrow={eyebrow} title={title} description={description} />
+                <ScopePlaceholder title={`${title} interface`} description="No live or fabricated records are shown in this Plan 01 shell." ownerPlan={ownerPlan} />
+              </div>
+            );
+          }
+          EOF
+
+          create_surface() {
+            route="$1" component="$2"
+            mkdir -p "apps/web/src/app/(main)/(workspace)/$route"
+            printf '%s\n' "$component" > "apps/web/src/app/(main)/(workspace)/$route/page.tsx"
+          }
+
+          create_surface 'intelligence/trends' "import { PlannedSurface } from '@/components/darknetra/planned-surface'; export default function Page(){return <PlannedSurface eyebrow=\"Intelligence\" title=\"Emerging Trends\" description=\"Deduplication-aware term and activity monitoring across approved historical observations.\" ownerPlan=\"Plan 06 · Trends\" />;}"
+          create_surface 'intelligence/sources' "import { PlannedSurface } from '@/components/darknetra/planned-surface'; export default function Page(){return <PlannedSurface eyebrow=\"Intelligence\" title=\"Source Registry\" description=\"Policy, trust, parser, health, and authorization metadata for approved source classes.\" ownerPlan=\"Plan 08 · Optional lawful collector\" />;}"
+          create_surface 'admin/users' "import { PlannedSurface } from '@/components/darknetra/planned-surface'; export default function Page(){return <PlannedSurface eyebrow=\"Administration\" title=\"Users\" description=\"User lifecycle, bootstrap controls, and role assignments will be backed by authenticated APIs.\" ownerPlan=\"Plan 02 · Authentication and RBAC\" />;}"
+          create_surface 'admin/taxonomies' "import { PlannedSurface } from '@/components/darknetra/planned-surface'; export default function Page(){return <PlannedSurface eyebrow=\"Administration\" title=\"Taxonomies\" description=\"Substance, shipping, location, and normalization taxonomies will be versioned and auditable.\" ownerPlan=\"Plan 04 · Extraction\" />;}"
+          create_surface 'admin/settings' "import { PlannedSurface } from '@/components/darknetra/planned-surface'; export default function Page(){return <PlannedSurface eyebrow=\"Administration\" title=\"System Settings\" description=\"Security, model, retention, and deployment settings will appear only when backed by validated configuration.\" ownerPlan=\"Plan 02+ · Platform configuration\" />;}"
+          create_surface 'audit' "import { PlannedSurface } from '@/components/darknetra/planned-surface'; export default function Page(){return <PlannedSurface eyebrow=\"Governance\" title=\"Audit\" description=\"Authorized mutations, reveals, reviews, custody events, and security-sensitive actions will be recorded here.\" ownerPlan=\"Plan 02 · Audit foundation\" />;}"
+          create_surface 'system/health' "import { PlannedSurface } from '@/components/darknetra/planned-surface'; export default function Page(){return <PlannedSurface eyebrow=\"Operations\" title=\"System Health\" description=\"Service health must be measured, never inferred from page render. The real API probe is the next task.\" ownerPlan=\"Plan 01 · Task 7\" />;}"
+
+          mkdir -p 'apps/web/src/app/(main)/(workspace)/admin/roles'
+          cat > 'apps/web/src/app/(main)/(workspace)/admin/roles/page.tsx' <<'EOF'
+          import { AsyncState } from '@/components/darknetra/async-state';
+          import { PageHeader } from '@/components/darknetra/page-header';
+          import { RoleMatrix } from '@/features/admin/roles/role-matrix';
+
+          export default function RolesPage() {
+            return (
+              <div className="space-y-6">
+                <PageHeader eyebrow="Administration" title="Roles & Permissions" description="Read-only Plan 01 matrix. Real enforcement is server-side and case-scoped in Plan 02." />
+                <AsyncState state="partial" title="Read-only contract" description="There is intentionally no Save action until authenticated RBAC APIs exist." />
+                <RoleMatrix />
+              </div>
+            );
+          }
+          EOF
+
+          rm -rf 'apps/web/src/app/(main)/dashboard/roles' 'apps/web/src/app/(main)/dashboard/users'
+
+      - name: Verify Task 06
+        run: |
+          pnpm --filter @darknetra/web test
+          pnpm --filter @darknetra/web lint
+          pnpm --filter @darknetra/web typecheck
+          pnpm --filter @darknetra/web build
+
+      - name: Commit Task 06
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/web
+          git commit -m 'feat: add investigator dashboard route shell [skip ci]'
+          git push origin HEAD:testing-codex

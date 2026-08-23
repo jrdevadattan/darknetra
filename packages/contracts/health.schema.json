@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://darknetra.local/contracts/health.schema.json",
+  "title": "DARKNETRA Health API Responses",
+  "oneOf": [
+    { "$ref": "#/$defs/liveHealth" },
+    { "$ref": "#/$defs/readyHealth" }
+  ],
+  "$defs": {
+    "liveHealth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "version"],
+      "properties": {
+        "status": { "const": "ok" },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "componentHealth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "status"],
+      "properties": {
+        "name": { "const": "api" },
+        "status": { "const": "ready" }
+      }
+    },
+    "readyHealth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "version", "components"],
+      "properties": {
+        "status": { "const": "ready" },
+        "version": { "type": "string", "minLength": 1 },
+        "components": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/componentHealth" }
+        }
+      }
+    }
+  }
+}

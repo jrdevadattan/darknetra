@@ -1,0 +1,28 @@
+services:
+  postgres:
+    environment:
+      POSTGRES_DB: darknetra_e2e_test
+      POSTGRES_USER: darknetra
+      POSTGRES_PASSWORD: darknetra-e2e
+    ports:
+      - "127.0.0.1:55432:5432"
+
+  api:
+    environment:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_BUILD_VERSION: plan02-real-e2e
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-e2e@postgres:5432/darknetra_e2e_test
+      DARKNETRA_WEB_ORIGIN: http://127.0.0.1:3000
+      DARKNETRA_JWT_SIGNING_KEY_B64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  web:
+    build:
+      args:
+        NEXT_PUBLIC_DARKNETRA_API_BASE_URL: http://127.0.0.1:8000
+    environment:
+      DARKNETRA_API_BASE_URL: http://api:8000
+      NEXT_PUBLIC_DARKNETRA_API_BASE_URL: http://127.0.0.1:8000
+    ports:
+      - "127.0.0.1:3000:3000"

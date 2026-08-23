@@ -1,0 +1,157 @@
+name: Plan 02 Task 11 authenticated session UX
+
+# Full GREEN gate: rerun after precise mobile and forced-change Playwright assertions.
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan02-task11.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+      NEXT_PUBLIC_DARKNETRA_API_BASE_URL: http://127.0.0.1:8000
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - id: prepare
+        name: Prepare workspaces
+        continue-on-error: true
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.15.0 --activate
+          pnpm install --frozen-lockfile
+          uv sync --all-packages --dev --frozen
+
+      - id: auth_tests
+        name: Focused auth tests
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm --filter @darknetra/web test -- src/features/auth 2>&1 | tee /tmp/task11-auth-tests.log
+
+      - id: lint
+        name: Biome lint
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: pnpm --filter @darknetra/web lint
+
+      - id: typecheck
+        name: TypeScript typecheck
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: pnpm --filter @darknetra/web typecheck
+
+      - id: full_tests
+        name: Full frontend tests
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: pnpm --filter @darknetra/web test
+
+      - id: build
+        name: Production build
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: pnpm --filter @darknetra/web build
+
+      - id: playwright
+        name: Install Chromium
+        if: steps.prepare.outcome == 'success' && steps.build.outcome == 'success'
+        continue-on-error: true
+        run: pnpm --filter @darknetra/web exec playwright install --with-deps chromium
+
+      - id: e2e
+        name: Authenticated browser tests
+        if: steps.playwright.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm --filter @darknetra/web test:e2e 2>&1 | tee /tmp/task11-e2e.log
+
+      - name: Persist Task 11 verification record
+        if: always()
+        env:
+          PREPARE: ${{ steps.prepare.outcome }}
+          AUTH_TESTS: ${{ steps.auth_tests.outcome }}
+          LINT: ${{ steps.lint.outcome }}
+          TYPECHECK: ${{ steps.typecheck.outcome }}
+          FULL_TESTS: ${{ steps.full_tests.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+          PLAYWRIGHT: ${{ steps.playwright.outcome }}
+          E2E: ${{ steps.e2e.outcome }}
+        run: |
+          mkdir -p docs/verification
+          {
+            echo '# Plan 02 Task 11 verification'
+            echo
+            echo 'GitHub Actions outcomes for authenticated session UX:'
+            echo
+            echo "- prepare: ${PREPARE}"
+            echo "- focused auth tests: ${AUTH_TESTS}"
+            echo "- Biome lint: ${LINT}"
+            echo "- TypeScript typecheck: ${TYPECHECK}"
+            echo "- full frontend tests: ${FULL_TESTS}"
+            echo "- Next.js production build: ${BUILD}"
+            echo "- Chromium install: ${PLAYWRIGHT}"
+            echo "- online + offline Playwright suites: ${E2E}"
+            echo
+            echo '## Focused auth test tail'
+            echo
+            echo '```text'
+            tail -n 80 /tmp/task11-auth-tests.log 2>/dev/null || true
+            echo '```'
+            echo
+            echo '## Browser test tail'
+            echo
+            echo '```text'
+            tail -n 140 /tmp/task11-e2e.log 2>/dev/null || true
+            echo '```'
+          } > docs/verification/plan02-task11-auth.md
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/verification/plan02-task11-auth.md
+          if ! git diff --cached --quiet; then
+            git commit -m 'docs: record Plan 02 Task 11 verification [skip ci]'
+            git push origin HEAD:testing-codex
+          fi
+
+      - name: Enforce Task 11 gate
+        if: always()
+        env:
+          PREPARE: ${{ steps.prepare.outcome }}
+          AUTH_TESTS: ${{ steps.auth_tests.outcome }}
+          LINT: ${{ steps.lint.outcome }}
+          TYPECHECK: ${{ steps.typecheck.outcome }}
+          FULL_TESTS: ${{ steps.full_tests.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+          PLAYWRIGHT: ${{ steps.playwright.outcome }}
+          E2E: ${{ steps.e2e.outcome }}
+        run: |
+          test "$PREPARE" = success
+          test "$AUTH_TESTS" = success
+          test "$LINT" = success
+          test "$TYPECHECK" = success
+          test "$FULL_TESTS" = success
+          test "$BUILD" = success
+          test "$PLAYWRIGHT" = success
+          test "$E2E" = success

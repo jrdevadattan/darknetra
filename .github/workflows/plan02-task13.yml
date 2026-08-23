@@ -1,0 +1,214 @@
+name: Plan 02 Task 13 real auth E2E
+
+# Full GREEN gate: deterministic fixture plus real login and cross-case browser authorization.
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan02-task13.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify-real-e2e:
+    runs-on: ubuntu-latest
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+      DARKNETRA_E2E_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-e2e@127.0.0.1:55432/darknetra_e2e_test
+      DARKNETRA_E2E_ANALYST_A_PASSWORD: Synthetic-A-Password-42!
+      DARKNETRA_E2E_ANALYST_B_PASSWORD: Synthetic-B-Password-42!
+      DARKNETRA_E2E_BOOTSTRAP_PASSWORD: Synthetic-Bootstrap-42!
+      DARKNETRA_E2E_BOOTSTRAP_NEW_PASSWORD: Synthetic-Bootstrap-Replaced-42!
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - id: prepare
+        name: Prepare workspaces
+        continue-on-error: true
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.15.0 --activate
+          pnpm install --frozen-lockfile
+          uv sync --all-packages --dev --frozen
+
+      - id: fixture_checks
+        name: Verify deterministic fixture safety and style
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: |
+          uv run ruff check scripts/create_e2e_fixture.py apps/api/tests/unit/test_e2e_fixture_cli.py apps/api/tests/integration/test_e2e_fixture_creation.py
+          uv run pytest apps/api/tests/unit/test_e2e_fixture_cli.py -q
+
+      - id: web_checks
+        name: Verify real E2E TypeScript and formatting
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: |
+          pnpm --filter @darknetra/web lint
+          pnpm --filter @darknetra/web typecheck
+
+      - id: compose_config
+        name: Validate isolated Compose profile
+        continue-on-error: true
+        run: |
+          docker compose -p darknetra-plan02-task13 \
+            -f docker-compose.yml -f docker-compose.e2e.yml config >/dev/null
+
+      - id: database
+        name: Start disposable PostgreSQL volume
+        if: steps.compose_config.outcome == 'success'
+        continue-on-error: true
+        run: |
+          docker compose -p darknetra-plan02-task13 \
+            -f docker-compose.yml -f docker-compose.e2e.yml up -d postgres
+          for attempt in $(seq 1 30); do
+            if docker compose -p darknetra-plan02-task13 \
+              -f docker-compose.yml -f docker-compose.e2e.yml \
+              exec -T postgres pg_isready -U darknetra -d darknetra_e2e_test; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
+      - id: migrate
+        name: Migrate disposable database
+        if: steps.prepare.outcome == 'success' && steps.database.outcome == 'success'
+        continue-on-error: true
+        env:
+          DARKNETRA_DATABASE_URL: ${{ env.DARKNETRA_E2E_DATABASE_URL }}
+        run: uv run alembic -c apps/api/alembic.ini upgrade head
+
+      - id: fixture
+        name: Create deterministic synthetic users and cases
+        if: steps.migrate.outcome == 'success' && steps.fixture_checks.outcome == 'success'
+        continue-on-error: true
+        env:
+          DARKNETRA_ENVIRONMENT: test
+          DARKNETRA_DATABASE_URL: ${{ env.DARKNETRA_E2E_DATABASE_URL }}
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run python scripts/create_e2e_fixture.py 2>&1 | tee /tmp/task13-fixture.json
+
+      - id: stack
+        name: Build and start real API and web containers
+        if: steps.fixture.outcome == 'success'
+        continue-on-error: true
+        run: |
+          docker compose -p darknetra-plan02-task13 \
+            -f docker-compose.yml -f docker-compose.e2e.yml up -d --build api web
+          curl --fail --retry 40 --retry-all-errors --retry-delay 2 \
+            http://127.0.0.1:8000/api/v1/health/live
+          curl --fail --retry 40 --retry-all-errors --retry-delay 2 \
+            http://127.0.0.1:3000/auth/v2/login >/dev/null
+
+      - id: playwright
+        name: Install Chromium
+        if: steps.prepare.outcome == 'success'
+        continue-on-error: true
+        run: pnpm --filter @darknetra/web exec playwright install --with-deps chromium
+
+      - id: browser_tests
+        name: Real authentication and authorization browser tests
+        if: steps.stack.outcome == 'success' && steps.playwright.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm --filter @darknetra/web test:e2e:real 2>&1 | tee /tmp/task13-browser.log
+
+      - name: Tear down isolated stack and volume
+        if: always()
+        run: |
+          docker compose -p darknetra-plan02-task13 \
+            -f docker-compose.yml -f docker-compose.e2e.yml down -v --remove-orphans || true
+
+      - name: Record Task 13 real E2E outcome
+        if: always()
+        env:
+          PREPARE: ${{ steps.prepare.outcome }}
+          FIXTURE_CHECKS: ${{ steps.fixture_checks.outcome }}
+          WEB_CHECKS: ${{ steps.web_checks.outcome }}
+          COMPOSE_CONFIG: ${{ steps.compose_config.outcome }}
+          DATABASE: ${{ steps.database.outcome }}
+          MIGRATE: ${{ steps.migrate.outcome }}
+          FIXTURE: ${{ steps.fixture.outcome }}
+          STACK: ${{ steps.stack.outcome }}
+          PLAYWRIGHT: ${{ steps.playwright.outcome }}
+          BROWSER_TESTS: ${{ steps.browser_tests.outcome }}
+        run: |
+          mkdir -p docs/verification
+          {
+            echo '# Plan 02 Task 13 verification'
+            echo
+            echo 'Real authentication and authorization E2E outcomes:'
+            echo
+            echo "- prepare: ${PREPARE}"
+            echo "- fixture safety/style: ${FIXTURE_CHECKS}"
+            echo "- frontend lint/typecheck: ${WEB_CHECKS}"
+            echo "- Compose profile: ${COMPOSE_CONFIG}"
+            echo "- disposable PostgreSQL: ${DATABASE}"
+            echo "- migration: ${MIGRATE}"
+            echo "- deterministic fixture: ${FIXTURE}"
+            echo "- real API/web stack: ${STACK}"
+            echo "- Chromium install: ${PLAYWRIGHT}"
+            echo "- real auth/authorization browser tests: ${BROWSER_TESTS}"
+            echo
+            echo '## Fixture output'
+            echo
+            echo '```json'
+            tail -n 20 /tmp/task13-fixture.json 2>/dev/null || true
+            echo '```'
+            echo
+            echo '## Browser test tail'
+            echo
+            echo '```text'
+            tail -n 200 /tmp/task13-browser.log 2>/dev/null || true
+            echo '```'
+          } > docs/verification/plan02-task13-real-e2e.md
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/verification/plan02-task13-real-e2e.md
+          if ! git diff --cached --quiet; then
+            git commit -m 'docs: record Plan 02 Task 13 real E2E outcome [skip ci]'
+            git push origin HEAD:testing-codex
+          fi
+
+      - name: Enforce Task 13 real E2E gate
+        if: always()
+        env:
+          PREPARE: ${{ steps.prepare.outcome }}
+          FIXTURE_CHECKS: ${{ steps.fixture_checks.outcome }}
+          WEB_CHECKS: ${{ steps.web_checks.outcome }}
+          COMPOSE_CONFIG: ${{ steps.compose_config.outcome }}
+          DATABASE: ${{ steps.database.outcome }}
+          MIGRATE: ${{ steps.migrate.outcome }}
+          FIXTURE: ${{ steps.fixture.outcome }}
+          STACK: ${{ steps.stack.outcome }}
+          PLAYWRIGHT: ${{ steps.playwright.outcome }}
+          BROWSER_TESTS: ${{ steps.browser_tests.outcome }}
+        run: |
+          test "$PREPARE" = success
+          test "$FIXTURE_CHECKS" = success
+          test "$WEB_CHECKS" = success
+          test "$COMPOSE_CONFIG" = success
+          test "$DATABASE" = success
+          test "$MIGRATE" = success
+          test "$FIXTURE" = success
+          test "$STACK" = success
+          test "$PLAYWRIGHT" = success
+          test "$BROWSER_TESTS" = success

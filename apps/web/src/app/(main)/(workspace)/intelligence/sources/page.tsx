@@ -1,0 +1,1 @@
+import { PlannedSurface } from '@/components/darknetra/planned-surface'; export default function Page(){return <PlannedSurface eyebrow="Intelligence" title="Source Registry" description="Policy, trust, parser, health, and authorization metadata for approved source classes." ownerPlan="Plan 08 · Optional lawful collector" />;}

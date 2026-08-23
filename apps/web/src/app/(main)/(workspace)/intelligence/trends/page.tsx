@@ -1,0 +1,1 @@
+import { PlannedSurface } from '@/components/darknetra/planned-surface'; export default function Page(){return <PlannedSurface eyebrow="Intelligence" title="Emerging Trends" description="Deduplication-aware term and activity monitoring across approved historical observations." ownerPlan="Plan 06 · Trends" />;}

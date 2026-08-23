@@ -1,0 +1,66 @@
+name: darknetra
+
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: darknetra
+      POSTGRES_USER: darknetra
+      POSTGRES_PASSWORD: ${DARKNETRA_POSTGRES_PASSWORD:-darknetra-dev-only}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    networks:
+      - app
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api.Dockerfile
+    environment:
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_BUILD_VERSION: docker-dev
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:${DARKNETRA_POSTGRES_PASSWORD:-darknetra-dev-only}@postgres:5432/darknetra
+      DARKNETRA_WEB_ORIGIN: ${DARKNETRA_WEB_ORIGIN:-http://localhost:3000}
+      DARKNETRA_JWT_SIGNING_KEY_B64: ${DARKNETRA_JWT_SIGNING_KEY_B64:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - app
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import json,urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/live',timeout=3)); assert data['status']=='ok'"
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 5s
+
+  web:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/web.Dockerfile
+      args:
+        NEXT_PUBLIC_DARKNETRA_API_BASE_URL: http://localhost:8000
+    environment:
+      DARKNETRA_API_BASE_URL: http://api:8000
+      NEXT_PUBLIC_DARKNETRA_API_BASE_URL: http://localhost:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - app
+
+networks:
+  app:
+    driver: bridge
+
+volumes:
+  postgres-data:

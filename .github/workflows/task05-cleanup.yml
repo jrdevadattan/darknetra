@@ -1,0 +1,306 @@
+name: Task 05 remove dashboard showcases
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/task05-cleanup.yml
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Prepare toolchains
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.15.0 --activate
+          pnpm install --frozen-lockfile
+          python -m pip install 'pytest>=8.4,<9'
+
+      - name: Write failing frontend-surface guardrail
+        shell: bash
+        run: |
+          cat > tests/repo/test_frontend_surface.py <<'EOF'
+          from pathlib import Path
+
+          ROOT = Path(__file__).resolve().parents[2]
+          WEB = ROOT / "apps" / "web"
+          DASHBOARD = WEB / "src" / "app" / "(main)" / "dashboard"
+
+          ALLOWED_DASHBOARD_DIRS = {"_components", "[...not-found]", "roles", "users"}
+
+
+          def test_dashboard_has_no_unrelated_showcase_routes() -> None:
+              actual = {path.name for path in DASHBOARD.iterdir() if path.is_dir()}
+              assert actual <= ALLOWED_DASHBOARD_DIRS, sorted(actual - ALLOWED_DASHBOARD_DIRS)
+
+
+          def test_top_level_demo_mail_and_chat_are_removed() -> None:
+              main = WEB / "src" / "app" / "(main)"
+              assert not (main / "chat").exists()
+              assert not (main / "mail").exists()
+
+
+          def test_hosted_demo_telemetry_and_support_ctas_are_removed() -> None:
+              layout = (WEB / "src" / "app" / "layout.tsx").read_text(encoding="utf-8")
+              dashboard_layout = (
+                  WEB / "src" / "app" / "(main)" / "dashboard" / "layout.tsx"
+              ).read_text(encoding="utf-8")
+              sidebar = (
+                  WEB
+                  / "src"
+                  / "app"
+                  / "(main)"
+                  / "dashboard"
+                  / "_components"
+                  / "sidebar"
+                  / "app-sidebar.tsx"
+              ).read_text(encoding="utf-8")
+              nav = (
+                  WEB
+                  / "src"
+                  / "app"
+                  / "(main)"
+                  / "dashboard"
+                  / "_components"
+                  / "sidebar"
+                  / "nav-main.tsx"
+              ).read_text(encoding="utf-8")
+              assert "@vercel/analytics" not in layout
+              assert "<Analytics" not in layout
+              assert "SupportCard" not in sidebar
+              assert "Quick Create" not in nav
+              assert ">Inbox<" not in nav
+              assert "GitHubRepositoriesMenu" not in dashboard_layout
+
+
+          def test_social_demo_auth_is_removed() -> None:
+              social = WEB / "src" / "app" / "(main)" / "auth" / "_components" / "social-auth"
+              assert not social.exists()
+              for version in ("v1", "v2"):
+                  for page_name in ("login", "register"):
+                      page = (
+                          WEB
+                          / "src"
+                          / "app"
+                          / "(main)"
+                          / "auth"
+                          / version
+                          / page_name
+                          / "page.tsx"
+                      )
+                      text = page.read_text(encoding="utf-8")
+                      assert "GoogleButton" not in text
+                      assert "Continue with Google" not in text
+          EOF
+
+          set +e
+          python -m pytest tests/repo/test_frontend_surface.py -v > /tmp/task05-red.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/task05-red.log
+          if [ "$status" -eq 0 ]; then
+            echo 'Task 05 surface guardrail unexpectedly passed before cleanup.' >&2
+            exit 1
+          fi
+
+      - name: Remove unrelated showcase surfaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          dashboard='apps/web/src/app/(main)/dashboard'
+          printf 'Before cleanup:\n'
+          find "$dashboard" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
+
+          for dir in "$dashboard"/*; do
+            [ -d "$dir" ] || continue
+            name="$(basename "$dir")"
+            case "$name" in
+              _components|'[...not-found]'|roles|users) ;;
+              *) rm -rf "$dir" ;;
+            esac
+          done
+
+          rm -rf \
+            'apps/web/src/app/(main)/chat' \
+            'apps/web/src/app/(main)/mail' \
+            'apps/web/src/app/(main)/auth/_components/social-auth'
+          rm -f \
+            'apps/web/src/app/(main)/dashboard/_components/sidebar/support-card.tsx' \
+            'apps/web/src/app/(main)/dashboard/_components/header/github-repositories-menu.tsx'
+
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          sidebar = Path('apps/web/src/app/(main)/dashboard/_components/sidebar/app-sidebar.tsx')
+          text = sidebar.read_text(encoding='utf-8')
+          text = text.replace('import { SupportCard } from "./support-card";\n', '')
+          text = text.replace('        <SupportCard />\n', '')
+          sidebar.write_text(text, encoding='utf-8')
+
+          nav = Path('apps/web/src/app/(main)/dashboard/_components/sidebar/nav-main.tsx')
+          text = nav.read_text(encoding='utf-8')
+          text = text.replace(
+              'import { ChevronRight, MailIcon, PlusCircleIcon } from "lucide-react";',
+              'import { ChevronRight } from "lucide-react";',
+          )
+          text = text.replace('import { Button } from "@/components/ui/button";\n', '')
+          pattern = re.compile(
+              r'\n\s*<SidebarGroup>\s*<SidebarGroupContent className="flex flex-col gap-2">.*?</SidebarGroup>\s*(?=\{items\.map)',
+              re.S,
+          )
+          text, count = pattern.subn('\n      ', text, count=1)
+          if count != 1:
+              raise SystemExit('failed to remove template quick-action block')
+          nav.write_text(text, encoding='utf-8')
+
+          layout = Path('apps/web/src/app/layout.tsx')
+          text = layout.read_text(encoding='utf-8')
+          text = text.replace('import { Analytics } from "@vercel/analytics/next";\n', '')
+          text = re.sub(
+              r'\n\s*\{\/\* Used for this project.*?\*\/\}\s*\n\s*<Analytics \/>',
+              '',
+              text,
+              flags=re.S,
+          )
+          layout.write_text(text, encoding='utf-8')
+
+          dashboard_layout = Path('apps/web/src/app/(main)/dashboard/layout.tsx')
+          text = dashboard_layout.read_text(encoding='utf-8')
+          text = text.replace(
+              'import { GitHubRepositoriesMenu } from "./_components/header/github-repositories-menu";\n',
+              '',
+          )
+          text = text.replace('              <GitHubRepositoriesMenu />\n', '')
+          dashboard_layout.write_text(text, encoding='utf-8')
+
+          auth_pages = [
+              Path('apps/web/src/app/(main)/auth/v1/login/page.tsx'),
+              Path('apps/web/src/app/(main)/auth/v1/register/page.tsx'),
+              Path('apps/web/src/app/(main)/auth/v2/login/page.tsx'),
+              Path('apps/web/src/app/(main)/auth/v2/register/page.tsx'),
+          ]
+          for page in auth_pages:
+              text = page.read_text(encoding='utf-8')
+              text = text.replace(
+                  'import { GoogleButton } from "../../_components/social-auth/google-button";\n',
+                  '',
+              )
+              text = re.sub(r'\n\s*<GoogleButton[^>]*/>', '', text)
+              text = re.sub(
+                  r'\n\s*<div className="relative text-center text-sm after:absolute.*?</div>',
+                  '',
+                  text,
+                  count=1,
+                  flags=re.S,
+              )
+              page.write_text(text, encoding='utf-8')
+
+          simple_icon = Path('apps/web/src/components/simple-icon.tsx')
+          remaining = []
+          for path in Path('apps/web/src').rglob('*'):
+              if path.is_file() and path.suffix in {'.ts', '.tsx', '.js', '.jsx'} and path != simple_icon:
+                  if '@/components/simple-icon' in path.read_text(encoding='utf-8', errors='ignore'):
+                      remaining.append(str(path))
+          if not remaining and simple_icon.exists():
+              simple_icon.unlink()
+          elif remaining:
+              print('Retaining simple-icon component; still used by:', *remaining, sep='\n- ')
+          PY
+
+          printf 'After cleanup:\n'
+          find "$dashboard" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
+
+      - name: Prove stale showcase routes are gone
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          pattern = re.compile(
+              r'/dashboard/(academy|analytics|calendar|chat|coming-soon|crm|default|ecommerce|file-manager|finance|infrastructure|invoice|kanban|logistics|mail|patient-monitoring|productivity|profile|tasks)'
+          )
+          hits = []
+          for path in Path('apps/web/src').rglob('*'):
+              if not path.is_file() or path.suffix not in {'.ts', '.tsx', '.js', '.jsx'}:
+                  continue
+              text = path.read_text(encoding='utf-8', errors='ignore')
+              if pattern.search(text):
+                  hits.append(str(path))
+          if hits:
+              raise SystemExit('stale showcase route references:\n' + '\n'.join(hits))
+          PY
+          python -m pytest tests/repo/test_frontend_surface.py -v
+
+      - name: Prune only proven-unused showcase dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' > /tmp/unused-packages.txt
+          from pathlib import Path
+
+          candidates = [
+              '@fullcalendar/react',
+              '@dnd-kit/abstract',
+              '@dnd-kit/helpers',
+              '@dnd-kit/react',
+              'd3-geo',
+              'topojson-client',
+              '@types/d3-geo',
+              '@types/topojson-client',
+              '@vercel/analytics',
+              'simple-icons',
+          ]
+          source_files = [
+              p for p in Path('apps/web/src').rglob('*')
+              if p.is_file() and p.suffix in {'.ts', '.tsx', '.js', '.jsx'}
+          ]
+          source = '\n'.join(
+              p.read_text(encoding='utf-8', errors='ignore') for p in source_files
+          )
+          for pkg in candidates:
+              if pkg.startswith('@types/') or pkg not in source:
+                  print(pkg)
+          PY
+
+          while IFS= read -r pkg; do
+            [ -n "$pkg" ] || continue
+            if node -e "const p=require('./apps/web/package.json'); process.exit((p.dependencies&&p.dependencies['$pkg'])||(p.devDependencies&&p.devDependencies['$pkg'])?0:1)"; then
+              echo "Removing proven-unused dependency: $pkg"
+              pnpm --filter @darknetra/web remove "$pkg"
+            fi
+          done < /tmp/unused-packages.txt
+
+      - name: Verify cleaned frontend
+        run: |
+          python -m pytest tests/repo -v
+          pnpm --filter @darknetra/web test
+          pnpm --filter @darknetra/web lint
+          pnpm --filter @darknetra/web typecheck
+          pnpm --filter @darknetra/web build
+
+      - name: Commit Task 05
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/web tests/repo/test_frontend_surface.py pnpm-lock.yaml
+          git commit -m 'refactor: remove unrelated admin dashboard demos [skip ci]'
+          git push origin HEAD:testing-codex

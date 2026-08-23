@@ -1,0 +1,121 @@
+name: README screenshots
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/readme-screenshots.yml
+
+permissions:
+  contents: write
+
+jobs:
+  capture:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+      DARKNETRA_API_BASE_URL: http://127.0.0.1:8000
+      NEXT_PUBLIC_DARKNETRA_API_BASE_URL: http://127.0.0.1:8000
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Install locked dependencies
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.15.0 --activate
+          uv sync --all-packages --dev --frozen
+          pnpm install --frozen-lockfile
+          pnpm --filter @darknetra/web exec playwright install --with-deps chromium
+
+      - name: Build dashboard
+        run: pnpm --filter @darknetra/web build
+
+      - name: Start API and web
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run uvicorn --app-dir apps/api darknetra_api.main:app --host 127.0.0.1 --port 8000 > /tmp/darknetra-api.log 2>&1 &
+          echo $! > /tmp/darknetra-api.pid
+
+          pnpm --filter @darknetra/web exec next start --hostname 127.0.0.1 --port 3000 > /tmp/darknetra-web.log 2>&1 &
+          echo $! > /tmp/darknetra-web.pid
+
+          python - <<'PY'
+          import time
+          import urllib.request
+
+          targets = [
+              'http://127.0.0.1:8000/api/v1/health/live',
+              'http://127.0.0.1:3000/dashboard',
+          ]
+          for target in targets:
+              last = None
+              for _ in range(60):
+                  try:
+                      with urllib.request.urlopen(target, timeout=2) as response:
+                          if response.status < 500:
+                              break
+                  except Exception as exc:
+                      last = exc
+                      time.sleep(1)
+              else:
+                  raise SystemExit(f'{target} did not become ready: {last}')
+          PY
+
+      - name: Capture real dashboard screenshots
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs/screenshots
+
+          pnpm --filter @darknetra/web exec playwright screenshot --browser chromium --viewport-size='1440,1000' --full-page http://127.0.0.1:3000/dashboard "$GITHUB_WORKSPACE/docs/screenshots/dashboard-overview.png"
+          pnpm --filter @darknetra/web exec playwright screenshot --browser chromium --viewport-size='1440,1000' --full-page http://127.0.0.1:3000/cases "$GITHUB_WORKSPACE/docs/screenshots/cases.png"
+          pnpm --filter @darknetra/web exec playwright screenshot --browser chromium --viewport-size='1440,1000' --full-page http://127.0.0.1:3000/cases/SYN-DEMO-001 "$GITHUB_WORKSPACE/docs/screenshots/case-workspace.png"
+          pnpm --filter @darknetra/web exec playwright screenshot --browser chromium --viewport-size='1440,1000' --full-page http://127.0.0.1:3000/admin/roles "$GITHUB_WORKSPACE/docs/screenshots/roles-permissions.png"
+          pnpm --filter @darknetra/web exec playwright screenshot --browser chromium --viewport-size='1440,1000' --full-page http://127.0.0.1:3000/system/health "$GITHUB_WORKSPACE/docs/screenshots/system-health.png"
+
+          python - <<'PY'
+          from pathlib import Path
+          for path in sorted(Path('docs/screenshots').glob('*.png')):
+              assert path.stat().st_size > 10_000, f'{path} looks unexpectedly small'
+              print(f'{path}: {path.stat().st_size} bytes')
+          PY
+
+      - name: Commit screenshots
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/screenshots/*.png
+          if git diff --cached --quiet; then
+            echo 'Screenshots are already current.'
+            exit 0
+          fi
+          git commit -m 'docs: refresh DARKNETRA dashboard screenshots [skip ci]'
+          git push origin HEAD:testing-codex
+
+      - name: Print server logs on failure
+        if: failure()
+        run: |
+          echo '--- API log ---'
+          cat /tmp/darknetra-api.log || true
+          echo '--- Web log ---'
+          cat /tmp/darknetra-web.log || true

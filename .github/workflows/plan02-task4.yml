@@ -1,0 +1,83 @@
+name: Plan 02 Task 4 rotating auth
+
+# Retry marker: include exact-origin CORS coverage in the final Task 4 gate.
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan02-task4.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-ci@127.0.0.1:5432/darknetra
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      DARKNETRA_ENVIRONMENT: development
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: darknetra
+          POSTGRES_USER: darknetra
+          POSTGRES_PASSWORD: darknetra-ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U darknetra -d darknetra"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - name: Generate runtime-only auth signing key
+        run: |
+          KEY="$(python - <<'PY'
+          import base64
+          import secrets
+          print(base64.b64encode(secrets.token_bytes(32)).decode("ascii"))
+          PY
+          )"
+          echo "::add-mask::$KEY"
+          echo "DARKNETRA_JWT_SIGNING_KEY_B64=$KEY" >> "$GITHUB_ENV"
+      - name: Lock and sync Python workspace
+        run: |
+          uv lock
+          uv sync --all-packages --dev --frozen
+      - name: Migrate database
+        run: uv run alembic -c apps/api/alembic.ini upgrade head
+      - name: Ruff and Task 4 tests
+        run: |
+          uv run ruff check .
+          uv run pytest apps/api/tests/unit/test_tokens.py apps/api/tests/integration/test_auth_flow.py apps/api/tests/integration/test_auth_cors.py -v
+      - name: Security grep
+        run: |
+          if grep -RInE '(localStorage|sessionStorage).*darknetra_(access|refresh)' apps/web/src 2>/dev/null; then
+            echo 'access or refresh token storage detected'
+            exit 1
+          fi
+          if grep -RInE '(password|refresh_token|csrf_token|access_token).*(print|logger\.)|(print|logger\.).*(password|refresh_token|csrf_token|access_token)' apps/api/darknetra_api; then
+            echo 'credential logging pattern detected'
+            exit 1
+          fi
+      - name: Commit generated lockfile
+        run: |
+          if ! git diff --quiet -- uv.lock; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add uv.lock
+            git commit -m 'chore: lock Plan 02 auth dependencies [skip ci]'
+            git push origin HEAD:testing-codex
+          fi

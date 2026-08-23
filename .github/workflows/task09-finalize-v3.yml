@@ -1,0 +1,360 @@
+name: Task 09 finalize Plan 01 v3
+
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/task09-finalize-v3.yml
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+
+      - name: Prepare locked workspaces
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.15.0 --activate
+          uv sync --all-packages --dev --frozen
+          pnpm install --frozen-lockfile
+          pnpm --filter @darknetra/web exec playwright install --with-deps chromium
+
+      - name: Prove calendar showcase implementation is unreachable and remove dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git grep -n -F '@fullcalendar/react' -- apps/web/src; then
+            echo 'Tracked product source still imports @fullcalendar/react.' >&2
+            exit 1
+          fi
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('tests/repo/test_frontend_surface.py')
+          text = path.read_text(encoding='utf-8')
+          if not text.startswith('import json\n'):
+              text = 'import json\n' + text
+          addition = '''\n\ndef test_calendar_showcase_dependency_is_not_retained() -> None:\n    package = json.loads((WEB / "package.json").read_text(encoding="utf-8"))\n    assert "@fullcalendar/react" not in package.get("dependencies", {})\n'''
+          if 'test_calendar_showcase_dependency_is_not_retained' not in text:
+              text += addition
+          path.write_text(text, encoding='utf-8')
+          PY
+          set +e
+          uv run pytest tests/repo/test_frontend_surface.py::test_calendar_showcase_dependency_is_not_retained -v >/tmp/calendar-red.log 2>&1
+          red_status=$?
+          set -e
+          cat /tmp/calendar-red.log
+          if [ "$red_status" -eq 0 ]; then
+            echo 'Calendar dependency contract unexpectedly passed before dependency removal.' >&2
+            exit 1
+          fi
+          pnpm --filter @darknetra/web remove @fullcalendar/react
+          uv run pytest tests/repo/test_frontend_surface.py::test_calendar_showcase_dependency_is_not_retained -v
+
+      - name: Write permanent online and offline browser regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p apps/web/e2e/online apps/web/e2e/offline docs/architecture docs/verification
+          cat > apps/web/e2e/online/investigator-workspace.spec.ts <<'EOF'
+          import { expect, test } from '@playwright/test';
+
+          const CASE_TABS = [
+            'Overview',
+            'Evidence',
+            'Entities',
+            'Activity Candidates',
+            'Link Analysis',
+            'NarcoGraph',
+            'Timeline',
+            'Alerts',
+            'Reports',
+          ];
+
+          const REMOVED_SHOWCASES = [
+            'Ecommerce',
+            'CRM',
+            'Finance',
+            'Academy',
+            'Demo Chat',
+            'Mail Dashboard',
+          ];
+
+          test('desktop and mobile navigation expose only DARKNETRA workspaces', async ({ page }, testInfo) => {
+            await page.goto('/dashboard');
+            await expect(page.getByRole('heading', { name: 'Investigator overview' })).toBeVisible();
+            if (testInfo.project.name.includes('mobile')) {
+              await page.getByRole('button', { name: 'Toggle Sidebar' }).click();
+            }
+            await expect(page.getByRole('link', { name: 'Cases', exact: true }).first()).toBeVisible();
+            const body = page.locator('body');
+            for (const label of REMOVED_SHOWCASES) {
+              await expect(body).not.toContainText(label);
+            }
+          });
+
+          test('fixture case exposes all nine investigation tabs', async ({ page }) => {
+            await page.goto('/cases/SYN-DEMO-001');
+            await expect(page.getByRole('heading', { name: 'Alias correlation training case' })).toBeVisible();
+            const caseNav = page.getByRole('navigation', { name: 'Case sections' });
+            for (const label of CASE_TABS) {
+              await expect(caseNav.getByRole('link', { name: label, exact: true })).toBeVisible();
+            }
+            await caseNav.getByRole('link', { name: 'Evidence', exact: true }).click();
+            await expect(page).toHaveURL(/\/cases\/SYN-DEMO-001\/evidence$/);
+            await expect(page.getByText('Evidence Vault begins in Plan 03')).toBeVisible();
+          });
+
+          test('System Health reports a measured reachable API', async ({ page }) => {
+            await page.goto('/system/health');
+            await expect(page.getByRole('heading', { name: 'System Health' })).toBeVisible();
+            await expect(page.getByText('DARKNETRA API', { exact: true })).toBeVisible();
+            await expect(page.getByText('Verified', { exact: true })).toBeVisible();
+            await expect(page.getByText('ready', { exact: true })).toBeVisible();
+          });
+          EOF
+
+          cat > apps/web/e2e/offline/system-health-offline.spec.ts <<'EOF'
+          import { expect, test } from '@playwright/test';
+
+          test('System Health reports an unavailable API without a false green state', async ({ page }) => {
+            await page.goto('/system/health');
+            await expect(page.getByRole('heading', { name: 'System Health' })).toBeVisible();
+            await expect(page.getByText('DARKNETRA API unreachable', { exact: true })).toBeVisible();
+            await expect(page.getByText('Offline', { exact: true })).toBeVisible();
+            await expect(page.getByText('Verified', { exact: true })).toHaveCount(0);
+          });
+          EOF
+
+          cat > apps/web/playwright.config.ts <<'EOF'
+          import path from 'node:path';
+          import { defineConfig, devices } from '@playwright/test';
+
+          const ROOT = path.resolve(__dirname, '../..');
+
+          export default defineConfig({
+            testDir: './e2e/online',
+            fullyParallel: false,
+            timeout: 30_000,
+            expect: { timeout: 8_000 },
+            reporter: [['list']],
+            use: {
+              baseURL: 'http://127.0.0.1:3000',
+              trace: 'retain-on-failure',
+              screenshot: 'only-on-failure',
+            },
+            projects: [
+              { name: 'desktop-chromium', use: { ...devices['Desktop Chrome'] } },
+              { name: 'mobile-chromium', use: { ...devices['Pixel 7'] } },
+            ],
+            webServer: [
+              {
+                command: 'uv run uvicorn --app-dir apps/api darknetra_api.main:app --host 127.0.0.1 --port 8000',
+                cwd: ROOT,
+                url: 'http://127.0.0.1:8000/api/v1/health/live',
+                reuseExistingServer: false,
+                timeout: 120_000,
+                env: { ...process.env, DARKNETRA_BUILD_VERSION: 'e2e' },
+              },
+              {
+                command: 'pnpm --filter @darknetra/web exec next start --hostname 127.0.0.1 --port 3000',
+                cwd: ROOT,
+                url: 'http://127.0.0.1:3000/dashboard',
+                reuseExistingServer: false,
+                timeout: 120_000,
+                env: {
+                  ...process.env,
+                  DARKNETRA_API_BASE_URL: 'http://127.0.0.1:8000',
+                  NEXT_PUBLIC_DARKNETRA_API_BASE_URL: 'http://127.0.0.1:8000',
+                },
+              },
+            ],
+          });
+          EOF
+
+          cat > apps/web/playwright.offline.config.ts <<'EOF'
+          import path from 'node:path';
+          import { defineConfig, devices } from '@playwright/test';
+
+          const ROOT = path.resolve(__dirname, '../..');
+
+          export default defineConfig({
+            testDir: './e2e/offline',
+            fullyParallel: false,
+            timeout: 30_000,
+            expect: { timeout: 8_000 },
+            reporter: [['list']],
+            use: { baseURL: 'http://127.0.0.1:3001', trace: 'retain-on-failure' },
+            projects: [{ name: 'offline-chromium', use: { ...devices['Desktop Chrome'] } }],
+            webServer: {
+              command: 'pnpm --filter @darknetra/web exec next start --hostname 127.0.0.1 --port 3001',
+              cwd: ROOT,
+              url: 'http://127.0.0.1:3001/system/health',
+              reuseExistingServer: false,
+              timeout: 120_000,
+              env: {
+                ...process.env,
+                DARKNETRA_API_BASE_URL: 'http://127.0.0.1:65534',
+                NEXT_PUBLIC_DARKNETRA_API_BASE_URL: 'http://127.0.0.1:65534',
+              },
+            },
+          });
+          EOF
+
+          node <<'NODE'
+          const fs = require('fs');
+          const p = 'apps/web/package.json';
+          const pkg = JSON.parse(fs.readFileSync(p, 'utf8'));
+          pkg.scripts['test:e2e:online'] = 'playwright test --config playwright.config.ts';
+          pkg.scripts['test:e2e:offline'] = 'playwright test --config playwright.offline.config.ts';
+          pkg.scripts['test:e2e'] = 'pnpm test:e2e:online && pnpm test:e2e:offline';
+          fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
+          NODE
+
+      - name: Write development documentation
+        shell: bash
+        run: |
+          cat > docs/architecture/development.md <<'EOF'
+          # DARKNETRA development environment
+
+          ## Required local tools
+          - Node.js 24.x
+          - pnpm 10.15.0 through Corepack
+          - Python 3.12.x
+          - uv 0.12.4
+          - Docker with Compose v2
+
+          ## Bootstrap
+          ```bash
+          corepack enable
+          corepack prepare pnpm@10.15.0 --activate
+          pnpm install --frozen-lockfile
+          uv sync --all-packages --dev --frozen
+          ```
+
+          ## Native API
+          ```bash
+          uv run uvicorn --app-dir apps/api darknetra_api.main:app --reload
+          ```
+          API: `http://127.0.0.1:8000`; live health: `/api/v1/health/live`; readiness: `/api/v1/health/ready`.
+
+          ## Native web
+          ```bash
+          DARKNETRA_API_BASE_URL=http://127.0.0.1:8000 \
+          NEXT_PUBLIC_DARKNETRA_API_BASE_URL=http://127.0.0.1:8000 \
+          pnpm --filter @darknetra/web dev
+          ```
+          Open `http://127.0.0.1:3000/dashboard`.
+
+          ## Docker workflow
+          ```bash
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d --wait
+          ```
+          The base file uses an internal bridge; the development overlay publishes only loopback ports 3000 and 8000.
+
+          ```bash
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml down -v --remove-orphans
+          bash scripts/smoke.sh
+          ```
+
+          ## Verification
+          ```bash
+          uv run ruff check .
+          uv run pytest -q
+          pnpm --filter @darknetra/web lint
+          pnpm --filter @darknetra/web typecheck
+          pnpm --filter @darknetra/web test
+          pnpm --filter @darknetra/web build
+          pnpm --filter @darknetra/web test:e2e
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          bash scripts/smoke.sh
+          ```
+
+          ## Plan 01 limitations
+          Persistent auth/RBAC/PostgreSQL begin in Plan 02. Current case and overview records are controlled fixtures. Evidence, extraction, correlation, graph, trends, and reporting remain truthful interface boundaries for their later plans. Tor, cloud LLMs, GPU access, and external intelligence services are not required.
+          EOF
+
+      - name: Build and run browser regressions before committing candidate
+        run: |
+          pnpm --filter @darknetra/web build
+          pnpm --filter @darknetra/web test:e2e
+
+      - name: Commit candidate and record SHA
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add apps/web tests/repo/test_frontend_surface.py docs/architecture/development.md pnpm-lock.yaml
+          git commit -m 'test: add Plan 01 browser regression gate [skip ci]'
+          git push origin HEAD:testing-codex
+          echo "VERIFIED_CANDIDATE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Fresh exact-commit verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$VERIFIED_CANDIDATE_SHA"
+          test -z "$(git status --porcelain)"
+          uv run ruff check .
+          uv run pytest -q
+          pnpm --filter @darknetra/web lint
+          pnpm --filter @darknetra/web typecheck
+          pnpm --filter @darknetra/web test
+          pnpm --filter @darknetra/web build
+          pnpm --filter @darknetra/web test:e2e
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
+          bash scripts/smoke.sh
+          ! grep -R -n -E 'Ecommerce|CRM|Finance|Academy|Demo Chat|Mail Dashboard' apps/web/src
+
+      - name: Commit verification evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          verified_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          cat > docs/verification/plan-01-foundation-dashboard.md <<EOF
+          # Plan 01 — Foundation and Investigator Dashboard Verification
+
+          - Verified at (UTC): \`${verified_at}\`
+          - Verified code commit: \`${VERIFIED_CANDIDATE_SHA}\`
+          - Branch: \`testing-codex\`
+
+          ## Fresh verification results
+          The exact code commit above passed:
+          - \`uv run ruff check .\`
+          - \`uv run pytest -q\`
+          - \`pnpm --filter @darknetra/web lint\`
+          - \`pnpm --filter @darknetra/web typecheck\`
+          - \`pnpm --filter @darknetra/web test\`
+          - \`pnpm --filter @darknetra/web build\`
+          - \`pnpm --filter @darknetra/web test:e2e\` in reachable-API and unavailable-API modes
+          - \`docker compose -f docker-compose.yml -f docker-compose.dev.yml config\`
+          - \`bash scripts/smoke.sh\` with non-root web/API containers, API health, and dashboard response
+          - showcase-label regression scan
+
+          ## Implementation observations
+          - The web runtime image includes the built pnpm workspace \`node_modules\` plus Next standalone output because the pinned Next/pnpm build retained pnpm-store runtime references. Reliability is prioritized over minimum image size for this milestone.
+          - uv is pinned to \`0.12.4\` in Docker/workflow tooling.
+          - The imported template has no \`apps/web/public\` directory, so the runtime image does not copy a nonexistent asset directory.
+
+          ## Plan 01 limitations
+          Persistent auth/users/case-scoped RBAC/PostgreSQL/audit persistence begin in Plan 02. Current case/overview data are controlled fixtures. Evidence/extraction/correlation/graph/trends/reports are interface boundaries, not fabricated production results. The optional lawful collector remains disabled and unnecessary.
+          EOF
+          git add docs/verification/plan-01-foundation-dashboard.md
+          git commit -m 'docs: record Plan 01 verification evidence [skip ci]'
+          git push origin HEAD:testing-codex

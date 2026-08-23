@@ -1,0 +1,41 @@
+name: Task 09 final Plan 01 runner
+
+# Retry marker: offline health regression asserts the semantic async-state boundary.
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/task09-final-runner.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - name: Prepare locked workspaces
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.15.0 --activate
+          uv sync --all-packages --dev --frozen
+          pnpm install --frozen-lockfile
+          pnpm --filter @darknetra/web exec playwright install --with-deps chromium
+      - name: Run final verifier
+        run: bash scripts/finalize_plan01_task9.sh

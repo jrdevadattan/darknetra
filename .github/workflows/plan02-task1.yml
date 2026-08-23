@@ -1,0 +1,65 @@
+name: Plan 02 Task 1 database foundation
+
+# Retry marker: PostgreSQL 18 mount and Alembic Ruff ordering are corrected.
+on:
+  push:
+    branches: [testing-codex]
+    paths:
+      - .github/workflows/plan02-task1.yml
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      DARKNETRA_POSTGRES_PASSWORD: darknetra-dev-only
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-dev-only@127.0.0.1:5432/darknetra
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: testing-codex
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: '0.12.4'
+      - name: Lock and sync Python workspace
+        run: |
+          uv lock
+          uv sync --all-packages --dev --frozen
+      - name: Start PostgreSQL
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres
+      - name: Wait for PostgreSQL
+        run: |
+          for i in $(seq 1 30); do
+            if docker compose -f docker-compose.yml -f docker-compose.dev.yml exec -T postgres pg_isready -U darknetra -d darknetra; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml logs postgres
+          exit 1
+      - name: Ruff and database integration test
+        run: |
+          uv run ruff check .
+          uv run pytest apps/api/tests/integration/test_database_health.py -v
+      - name: Alembic baseline smoke
+        run: |
+          uv run alembic -c apps/api/alembic.ini upgrade head
+          uv run alembic -c apps/api/alembic.ini current
+      - name: Commit generated lockfile
+        run: |
+          if ! git diff --quiet -- uv.lock; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add uv.lock
+            git commit -m 'chore: lock Plan 02 database dependencies [skip ci]'
+            git push origin HEAD:testing-codex
+          fi
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml down -v --remove-orphans

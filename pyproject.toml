@@ -1,0 +1,23 @@
+[project]
+name = "darknetra-dev"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8.4,<9", "ruff>=0.12,<1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "apps/api/tests"]
+pythonpath = [".", "apps/api"]
+asyncio_mode = "auto"
+markers = [
+  "integration: tests that require external services such as PostgreSQL",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.uv.workspace]
+members = ["apps/api"]
