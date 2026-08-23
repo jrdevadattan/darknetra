@@ -1,4 +1,4 @@
-FROM node:24-slim AS deps
+FROM node:26-slim AS deps
 ENV PNPM_HOME=/pnpm \
     PATH=/pnpm:$PATH \
     NEXT_TELEMETRY_DISABLED=1
@@ -14,7 +14,7 @@ ENV NEXT_PUBLIC_DARKNETRA_API_BASE_URL=$NEXT_PUBLIC_DARKNETRA_API_BASE_URL
 COPY apps/web apps/web
 RUN pnpm --filter @darknetra/web build
 
-FROM node:24-slim AS runtime
+FROM node:26-slim AS runtime
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     PORT=3000 \
