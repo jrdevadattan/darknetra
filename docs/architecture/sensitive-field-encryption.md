@@ -11,12 +11,12 @@ The following fields require this boundary when a Plan 03 or later model stores 
 
 | Field | Required handling |
 | --- | --- |
-| Source locators | Encrypt the full locator and store its purpose-specific HMAC blind index. Default responses may return a redacted display value or a presence flag, not the envelope or plaintext. |
-| Authority references | Encrypt references to warrants, approvals, legal authorities, case authorities, and related authorization records, and store their purpose-specific HMAC blind indexes. Do not place the reference in logs, audit metadata, search indexes, or ordinary responses. |
-| Policy-sensitive analyst notes and rationales | Encrypt the note or rationale whenever the owning policy marks it sensitive, and store its purpose-specific HMAC blind index. The model must preserve that policy decision with the record so later serializers cannot infer that the text is public. |
-| Custody notes | Encrypt free-text custody, transfer, handling, exception, and storage notes, and store their purpose-specific HMAC blind indexes. Keep non-sensitive timestamps, actor IDs, action codes, and integrity hashes in separate structured fields when policy permits. |
-| Contacts | Encrypt contact values, including email addresses, telephone numbers, messaging handles, and other direct contact identifiers, and store their purpose-specific HMAC blind indexes. |
-| Policy-restricted wallets | Encrypt the full wallet value when policy restricts it and store its purpose-specific HMAC blind index. Keep unrestricted network or asset type metadata separate. Do not expose the full value through general indicator serialization. |
+| Source locators | Encrypt the full locator. Store a purpose-specific HMAC blind index for the documented locator-deduplication workflow. Default responses may return a redacted display value or a presence flag, not the envelope or plaintext. |
+| Authority references | Encrypt references to warrants, approvals, legal authorities, case authorities, and related authorization records. Do not create a blind index unless an approved equality workflow is documented. Do not place the reference in logs, audit metadata, search indexes, or ordinary responses. |
+| Policy-sensitive analyst notes and rationales | Encrypt the note or rationale whenever the owning policy marks it sensitive. Free-text notes have no blind index by default. The model must preserve that policy decision with the record so later serializers cannot infer that the text is public. |
+| Custody notes | Encrypt free-text custody, transfer, handling, exception, and storage notes. Free-text custody notes have no blind index by default. Keep non-sensitive timestamps, actor IDs, action codes, and integrity hashes in separate structured fields when policy permits. |
+| Contacts | Encrypt contact values, including email addresses, telephone numbers, messaging handles, and other direct contact identifiers. Create a blind index only for a documented canonical equality or deduplication workflow. |
+| Policy-restricted wallets | Encrypt the full wallet value when policy restricts it. Create a blind index only for a documented canonical equality or deduplication workflow. Keep unrestricted network or asset type metadata separate. Do not expose the full value through general indicator serialization. |
 
 The owning feature may apply this boundary to more fields. It may not remove a field from this list
 without an approved policy and architecture change.
@@ -25,17 +25,18 @@ without an approved policy and architecture change.
 
 1. Normalize plaintext only when the owning feature has a documented normalization rule. The
    encryption helper does not normalize input.
-2. Choose a stable purpose that names the owning resource and field, such as `source.locator`,
-   `source.authority_reference`, `evidence.custody_notes`, or `contact.email`. Do not reuse one
-   purpose for unrelated fields.
+2. Call the public `compose_sensitive_field_purpose(resource_type, field_name)` helper. Writers,
+   reveal adapters, and rotation tooling must use this same composer; callers must not invent or
+   hard-code a parallel purpose string.
 3. Use the stable owning resource ID as `resource_id`. The same purpose and resource ID must reach
    the reveal and rotation paths.
 4. Call `SensitiveFieldCrypto.encrypt(plaintext, purpose=..., resource_id=...)`.
 5. Call `pack_envelope` and persist `key_version`, `nonce_b64`, and `ciphertext_b64` as three
    explicit columns or as one validated JSON object.
-6. For every field listed above, call
+6. Only when the owning feature documents an equality or deduplication workflow, call
    `SensitiveFieldCrypto.blind_index(normalized_plaintext, purpose=...)` and persist the returned
-   HMAC-SHA-256 digest separately. Never use raw SHA-256 for a low-entropy sensitive value.
+   HMAC-SHA-256 digest separately. Otherwise persist a null blind index. Never use raw SHA-256 for
+   a low-entropy sensitive value.
 7. Drop the local plaintext reference after the write or redaction operation. Do not include
    plaintext, key material, nonces, ciphertext, or blind indexes in logs or audit metadata.
 
@@ -94,10 +95,9 @@ in the immutable request-session binding. The reveal service then enforces this 
 4. Resolve persisted case membership roles, intersect them with the actor's current global roles,
    and reject an empty or viewer-only effective role set.
 5. Run the owning feature's resource and field permission predicate.
-6. Compose the purpose as the literal prefix `darknetra-sensitive-reveal:v1:` followed by a compact
-   JSON array `[resource_type,field_name]` with UTF-8 non-ASCII characters left unescaped, then
-   decrypt with that purpose and the requested resource ID. The array preserves component
-   boundaries when either value contains dots or other delimiters.
+6. Call `compose_sensitive_field_purpose(resource_type, field_name)`, then decrypt with that
+   purpose and the requested resource ID. The shared composer preserves component boundaries when
+   either value contains dots or other delimiters.
 7. Append `SENSITIVE_VALUE_REVEALED` with actor, case, resource, field name, reason, and request ID.
    The audit event does not contain plaintext, ciphertext, nonces, blind indexes, or keys.
 8. Commit the audit event before returning plaintext to the explicit response path.
@@ -151,9 +151,12 @@ A consuming model passes this gate only when tests show that it:
 
 - sends every covered write through `SensitiveFieldCrypto.encrypt` and passes its result to
   `pack_envelope` before the repository persists the envelope;
+- obtains the purpose from `compose_sensitive_field_purpose(resource_type, field_name)` in writers,
+  reveal adapters, and rotation tooling instead of maintaining parallel string composition;
 - sends every stored envelope through `unpack_envelope` before an authorized service uses it;
-- calls `SensitiveFieldCrypto.blind_index` with the field purpose and normalized plaintext for
-  every covered field and persists the digest beside, but outside, the complete envelope;
+- keeps the blind-index column nullable and calls `SensitiveFieldCrypto.blind_index` only for a
+  documented equality or deduplication workflow, persisting the digest beside, but outside, the
+  complete envelope;
 - omits plaintext and envelope internals from ORM representations and ordinary API responses;
 - binds a case-scoped provider and feature-specific permission predicate, then sends the full-value
   API path through `reveal_sensitive_value` so the service authorizes, decrypts, audits, commits,

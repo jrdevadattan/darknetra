@@ -102,7 +102,7 @@ async def reveal_sensitive_value(
 
 The public function keeps exactly these seven keyword-only arguments. The owning HTTP dependency binds the provider, permission predicate, crypto service, and request ID once to the request session with `bind_sensitive_reveal_context`. That binding is immutable for the request lifetime and may not be replaced. Provider and policy adapters are read-only because `reveal_sensitive_value` commits the session to make its audit event durable; adapters must not stage unrelated writes.
 
-The reveal purpose is the literal prefix `darknetra-sensitive-reveal:v1:` followed by a compact JSON array `[resource_type,field_name]`, serialized with no spaces and with UTF-8 non-ASCII characters unescaped. This composition is injective for accepted UTF-8 strings and does not confuse dotted resource types with dotted field names.
+The public `compose_sensitive_field_purpose(resource_type, field_name)` helper produces the reveal purpose from the literal prefix `darknetra-sensitive-reveal:v1:` followed by a compact JSON array `[resource_type,field_name]`, serialized with no spaces and with UTF-8 non-ASCII characters unescaped. Writers, reveal adapters, and rotation tooling must call that same helper. This composition is injective for accepted UTF-8 strings and does not confuse dotted resource types with dotted field names.
 
 - [ ] **Step 1: Write authorization tests** VIEWER denied; role/permission configured by owning feature; cross-case inaccessible returns repository-standard 404.
 - [ ] **Step 2: Require non-empty reveal reason** bounded 10..500 characters for full-value reveal.
@@ -151,4 +151,4 @@ The reveal purpose is the literal prefix `darknetra-sensitive-reveal:v1:` follow
 - Ordinary ORM/API serialization cannot auto-decrypt.
 - Full reveal is permission-gated, reasoned and audited without logging plaintext.
 - Key rotation can retain old decryption versions and re-encrypt explicitly.
-- Plan 03a is complete without not-yet-created Plan 03 models. Plan 03 is blocked from completion until its source locators, authority references, protected analyst and custody notes, contacts, and policy-restricted wallets store complete validated envelopes plus purpose-specific HMAC blind indexes, use `pack_envelope` and `unpack_envelope`, and route full-value access through the exact audited reveal boundary.
+- Plan 03a is complete without not-yet-created Plan 03 models. Plan 03 is blocked from completion until its source locators, authority references, protected analyst and custody notes, contacts, and policy-restricted wallets store complete validated envelopes, use the same public purpose composer with `pack_envelope` and `unpack_envelope`, keep blind indexes nullable and create them only for documented equality/deduplication workflows, and route full-value access through the exact audited reveal boundary.
