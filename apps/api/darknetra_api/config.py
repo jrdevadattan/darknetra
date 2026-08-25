@@ -26,7 +26,8 @@ class Settings(BaseSettings):
         repr=False,
     )
     database_owner_url: str = Field(default="", repr=False)
-    evidence_store_root: Path = Path("evidence-store")
+    evidence_store_root: Path = Field(default=Path("evidence-store"), repr=False)
+    evidence_store_allow_trusted_volume_fallback: bool = False
     web_origin: str = "http://localhost:3000"
     jwt_signing_key_b64: str = ""
     field_key_v1_b64: str = Field(default="", repr=False)

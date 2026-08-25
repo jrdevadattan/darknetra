@@ -1,5 +1,6 @@
 import base64
 import json
+from pathlib import Path
 
 import pytest
 from darknetra_api.config import Settings
@@ -98,6 +99,14 @@ def test_database_credentials_are_redacted_from_settings_repr() -> None:
 
     assert runtime_password not in rendered
     assert owner_password not in rendered
+
+
+def test_evidence_store_path_is_redacted_and_trusted_fallback_defaults_off() -> None:
+    sensitive_path = Path("/internal/evidence/store/location")
+    settings = Settings(evidence_store_root=sensitive_path, _env_file=None)
+
+    assert str(sensitive_path) not in repr(settings)
+    assert settings.evidence_store_allow_trusted_volume_fallback is False
 
 
 @pytest.mark.parametrize(

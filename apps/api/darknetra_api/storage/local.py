@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import hmac
 import os
@@ -34,20 +35,34 @@ _LOCK_FILE_MODE = 0o600
 class LocalObjectStore(ObjectStore):
     """Local content-addressed storage with same-filesystem atomic promotion.
 
-    Read-only mode bits provide defense in depth on platforms that support them.
-    Integrity is enforced by content keys and streaming verification, not by mode bits.
+    POSIX uses descriptor-relative traversal and rejects link substitution. Platforms
+    without those primitives fail closed unless the caller explicitly opts into a trusted,
+    stable development volume. That fallback rejects stable reparse points but cannot
+    contain an active path substitution race.
+
+    Read-only mode bits provide defense in depth. Content keys and streaming verification
+    enforce integrity.
     """
 
     def __init__(
-        self, root: str | os.PathLike[str], *, chunk_size: int = _DEFAULT_CHUNK_SIZE
+        self,
+        root: str | os.PathLike[str],
+        *,
+        chunk_size: int = _DEFAULT_CHUNK_SIZE,
+        allow_trusted_volume_fallback: bool = False,
     ) -> None:
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")
         configured_root = Path(root).expanduser().absolute()
+        self.root = configured_root
+        self._allow_trusted_volume_fallback = allow_trusted_volume_fallback
+        if not self._supports_secure_dir_fd and not allow_trusted_volume_fallback:
+            raise ObjectStoreConfigurationError(
+                "secure descriptor traversal is unavailable; trusted-volume fallback "
+                "requires explicit opt-in"
+            )
         try:
-            self._reject_link_ancestors(configured_root)
-            configured_root.mkdir(parents=True, exist_ok=True, mode=_DIRECTORY_MODE)
-            self._reject_link_ancestors(configured_root)
+            self._create_root_durably(configured_root)
         except OSError as exc:
             raise ObjectStoreConfigurationError(
                 f"object-store root cannot be created as a directory: {configured_root}"
@@ -57,7 +72,6 @@ class LocalObjectStore(ObjectStore):
                 f"object-store root must be a directory: {configured_root}"
             )
 
-        self.root = configured_root
         self.chunk_size = chunk_size
         try:
             root_result = self.root.stat()
@@ -145,7 +159,12 @@ class LocalObjectStore(ObjectStore):
                             observed_sha256,
                         )
                         staged = False
-                        self._fsync_directory(final_fd, final_path)
+                        self._fsync_promotion_directories(
+                            staging_fd,
+                            staging_path,
+                            final_fd,
+                            final_path,
+                        )
 
                 return StoredObject(
                     object_key=object_key,
@@ -167,11 +186,13 @@ class LocalObjectStore(ObjectStore):
     def verify(self, object_key: str, expected_sha256: str) -> bool:
         self._validate_digest(expected_sha256)
         digest = self._digest_from_key(object_key)
+        if not hmac.compare_digest(expected_sha256, digest):
+            return False
         with self._directory(
             ("sha256", digest[:2], digest[2:4]),
             create=False,
         ) as (directory_fd, directory_path):
-            return self._verify_entry(directory_fd, directory_path, digest, expected_sha256)
+            return self._verify_entry(directory_fd, directory_path, digest, digest)
 
     @staticmethod
     def _write_chunk(file_object: BinaryIO, chunk: bytes) -> None:
@@ -241,6 +262,42 @@ class LocalObjectStore(ObjectStore):
             ) from exc
         if (result.st_dev, result.st_ino) != self._root_identity:
             raise ObjectStoreConfigurationError("object-store root identity changed")
+
+    def _create_root_durably(self, root: Path) -> None:
+        if not self._supports_secure_dir_fd:
+            self._reject_link_ancestors(root)
+            root.mkdir(parents=True, exist_ok=True, mode=_DIRECTORY_MODE)
+            self._reject_link_ancestors(root)
+            return
+
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        anchor = Path(root.anchor)
+        descriptor = os.open(anchor, flags)
+        try:
+            for part in root.parts[1:]:
+                try:
+                    next_descriptor = os.open(part, flags, dir_fd=descriptor)
+                except FileNotFoundError:
+                    created = False
+                    try:
+                        os.mkdir(part, mode=_DIRECTORY_MODE, dir_fd=descriptor)
+                        created = True
+                    except FileExistsError:
+                        pass
+                    if created:
+                        os.fsync(descriptor)
+                    next_descriptor = os.open(part, flags, dir_fd=descriptor)
+                except OSError as exc:
+                    if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                        raise ObjectStoreConfigurationError(
+                            "object-store root contains a symlink, reparse point, "
+                            "or non-directory"
+                        ) from exc
+                    raise
+                os.close(descriptor)
+                descriptor = next_descriptor
+        finally:
+            os.close(descriptor)
 
     @property
     def _supports_secure_dir_fd(self) -> bool:
@@ -337,7 +394,6 @@ class LocalObjectStore(ObjectStore):
             finally:
                 os.close(descriptor)
                 self._unlink_owned_stage(directory_fd, directory_path, probe_name)
-            self._fsync_directory(directory_fd, directory_path)
 
     def _require_same_filesystem(self, result: os.stat_result, path: Path) -> None:
         if result.st_dev != self._root_device:
@@ -454,22 +510,48 @@ class LocalObjectStore(ObjectStore):
         finally:
             os.close(descriptor)
 
-    @staticmethod
+    def _fsync_promotion_directories(
+        self,
+        staging_fd: int | None,
+        staging_path: Path,
+        final_fd: int | None,
+        final_path: Path,
+    ) -> None:
+        source_error: OSError | None = None
+        try:
+            self._fsync_directory(staging_fd, staging_path)
+        except OSError as exc:
+            source_error = exc
+        try:
+            self._fsync_directory(final_fd, final_path)
+        except OSError:
+            if source_error is not None:
+                raise source_error
+            raise
+        if source_error is not None:
+            raise source_error
+
     def _unlink_owned_stage(
+        self,
         directory_fd: int | None,
         directory_path: Path,
         name: str,
     ) -> None:
+        removed = False
         try:
             if directory_fd is not None:
                 os.unlink(name, dir_fd=directory_fd)
+                removed = True
             else:
                 stage_path = directory_path / name
                 if os.name == "nt":
                     os.chmod(stage_path, stat.S_IWRITE)
                 stage_path.unlink()
+                removed = True
         except FileNotFoundError:
             pass
+        if removed:
+            self._fsync_directory(directory_fd, directory_path)
 
     def _open_entry(
         self,
@@ -478,6 +560,8 @@ class LocalObjectStore(ObjectStore):
         name: str,
     ) -> BinaryIO:
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        if os.name == "posix":
+            flags |= getattr(os, "O_NONBLOCK", 0)
         if directory_fd is not None:
             descriptor = os.open(name, flags, dir_fd=directory_fd)
         else:
@@ -487,9 +571,15 @@ class LocalObjectStore(ObjectStore):
         result = os.fstat(descriptor)
         if not stat.S_ISREG(result.st_mode) or result.st_dev != self._root_device:
             os.close(descriptor)
-            raise ObjectStoreConfigurationError(
-                "object-store key must resolve to a regular local file"
+            raise ObjectIntegrityError(
+                "object-store key must resolve to a regular file on the local volume"
             )
+        if result.st_nlink != 1:
+            os.close(descriptor)
+            raise ObjectIntegrityError("object-store final file has an unexpected hard link count")
+        if os.name == "posix" and stat.S_IMODE(result.st_mode) != _FINAL_FILE_MODE:
+            os.close(descriptor)
+            raise ObjectIntegrityError("object-store final file does not have read-only mode 0444")
         return os.fdopen(descriptor, "rb", buffering=0)
 
     def _verify_entry(

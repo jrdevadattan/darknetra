@@ -84,6 +84,9 @@ def test_evidence_volume_is_shared_only_by_api_and_worker() -> None:
         assert services[service_name]["environment"]["DARKNETRA_EVIDENCE_STORE_ROOT"] == (
             "/var/lib/darknetra/evidence"
         )
+        assert services[service_name]["environment"][
+            "DARKNETRA_EVIDENCE_STORE_ALLOW_TRUSTED_VOLUME_FALLBACK"
+        ] == "false"
 
     for service_name in ("web", "postgres", "redis", "db-bootstrap", "migrate"):
         assert all(

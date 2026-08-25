@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import io
+import multiprocessing
 import os
+import signal
 import stat
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import pytest
 from darknetra_api.storage.base import (
@@ -29,8 +32,35 @@ def _staging_entries(root: Path) -> list[Path]:
     return list((root / ".staging").iterdir())
 
 
+def _store(
+    root: str | os.PathLike[str],
+    *,
+    chunk_size: int = 1024 * 1024,
+) -> LocalObjectStore:
+    return LocalObjectStore(
+        root,
+        chunk_size=chunk_size,
+        allow_trusted_volume_fallback=True,
+    )
+
+
+def _process_put(
+    root: str,
+    payload: bytes,
+    start: Any,
+    results: Any,
+) -> None:
+    try:
+        store = LocalObjectStore(root, allow_trusted_volume_fallback=True, chunk_size=97)
+        start.wait(timeout=10)
+        stored = store.put_verified(io.BytesIO(payload))
+        results.put(("ok", stored.object_key))
+    except Exception as exc:  # noqa: BLE001 - child must report every failure to parent
+        results.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
 def test_put_verified_returns_deterministic_key_digest_and_byte_count(tmp_path: Path) -> None:
-    store = LocalObjectStore(tmp_path, chunk_size=4)
+    store = _store(tmp_path, chunk_size=4)
 
     stored = store.put_verified(io.BytesIO(CONTENT))
 
@@ -43,7 +73,7 @@ def test_put_verified_returns_deterministic_key_digest_and_byte_count(tmp_path: 
 @given(st.binary(max_size=256 * 1024))
 def test_arbitrary_bytes_round_trip_by_content_digest(payload: bytes) -> None:
     with tempfile.TemporaryDirectory() as directory:
-        store = LocalObjectStore(directory)
+        store = _store(directory)
         expected = hashlib.sha256(payload).hexdigest()
 
         stored = store.put_verified(io.BytesIO(payload), expected_sha256=expected)
@@ -57,7 +87,7 @@ def test_arbitrary_bytes_round_trip_by_content_digest(payload: bytes) -> None:
 
 
 def test_duplicate_content_deduplicates_without_replacing_final_file(tmp_path: Path) -> None:
-    store = LocalObjectStore(tmp_path)
+    store = _store(tmp_path)
     first = store.put_verified(io.BytesIO(CONTENT))
     final_path = tmp_path / Path(first.object_key)
     first_inode = final_path.stat().st_ino
@@ -70,7 +100,7 @@ def test_duplicate_content_deduplicates_without_replacing_final_file(tmp_path: P
 
 
 def test_concurrent_same_content_writers_share_one_valid_object(tmp_path: Path) -> None:
-    stores = [LocalObjectStore(tmp_path, chunk_size=7) for _ in range(8)]
+    stores = [_store(tmp_path, chunk_size=7) for _ in range(8)]
     barrier = threading.Barrier(8)
 
     def put(store: LocalObjectStore) -> object:
@@ -87,8 +117,43 @@ def test_concurrent_same_content_writers_share_one_valid_object(tmp_path: Path) 
     assert _staging_entries(tmp_path) == []
 
 
+def test_multiple_processes_deduplicate_one_final_object(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    results = context.Queue()
+    payload = CONTENT * 4096
+    processes = [
+        context.Process(
+            target=_process_put,
+            args=(str(tmp_path), payload, start, results),
+        )
+        for _ in range(6)
+    ]
+    for process in processes:
+        process.start()
+    start.set()
+    try:
+        for process in processes:
+            process.join(timeout=20)
+        assert all(not process.is_alive() for process in processes)
+        assert all(process.exitcode == 0 for process in processes)
+        observed = [results.get(timeout=2) for _ in processes]
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+        results.close()
+
+    assert {status for status, _ in observed} == {"ok"}
+    assert len({key for _, key in observed}) == 1
+    assert _staging_entries(tmp_path) == []
+    final_files = [path for path in (tmp_path / "sha256").rglob("*") if path.is_file()]
+    assert len(final_files) == 1
+
+
 def test_hash_mismatch_removes_owned_stage_and_creates_no_final(tmp_path: Path) -> None:
-    store = LocalObjectStore(tmp_path)
+    store = _store(tmp_path)
     wrong_digest = "0" * 64
 
     with pytest.raises(ObjectHashMismatchError, match="expected SHA-256 does not match"):
@@ -111,7 +176,7 @@ class _FailingStream:
 
 
 def test_partial_read_failure_cleans_staging(tmp_path: Path) -> None:
-    store = LocalObjectStore(tmp_path, chunk_size=8)
+    store = _store(tmp_path, chunk_size=8)
 
     with pytest.raises(OSError, match="injected read failure"):
         store.put_verified(_FailingStream())
@@ -123,7 +188,7 @@ def test_partial_read_failure_cleans_staging(tmp_path: Path) -> None:
 def test_partial_write_failure_cleans_staging(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store = LocalObjectStore(tmp_path, chunk_size=4)
+    store = _store(tmp_path, chunk_size=4)
     real_write = store._write_chunk
     calls = 0
 
@@ -147,7 +212,7 @@ def test_promotion_failure_cleans_stage_without_deleting_existing_final(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = LocalObjectStore(tmp_path)
+    store = _store(tmp_path)
     existing = store.put_verified(io.BytesIO(CONTENT))
     existing_path = tmp_path / Path(existing.object_key)
     other = b"different bytes"
@@ -178,7 +243,7 @@ def test_final_object_is_not_visible_before_atomic_promotion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = LocalObjectStore(tmp_path)
+    store = _store(tmp_path)
     entered = threading.Event()
     release = threading.Event()
     real_replace = os.replace
@@ -222,7 +287,7 @@ def test_final_object_is_not_visible_before_atomic_promotion(
     ],
 )
 def test_open_and_verify_reject_noncanonical_keys(tmp_path: Path, object_key: str) -> None:
-    store = LocalObjectStore(tmp_path)
+    store = _store(tmp_path)
 
     with pytest.raises(ObjectKeyError, match="canonical content key"):
         store.open(object_key)
@@ -243,7 +308,7 @@ def test_symlinked_digest_directory_cannot_escape_root(tmp_path: Path) -> None:
         )
     except OSError as exc:
         pytest.skip(f"symlinks unavailable to this account: {exc}")
-    store = LocalObjectStore(tmp_path)
+    store = _store(tmp_path)
 
     with pytest.raises(ObjectStoreConfigurationError, match="symlink|reparse"):
         store.put_verified(io.BytesIO(CONTENT))
@@ -256,7 +321,7 @@ def test_replaced_root_symlink_cannot_redirect_a_later_write(tmp_path: Path) -> 
     if not hasattr(os, "symlink"):
         pytest.skip("symlinks are not supported")
     root = tmp_path / "evidence"
-    store = LocalObjectStore(root)
+    store = _store(root)
     original_root = tmp_path / "original-root"
     root.rename(original_root)
     outside = tmp_path / "outside"
@@ -275,11 +340,12 @@ def test_replaced_root_symlink_cannot_redirect_a_later_write(tmp_path: Path) -> 
 
 
 def test_open_round_trip_and_verify_reports_tamper_without_rewriting(tmp_path: Path) -> None:
-    store = LocalObjectStore(tmp_path)
+    store = _store(tmp_path)
     stored = store.put_verified(io.BytesIO(CONTENT))
     final_path = tmp_path / Path(stored.object_key)
     final_path.chmod(0o644)
     final_path.write_bytes(b"X" + CONTENT[1:])
+    final_path.chmod(0o444)
 
     assert not store.verify(stored.object_key, stored.sha256)
     assert final_path.read_bytes() == b"X" + CONTENT[1:]
@@ -287,8 +353,73 @@ def test_open_round_trip_and_verify_reports_tamper_without_rewriting(tmp_path: P
         store.put_verified(io.BytesIO(CONTENT))
 
 
+def test_verify_binds_manifest_digest_to_key_and_observed_bytes(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    stored = store.put_verified(io.BytesIO(b"A"))
+    final_path = tmp_path / Path(stored.object_key)
+    tampered = b"B"
+    tampered_sha256 = hashlib.sha256(tampered).hexdigest()
+    final_path.chmod(0o644)
+    final_path.write_bytes(tampered)
+    final_path.chmod(0o444)
+
+    assert not store.verify(stored.object_key, stored.sha256)
+    assert not store.verify(stored.object_key, tampered_sha256)
+    assert final_path.read_bytes() == tampered
+
+
+def test_fifo_final_entry_is_rejected_without_blocking(tmp_path: Path) -> None:
+    if os.name != "posix" or not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO tamper regression requires POSIX mkfifo")
+    store = _store(tmp_path)
+    stored = store.put_verified(io.BytesIO(CONTENT))
+    final_path = tmp_path / Path(stored.object_key)
+    final_path.unlink()
+    os.mkfifo(final_path)
+
+    def timeout_handler(_signum: int, _frame: object) -> None:
+        raise TimeoutError("opening FIFO blocked")
+
+    previous = signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(2)
+    try:
+        with pytest.raises(ObjectIntegrityError, match="regular file"):
+            store.open(stored.object_key)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def test_hard_linked_final_entry_is_rejected(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    stored = store.put_verified(io.BytesIO(CONTENT))
+    final_path = tmp_path / Path(stored.object_key)
+    hard_link = final_path.with_name(f"{final_path.name}.link")
+    try:
+        os.link(final_path, hard_link)
+    except OSError as exc:
+        pytest.skip(f"hard links unavailable on this filesystem: {exc}")
+
+    with pytest.raises(ObjectIntegrityError, match="hard link"):
+        store.open(stored.object_key)
+
+
+def test_writable_posix_final_entry_is_rejected(tmp_path: Path) -> None:
+    if os.name != "posix":
+        pytest.skip("POSIX mode contract")
+    store = _store(tmp_path)
+    stored = store.put_verified(io.BytesIO(CONTENT))
+    final_path = tmp_path / Path(stored.object_key)
+    final_path.chmod(0o644)
+
+    with pytest.raises(ObjectIntegrityError, match="read-only mode"):
+        store.open(stored.object_key)
+    with pytest.raises(ObjectIntegrityError, match="read-only mode"):
+        store.put_verified(io.BytesIO(CONTENT))
+
+
 def test_final_file_is_read_only_on_posix(tmp_path: Path) -> None:
-    store = LocalObjectStore(tmp_path)
+    store = _store(tmp_path)
     stored = store.put_verified(io.BytesIO(CONTENT))
 
     mode = stat.S_IMODE((tmp_path / Path(stored.object_key)).stat().st_mode)
@@ -303,7 +434,7 @@ def test_root_must_be_a_real_writable_directory(tmp_path: Path) -> None:
     root_file.write_text("x", encoding="utf-8")
 
     with pytest.raises(ObjectStoreConfigurationError, match="directory"):
-        LocalObjectStore(root_file)
+        _store(root_file)
 
 
 def test_configured_root_cannot_be_a_symlink_or_reparse_point(tmp_path: Path) -> None:
@@ -318,7 +449,7 @@ def test_configured_root_cannot_be_a_symlink_or_reparse_point(tmp_path: Path) ->
         pytest.skip(f"symlinks unavailable to this account: {exc}")
 
     with pytest.raises(ObjectStoreConfigurationError, match="symlink|reparse"):
-        LocalObjectStore(linked)
+        _store(linked)
 
 
 def test_configured_root_cannot_descend_from_a_symlink_or_reparse_point(
@@ -335,7 +466,7 @@ def test_configured_root_cannot_descend_from_a_symlink_or_reparse_point(
         pytest.skip(f"symlinks unavailable to this account: {exc}")
 
     with pytest.raises(ObjectStoreConfigurationError, match="symlink|reparse"):
-        LocalObjectStore(linked_parent / "evidence")
+        _store(linked_parent / "evidence")
 
 
 def test_initialization_probes_that_staging_is_writable(
@@ -352,41 +483,155 @@ def test_initialization_probes_that_staging_is_writable(
     monkeypatch.setattr(os, "open", reject_probe)
 
     with pytest.raises(ObjectStoreConfigurationError, match="not writable"):
+        _store(tmp_path)
+
+
+def test_trusted_volume_fallback_requires_explicit_opt_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        LocalObjectStore,
+        "_supports_secure_dir_fd",
+        property(lambda _self: False),
+    )
+
+    with pytest.raises(ObjectStoreConfigurationError, match="trusted-volume fallback"):
         LocalObjectStore(tmp_path)
+
+    fallback = LocalObjectStore(tmp_path, allow_trusted_volume_fallback=True)
+    assert fallback.put_verified(io.BytesIO(CONTENT)).sha256 == CONTENT_SHA256
 
 
 def test_linux_uses_directory_descriptors_for_symlink_safe_operations(tmp_path: Path) -> None:
     if os.name != "posix":
         pytest.skip("secure dir_fd operations are a Linux/POSIX contract")
 
-    assert LocalObjectStore(tmp_path)._supports_secure_dir_fd
+    assert _store(tmp_path)._supports_secure_dir_fd
 
 
-def test_new_content_directories_are_fsynced_before_promotion(
+def test_promotion_fsyncs_file_then_source_and_destination_directories(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = LocalObjectStore(tmp_path)
     if os.name != "posix":
         pytest.skip("directory fsync is a POSIX durability contract")
-    calls = 0
+    store = _store(tmp_path)
+    events: list[str] = []
+    real_fsync = os.fsync
+    real_replace = store._replace
+    real_directory_fsync = store._fsync_directory
+
+    def record_fsync(descriptor: int) -> None:
+        if stat.S_ISREG(os.fstat(descriptor).st_mode):
+            events.append("file")
+        real_fsync(descriptor)
+
+    def record_replace(*args: object) -> None:
+        events.append("rename")
+        real_replace(*args)
+
+    def record_directory_fsync(descriptor: int | None, path: Path) -> None:
+        events.append(f"directory:{path.relative_to(tmp_path).as_posix()}")
+        real_directory_fsync(descriptor, path)
+
+    monkeypatch.setattr(os, "fsync", record_fsync)
+    monkeypatch.setattr(store, "_replace", record_replace)
+    monkeypatch.setattr(store, "_fsync_directory", record_directory_fsync)
+
+    store.put_verified(io.BytesIO(CONTENT))
+
+    rename_index = events.index("rename")
+    assert events[:rename_index].count("file") == 2
+    assert events[rename_index : rename_index + 3] == [
+        "rename",
+        "directory:.staging",
+        f"directory:sha256/{CONTENT_SHA256[:2]}/{CONTENT_SHA256[2:4]}",
+    ]
+
+
+def test_failure_unlink_fsyncs_staging_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if os.name != "posix":
+        pytest.skip("directory fsync is a POSIX durability contract")
+    store = _store(tmp_path)
+    synced: list[str] = []
+    real_directory_fsync = store._fsync_directory
+
+    def record_directory_fsync(descriptor: int | None, path: Path) -> None:
+        synced.append(path.relative_to(tmp_path).as_posix())
+        real_directory_fsync(descriptor, path)
+
+    monkeypatch.setattr(store, "_fsync_directory", record_directory_fsync)
+
+    with pytest.raises(ObjectHashMismatchError):
+        store.put_verified(io.BytesIO(CONTENT), expected_sha256="0" * 64)
+
+    assert synced == [".staging"]
+
+
+def test_destination_fsync_is_attempted_when_source_fsync_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if os.name != "posix":
+        pytest.skip("directory fsync is a POSIX durability contract")
+    store = _store(tmp_path)
+    synced: list[str] = []
+    real_directory_fsync = store._fsync_directory
+
+    def fail_source_fsync(descriptor: int | None, path: Path) -> None:
+        relative = path.relative_to(tmp_path).as_posix()
+        synced.append(relative)
+        if relative == ".staging":
+            raise OSError("injected source-directory fsync failure")
+        real_directory_fsync(descriptor, path)
+
+    monkeypatch.setattr(store, "_fsync_directory", fail_source_fsync)
+
+    with pytest.raises(OSError, match="source-directory fsync failure"):
+        store.put_verified(io.BytesIO(CONTENT))
+
+    assert synced == [
+        ".staging",
+        f"sha256/{CONTENT_SHA256[:2]}/{CONTENT_SHA256[2:4]}",
+    ]
+    assert (tmp_path / CONTENT_KEY).read_bytes() == CONTENT
+
+
+def test_missing_root_hierarchy_fsyncs_each_created_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if os.name != "posix":
+        pytest.skip("directory fsync is a POSIX durability contract")
+    root = tmp_path / "level-one" / "level-two" / "evidence"
+    synced_directories: list[int] = []
     real_fsync = os.fsync
 
     def record_fsync(descriptor: int) -> None:
-        nonlocal calls
-        calls += 1
+        descriptor_stat = os.fstat(descriptor)
+        if stat.S_ISDIR(descriptor_stat.st_mode):
+            synced_directories.append(descriptor_stat.st_ino)
         real_fsync(descriptor)
 
     monkeypatch.setattr(os, "fsync", record_fsync)
 
-    store.put_verified(io.BytesIO(CONTENT))
+    _store(root)
 
-    # Two staged-file syncs, three newly-created shard parent syncs, one promotion sync.
-    assert calls >= 6
+    expected = [
+        tmp_path.stat().st_ino,
+        (tmp_path / "level-one").stat().st_ino,
+        (tmp_path / "level-one" / "level-two").stat().st_ino,
+    ]
+    positions = [synced_directories.index(inode) for inode in expected]
+    assert positions == sorted(positions)
 
 
 def test_staging_and_final_directories_must_share_root_filesystem(tmp_path: Path) -> None:
-    store = LocalObjectStore(tmp_path)
+    store = _store(tmp_path)
     store._root_device += 1
 
     with pytest.raises(ObjectStoreConfigurationError, match="share one filesystem"):
@@ -396,7 +641,7 @@ def test_staging_and_final_directories_must_share_root_filesystem(tmp_path: Path
 
 
 def test_expected_digest_must_be_canonical(tmp_path: Path) -> None:
-    store = LocalObjectStore(tmp_path)
+    store = _store(tmp_path)
 
     with pytest.raises(ObjectKeyError, match="canonical SHA-256"):
         store.put_verified(io.BytesIO(CONTENT), expected_sha256=CONTENT_SHA256.upper())

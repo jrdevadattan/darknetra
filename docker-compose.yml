@@ -57,6 +57,7 @@ services:
       DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra_runtime:${DARKNETRA_POSTGRES_RUNTIME_PASSWORD:?runtime PostgreSQL password required}@postgres:5432/darknetra
       DARKNETRA_REDIS_URL: redis://redis:6379/0
       DARKNETRA_EVIDENCE_STORE_ROOT: /var/lib/darknetra/evidence
+      DARKNETRA_EVIDENCE_STORE_ALLOW_TRUSTED_VOLUME_FALLBACK: "false"
       DARKNETRA_WEB_ORIGIN: ${DARKNETRA_WEB_ORIGIN:-http://localhost:3000}
       DARKNETRA_JWT_SIGNING_KEY_B64: ${DARKNETRA_JWT_SIGNING_KEY_B64:-}
       DARKNETRA_FIELD_KEY_V1_B64: ${DARKNETRA_FIELD_KEY_V1_B64:-}
