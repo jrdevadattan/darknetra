@@ -41,6 +41,13 @@ export interface CaseListParams {
   offset?: number;
 }
 
+export interface CaseCreatePayload {
+  case_code: string;
+  title: string;
+  sensitivity: CaseSensitivity;
+  source_authority_summary: string;
+}
+
 export function listCases(params: CaseListParams = {}): Promise<ApiCaseList> {
   const search = new URLSearchParams();
   if (params.limit !== undefined) search.set("limit", String(params.limit));
@@ -57,12 +64,7 @@ export function getCaseMembers(caseId: string): Promise<ApiCaseMemberList> {
   return apiFetch<ApiCaseMemberList>(`/api/v1/cases/${encodeURIComponent(caseId)}/members`);
 }
 
-export function createCase(payload: {
-  case_code: string;
-  title: string;
-  sensitivity: CaseSensitivity;
-  source_authority_summary: string;
-}): Promise<ApiCase> {
+export function createCase(payload: CaseCreatePayload): Promise<ApiCase> {
   return apiFetch<ApiCase>("/api/v1/cases", {
     method: "POST",
     body: JSON.stringify(payload),

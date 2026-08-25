@@ -1,53 +1,56 @@
-'use client';
+"use client";
 
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  createCase,
   getCase,
   getCaseMembers,
   listCases,
   type ApiCase,
   type ApiCaseMemberList,
+  type CaseCreatePayload,
   type CaseListParams,
-} from '@/lib/api/cases';
-import { queryKeys } from '@/lib/query/keys';
+} from "@/lib/api/cases";
+import { queryKeys } from "@/lib/query/keys";
 
-import type { CaseSensitivity, CaseStatus, CaseSummary } from './types';
+import type { CaseSensitivity, CaseStatus, CaseSummary } from "./types";
 
 export class CaseContractError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = 'CaseContractError';
+    this.name = "CaseContractError";
   }
 }
 
 function caseStatus(value: unknown): CaseStatus {
-  if (value === 'OPEN' || value === 'REVIEW' || value === 'CLOSED') return value;
+  if (value === "OPEN" || value === "REVIEW" || value === "CLOSED") return value;
   throw new CaseContractError(`Unsupported case status: ${String(value)}`);
 }
 
 function caseSensitivity(value: unknown): CaseSensitivity {
-  if (value === 'STANDARD' || value === 'RESTRICTED') return value;
+  if (value === "STANDARD" || value === "RESTRICTED") return value;
   throw new CaseContractError(`Unsupported case sensitivity: ${String(value)}`);
 }
 
-function sourceClass(summary: unknown): CaseSummary['sourceClass'] {
-  if (typeof summary !== 'string') {
-    throw new CaseContractError('Case source authority summary must be text.');
+function sourceClass(summary: unknown): CaseSummary["sourceClass"] {
+  if (typeof summary !== "string") {
+    throw new CaseContractError("Case source authority summary must be text.");
   }
 
-  const normalized = summary.trim().toUpperCase().replace(/[\s-]+/g, '_');
-  if (normalized.includes('RESEARCH_ARCHIVE')) return 'RESEARCH_ARCHIVE';
-  if (normalized.includes('SYNTHETIC')) return 'SYNTHETIC';
+  const normalized = summary
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, "_");
+  if (normalized.includes("RESEARCH_ARCHIVE")) return "RESEARCH_ARCHIVE";
+  if (normalized.includes("SYNTHETIC")) return "SYNTHETIC";
 
-  throw new CaseContractError(
-    'Case source authority summary does not identify a supported source class.',
-  );
+  throw new CaseContractError("Case source authority summary does not identify a supported source class.");
 }
 
 function utcTimestamp(value: unknown): string {
-  if (typeof value !== 'string') {
-    throw new CaseContractError('Case updated timestamp must be text.');
+  if (typeof value !== "string") {
+    throw new CaseContractError("Case updated timestamp must be text.");
   }
   const milliseconds = Date.parse(value);
   if (Number.isNaN(milliseconds)) {
@@ -93,6 +96,17 @@ export function useCases(params: CaseListParams = {}) {
       offset: response.offset,
       hasMore: response.has_more,
     }),
+  });
+}
+
+export function useCreateCase() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (payload: CaseCreatePayload) => createCase(payload),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: queryKeys.cases.all });
+    },
   });
 }
 

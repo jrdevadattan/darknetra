@@ -1,35 +1,36 @@
-import type { ReactNode } from 'react';
+import type { ReactNode } from "react";
 
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { CaseShell } from './case-shell';
-import { CasesLiveView } from './cases-live-view';
+import { CaseShell } from "./case-shell";
+import { CasesLiveView } from "./cases-live-view";
 
-vi.mock('next/navigation', () => ({
-  usePathname: () => '/cases/4d61f3aa-b46e-4ed2-b516-e91ec5930abc',
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/cases/4d61f3aa-b46e-4ed2-b516-e91ec5930abc",
 }));
 
 const fetchMock = vi.fn();
 
 const API_CASE = {
-  id: '4d61f3aa-b46e-4ed2-b516-e91ec5930abc',
-  case_code: 'CHD-2026-001',
-  title: 'Synthetic narcotics case',
-  status: 'OPEN',
-  sensitivity: 'STANDARD',
-  owner_user_id: '2b18f363-8fc0-44aa-8312-7f4792e663af',
-  source_authority_summary: 'Authorized synthetic fixture for investigator training',
-  created_at: '2026-08-17T09:30:00Z',
-  updated_at: '2026-08-17T10:45:00Z',
+  id: "4d61f3aa-b46e-4ed2-b516-e91ec5930abc",
+  case_code: "CHD-2026-001",
+  title: "Synthetic narcotics case",
+  status: "OPEN",
+  sensitivity: "STANDARD",
+  owner_user_id: "2b18f363-8fc0-44aa-8312-7f4792e663af",
+  source_authority_summary: "Authorized synthetic fixture for investigator training",
+  created_at: "2026-08-17T09:30:00Z",
+  updated_at: "2026-08-17T10:45:00Z",
   closed_at: null,
 };
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { 'content-type': 'application/json' },
+    headers: { "content-type": "application/json" },
   });
 }
 
@@ -43,7 +44,7 @@ function renderWithQuery(ui: ReactNode) {
 }
 
 beforeEach(() => {
-  vi.stubGlobal('fetch', fetchMock);
+  vi.stubGlobal("fetch", fetchMock);
 });
 
 afterEach(() => {
@@ -51,52 +52,89 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe('CasesLiveView', () => {
-  it('renders live API cases through the retained table interface', async () => {
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse({ items: [API_CASE], limit: 25, offset: 0, has_more: false }),
-    );
+describe("CasesLiveView", () => {
+  it("creates a case and refreshes the visible case inventory", async () => {
+    const user = userEvent.setup();
+    const createdCase = {
+      ...API_CASE,
+      id: "22175f61-f785-4756-94f0-af398e415314",
+      case_code: "DARKNETRA-001",
+      title: "First dashboard-created case",
+      updated_at: "2026-08-18T10:45:00Z",
+    };
+
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ items: [], limit: 25, offset: 0, has_more: false }))
+      .mockResolvedValueOnce(jsonResponse(createdCase, 201))
+      .mockResolvedValueOnce(jsonResponse({ items: [createdCase], limit: 25, offset: 0, has_more: false }));
 
     renderWithQuery(<CasesLiveView />);
 
-    expect(screen.getByTestId('async-state-loading')).toBeInTheDocument();
-    expect(await screen.findByRole('link', { name: API_CASE.title })).toHaveAttribute(
-      'href',
-      `/cases/${API_CASE.id}`,
+    await screen.findByText("No visible cases");
+    await user.click(screen.getByRole("button", { name: "New case" }));
+    await user.type(screen.getByLabelText("Case code"), "DARKNETRA-001");
+    await user.type(screen.getByLabelText("Title"), "First dashboard-created case");
+    await user.selectOptions(screen.getByLabelText("Sensitivity"), "STANDARD");
+    await user.type(screen.getByLabelText("Source authority"), "Authorized synthetic training source");
+    await user.click(screen.getByRole("button", { name: "Create case" }));
+
+    expect(await screen.findByRole("link", { name: "First dashboard-created case" })).toHaveAttribute(
+      "href",
+      `/cases/${createdCase.id}`,
     );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "http://localhost:8000/api/v1/cases",
+      expect.objectContaining({
+        body: JSON.stringify({
+          case_code: "DARKNETRA-001",
+          title: "First dashboard-created case",
+          sensitivity: "STANDARD",
+          source_authority_summary: "Authorized synthetic training source",
+        }),
+        method: "POST",
+      }),
+    );
+  });
+
+  it("renders live API cases through the retained table interface", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ items: [API_CASE], limit: 25, offset: 0, has_more: false }));
+
+    renderWithQuery(<CasesLiveView />);
+
+    expect(screen.getByTestId("async-state-loading")).toBeInTheDocument();
+    expect(await screen.findByRole("link", { name: API_CASE.title })).toHaveAttribute("href", `/cases/${API_CASE.id}`);
     expect(screen.queryByText(/fixture inventory/i)).not.toBeInTheDocument();
   });
 
-  it('shows an explicit empty state when the visible case list is empty', async () => {
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse({ items: [], limit: 25, offset: 0, has_more: false }),
-    );
+  it("shows an explicit empty state when the visible case list is empty", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ items: [], limit: 25, offset: 0, has_more: false }));
 
     renderWithQuery(<CasesLiveView />);
 
-    expect(await screen.findByText('No visible cases')).toBeInTheDocument();
+    expect(await screen.findByText("No visible cases")).toBeInTheDocument();
   });
 
-  it('shows access denied instead of fixture fallback on authorization failure', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse({ detail: 'permission denied' }, 403));
+  it("shows access denied instead of fixture fallback on authorization failure", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ detail: "permission denied" }, 403));
 
     renderWithQuery(<CasesLiveView />);
 
-    expect(await screen.findByText('Case access denied')).toBeInTheDocument();
-    expect(screen.queryByText('Alias correlation training case')).not.toBeInTheDocument();
+    expect(await screen.findByText("Case access denied")).toBeInTheDocument();
+    expect(screen.queryByText("Alias correlation training case")).not.toBeInTheDocument();
   });
 
-  it('shows an offline state when the API cannot be reached', async () => {
-    fetchMock.mockRejectedValueOnce(new TypeError('network unavailable'));
+  it("shows an offline state when the API cannot be reached", async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError("network unavailable"));
 
     renderWithQuery(<CasesLiveView />);
 
-    expect(await screen.findByText('Case service offline')).toBeInTheDocument();
+    expect(await screen.findByText("Case service offline")).toBeInTheDocument();
   });
 });
 
-describe('CaseShell', () => {
-  it('renders a live case header and its child route when the case is visible', async () => {
+describe("CaseShell", () => {
+  it("renders a live case header and its child route when the case is visible", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(API_CASE));
 
     renderWithQuery(
@@ -105,12 +143,12 @@ describe('CaseShell', () => {
       </CaseShell>,
     );
 
-    expect(await screen.findByRole('heading', { name: API_CASE.title })).toBeInTheDocument();
-    expect(screen.getByText('Child route content')).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: API_CASE.title })).toBeInTheDocument();
+    expect(screen.getByText("Child route content")).toBeInTheDocument();
   });
 
-  it('masks unknown and inaccessible cases without rendering child fixture content', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse({ detail: 'resource not found' }, 404));
+  it("masks unknown and inaccessible cases without rendering child fixture content", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ detail: "resource not found" }, 404));
 
     renderWithQuery(
       <CaseShell caseId="b4ab65f9-f6bc-46f0-94df-792892b90b83">
@@ -118,7 +156,7 @@ describe('CaseShell', () => {
       </CaseShell>,
     );
 
-    expect(await screen.findByText('Case unavailable')).toBeInTheDocument();
-    expect(screen.queryByText('Should never render')).not.toBeInTheDocument();
+    expect(await screen.findByText("Case unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("Should never render")).not.toBeInTheDocument();
   });
 });
