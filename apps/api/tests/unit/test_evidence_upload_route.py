@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
 import logging
+import os
 import secrets
 import threading
 from collections.abc import AsyncIterator
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
 import darknetra_api.routes.evidence as evidence_route
 import httpx
 import pytest
+import starlette.formparsers
 from darknetra_api.authz.policy import AuthorizationDenied, CaseNotFound
 from darknetra_api.config import Settings
 from darknetra_api.db.session import get_db_session
@@ -22,6 +26,7 @@ from darknetra_api.models.enums import GlobalRole
 from darknetra_api.models.user import User
 from darknetra_api.security.csrf import hash_csrf_token
 from darknetra_api.storage.base import ObjectStore, StoredObject
+from darknetra_api.storage.local import LocalObjectStore
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -78,11 +83,11 @@ class CapturingStore(ObjectStore):
         raise AssertionError(f"unexpected verify: {object_key} {expected_sha256}")
 
 
-def settings() -> Settings:
+def settings(*, upload_max_bytes: int = 128) -> Settings:
     return Settings(
         field_key_v1_b64=base64.b64encode(secrets.token_bytes(32)).decode(),
         field_blind_index_key_b64=base64.b64encode(secrets.token_bytes(32)).decode(),
-        evidence_upload_max_bytes=128,
+        evidence_upload_max_bytes=upload_max_bytes,
         _env_file=None,
     )
 
@@ -285,6 +290,20 @@ class CountingMultipartStream(httpx.AsyncByteStream):
             yield chunk
 
 
+class PausingMultipartStream(httpx.AsyncByteStream):
+    def __init__(self, opening: bytes) -> None:
+        self.opening = opening
+        self.paused = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __aiter__(self):
+        yield self.opening
+        for _ in range(17):
+            yield b"x" * 4096
+        self.paused.set()
+        await self.release.wait()
+
+
 @pytest.mark.asyncio
 async def test_asgi_receive_limit_cuts_off_chunked_multipart_before_parser_spooling(
     monkeypatch: pytest.MonkeyPatch,
@@ -331,6 +350,7 @@ async def test_asgi_receive_limit_cuts_off_chunked_multipart_before_parser_spool
             headers={
                 "Content-Type": f"multipart/form-data; boundary={boundary}",
                 "X-CSRF-Token": csrf,
+                "Origin": "https://web.example",
             },
             content=stream,
         )
@@ -343,6 +363,8 @@ async def test_asgi_receive_limit_cuts_off_chunked_multipart_before_parser_spool
     assert response.json() == {"detail": {"code": "UPLOAD_TOO_LARGE"}}
     assert stream.yielded < len(chunks)
     assert unrelated.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://web.example"
+    assert response.headers["access-control-allow-credentials"] == "true"
 
 
 @pytest.mark.asyncio
@@ -494,3 +516,376 @@ async def test_auth_csrf_and_case_denials_do_not_consume_multipart_body(
 
     assert response.status_code == expected_status
     assert stream.yielded == 0
+
+
+@pytest.mark.asyncio
+async def test_file_limit_plus_one_stops_body_producer_before_later_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = settings(upload_max_bytes=1024 * 1024)
+    application = create_app(
+        startup_settings_provider=lambda: runtime,
+        web_origin="https://web.example",
+    )
+    application.state.runtime_settings = runtime
+    application.state.sensitive_field_crypto = runtime.require_sensitive_field_crypto()
+    csrf = "file-limit-csrf"
+    context = SimpleNamespace(
+        user=SimpleNamespace(id=uuid4()),
+        auth_session=SimpleNamespace(csrf_token_hash=hash_csrf_token(csrf)),
+    )
+    session = FakeSession()
+    store = CapturingStore()
+
+    async def auth_provider():
+        return context
+
+    async def db_provider():
+        yield session
+
+    async def authorized(*args, **kwargs) -> None:
+        del args, kwargs
+
+    monkeypatch.setattr(evidence_route, "authorize_case", authorized)
+    application.dependency_overrides[get_current_auth_context] = auth_provider
+    application.dependency_overrides[get_db_session] = db_provider
+    application.state.evidence_object_store = store
+
+    boundary = "darknetra-file-limit-boundary"
+    opening = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="metadata"\r\n\r\n'
+        f"{metadata_json()}\r\n"
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="file"; filename="large.txt"\r\n'
+        "Content-Type: text/plain\r\n\r\n"
+    ).encode()
+    chunks = [
+        opening,
+        *([b"x" * 4096] * 256),
+        b"x",
+        *([b"later" * 819] * 10),
+        f"\r\n--{boundary}--\r\n".encode(),
+    ]
+    assert sum(map(len, chunks)) < runtime.evidence_upload_max_bytes + 64 * 1024
+    stream = CountingMultipartStream(chunks)
+    transport = httpx.ASGITransport(app=application, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+        response = await client.post(
+            f"/api/v1/cases/{uuid4()}/evidence",
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "X-CSRF-Token": csrf,
+            },
+            content=stream,
+        )
+
+    assert response.status_code == 413
+    assert response.json() == {"detail": {"code": "UPLOAD_TOO_LARGE"}}
+    assert stream.yielded < len(chunks)
+    assert store.payloads == []
+    assert session.added == []
+    assert session.committed is False
+
+
+@pytest.mark.asyncio
+async def test_valid_upload_does_not_use_starlette_spooled_temporary_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = settings()
+    application = create_app(
+        startup_settings_provider=lambda: runtime,
+        web_origin="https://web.example",
+    )
+    application.state.runtime_settings = runtime
+    application.state.sensitive_field_crypto = runtime.require_sensitive_field_crypto()
+    csrf = "no-spool-csrf"
+    context = SimpleNamespace(
+        user=SimpleNamespace(id=uuid4()),
+        auth_session=SimpleNamespace(csrf_token_hash=hash_csrf_token(csrf)),
+    )
+    store = CapturingStore()
+
+    async def auth_provider():
+        return context
+
+    async def db_provider():
+        yield FakeSession()
+
+    async def authorized(*args, **kwargs) -> None:
+        del args, kwargs
+
+    def forbid_spool(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("multipart file spooling is forbidden")
+
+    monkeypatch.setattr(evidence_route, "authorize_case", authorized)
+    monkeypatch.setattr(starlette.formparsers, "SpooledTemporaryFile", forbid_spool)
+    application.dependency_overrides[get_current_auth_context] = auth_provider
+    application.dependency_overrides[get_db_session] = db_provider
+    application.state.evidence_object_store = store
+    application.state.ingest_publisher = lambda payload: None
+    transport = httpx.ASGITransport(app=application, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+        response = await client.post(
+            f"/api/v1/cases/{uuid4()}/evidence",
+            headers={"X-CSRF-Token": csrf},
+            data={"metadata": metadata_json()},
+            files={"file": ("note.txt", b"direct staged text", "text/plain")},
+        )
+
+    assert response.status_code == 202
+    assert store.payloads == [b"direct staged text"]
+
+
+def malformed_multipart(variant: str) -> tuple[str, bytes, str]:
+    boundary = "darknetra-malformed-boundary"
+    attacker_marker = "ATTACKER-MULTIPART-MARKER"
+    if variant == "boundary_size":
+        boundary = "b" * 257
+        body = f"--{boundary}--\r\n".encode()
+    elif variant == "header_size":
+        body = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="file"; filename="'
+            f'{attacker_marker * 220}.txt"\r\n\r\nx\r\n--{boundary}--\r\n'
+        ).encode()
+    elif variant == "header_count":
+        headers = "".join(f"X-Header-{index}: value\r\n" for index in range(8))
+        body = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="metadata"\r\n'
+            f"{headers}\r\n{{}}\r\n--{boundary}--\r\n"
+        ).encode()
+    elif variant == "malformed_header":
+        body = (
+            f"--{boundary}\r\n{attacker_marker} without-colon\r\n\r\nx\r\n--{boundary}--\r\n"
+        ).encode()
+    elif variant == "after_file":
+        body = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="file"; filename="note.txt"\r\n'
+            "Content-Type: text/plain\r\n\r\ndirect staged text\r\n"
+            f"--{boundary}\r\n"
+            f"{attacker_marker} without-colon\r\n\r\nx\r\n--{boundary}--\r\n"
+        ).encode()
+    else:  # pragma: no cover - test helper guard
+        raise AssertionError(variant)
+    return boundary, body, attacker_marker
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ["boundary_size", "header_size", "header_count", "malformed_header"],
+)
+@pytest.mark.asyncio
+async def test_raw_multipart_parser_failures_are_stable_and_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    variant: str,
+) -> None:
+    runtime = settings()
+    application = create_app(
+        startup_settings_provider=lambda: runtime,
+        web_origin="https://web.example",
+    )
+    application.state.runtime_settings = runtime
+    application.state.sensitive_field_crypto = runtime.require_sensitive_field_crypto()
+    csrf = "malformed-csrf"
+    context = SimpleNamespace(
+        user=SimpleNamespace(id=uuid4()),
+        auth_session=SimpleNamespace(csrf_token_hash=hash_csrf_token(csrf)),
+    )
+
+    async def auth_provider():
+        return context
+
+    async def db_provider():
+        yield FakeSession()
+
+    async def authorized(*args, **kwargs) -> None:
+        del args, kwargs
+
+    monkeypatch.setattr(evidence_route, "authorize_case", authorized)
+    application.dependency_overrides[get_current_auth_context] = auth_provider
+    application.dependency_overrides[get_db_session] = db_provider
+    application.state.evidence_object_store = CapturingStore()
+    boundary, body, attacker_marker = malformed_multipart(variant)
+    caplog.set_level(logging.WARNING)
+    transport = httpx.ASGITransport(app=application, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+        response = await client.post(
+            f"/api/v1/cases/{uuid4()}/evidence",
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "X-CSRF-Token": csrf,
+            },
+            content=body,
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": {"code": "INVALID_MULTIPART"}}
+    assert attacker_marker not in response.text + caplog.text
+
+
+@pytest.mark.asyncio
+async def test_parser_failure_after_file_start_cleans_object_store_staging(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime = settings()
+    application = create_app(
+        startup_settings_provider=lambda: runtime,
+        web_origin="https://web.example",
+    )
+    application.state.runtime_settings = runtime
+    application.state.sensitive_field_crypto = runtime.require_sensitive_field_crypto()
+    csrf = "after-file-csrf"
+    context = SimpleNamespace(
+        user=SimpleNamespace(id=uuid4()),
+        auth_session=SimpleNamespace(csrf_token_hash=hash_csrf_token(csrf)),
+    )
+    store = LocalObjectStore(
+        tmp_path,
+        allow_trusted_volume_fallback=os.name == "nt",
+    )
+
+    async def auth_provider():
+        return context
+
+    async def db_provider():
+        yield FakeSession()
+
+    async def authorized(*args, **kwargs) -> None:
+        del args, kwargs
+
+    monkeypatch.setattr(evidence_route, "authorize_case", authorized)
+    application.dependency_overrides[get_current_auth_context] = auth_provider
+    application.dependency_overrides[get_db_session] = db_provider
+    application.state.evidence_object_store = store
+    boundary, body, _ = malformed_multipart("after_file")
+    transport = httpx.ASGITransport(app=application, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+        response = await client.post(
+            f"/api/v1/cases/{uuid4()}/evidence",
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "X-CSRF-Token": csrf,
+            },
+            content=body,
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": {"code": "INVALID_MULTIPART"}}
+    assert list((tmp_path / ".staging").iterdir()) == []
+    assert list((tmp_path / "sha256").rglob("*")) == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_upload_aborts_worker_and_removes_staging(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime = settings(upload_max_bytes=1024 * 1024)
+    application = create_app(
+        startup_settings_provider=lambda: runtime,
+        web_origin="https://web.example",
+    )
+    application.state.runtime_settings = runtime
+    application.state.sensitive_field_crypto = runtime.require_sensitive_field_crypto()
+    csrf = "cancel-csrf"
+    context = SimpleNamespace(
+        user=SimpleNamespace(id=uuid4()),
+        auth_session=SimpleNamespace(csrf_token_hash=hash_csrf_token(csrf)),
+    )
+    store = LocalObjectStore(
+        tmp_path,
+        allow_trusted_volume_fallback=os.name == "nt",
+    )
+
+    async def auth_provider():
+        return context
+
+    async def db_provider():
+        yield FakeSession()
+
+    async def authorized(*args, **kwargs) -> None:
+        del args, kwargs
+
+    monkeypatch.setattr(evidence_route, "authorize_case", authorized)
+    application.dependency_overrides[get_current_auth_context] = auth_provider
+    application.dependency_overrides[get_db_session] = db_provider
+    application.state.evidence_object_store = store
+    boundary = "darknetra-cancel-boundary"
+    opening = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="metadata"\r\n\r\n'
+        f"{metadata_json()}\r\n"
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="file"; filename="cancel.txt"\r\n'
+        "Content-Type: text/plain\r\n\r\n"
+    ).encode()
+    stream = PausingMultipartStream(opening)
+    transport = httpx.ASGITransport(app=application, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+        request_task = asyncio.create_task(
+            client.post(
+                f"/api/v1/cases/{uuid4()}/evidence",
+                headers={
+                    "Content-Type": f"multipart/form-data; boundary={boundary}",
+                    "X-CSRF-Token": csrf,
+                },
+                content=stream,
+            )
+        )
+        await asyncio.wait_for(stream.paused.wait(), timeout=2)
+        for _ in range(200):
+            if list((tmp_path / ".staging").iterdir()):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            request_task.cancel()
+            raise AssertionError("direct object-store staging did not begin")
+        request_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request_task
+
+    assert list((tmp_path / ".staging").iterdir()) == []
+    assert list((tmp_path / "sha256").rglob("*")) == []
+
+
+@pytest.mark.asyncio
+async def test_early_content_length_limit_uses_configured_cors_only() -> None:
+    runtime = settings()
+    application = create_app(
+        startup_settings_provider=lambda: runtime,
+        web_origin="https://web.example",
+    )
+    application.state.runtime_settings = runtime
+    transport = httpx.ASGITransport(app=application, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+        allowed = await client.post(
+            f"/api/v1/cases/{uuid4()}/evidence",
+            headers={
+                "Content-Length": "999999",
+                "Origin": "https://web.example",
+            },
+        )
+        untrusted = await client.post(
+            f"/api/v1/cases/{uuid4()}/evidence",
+            headers={
+                "Content-Length": "999999",
+                "Origin": "https://untrusted.example",
+            },
+        )
+
+    assert allowed.status_code == untrusted.status_code == 413
+    assert allowed.headers["access-control-allow-origin"] == "https://web.example"
+    assert allowed.headers["access-control-allow-credentials"] == "true"
+    assert "access-control-allow-origin" not in untrusted.headers

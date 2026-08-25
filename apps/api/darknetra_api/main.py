@@ -48,6 +48,7 @@ def create_app(
             del application.state.runtime_settings
 
     application = FastAPI(title="DARKNETRA API", version="0.1.0", lifespan=lifespan)
+    application.add_middleware(UploadBodyLimitMiddleware)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=[web_origin],
@@ -55,7 +56,6 @@ def create_app(
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "X-CSRF-Token", "X-Request-ID"],
     )
-    application.add_middleware(UploadBodyLimitMiddleware)
 
     @application.middleware("http")
     async def protect_sensitive_reveal_responses(request: Request, call_next):
@@ -77,6 +77,7 @@ def create_app(
         if reveal_path:
             response.headers["Cache-Control"] = "no-store"
         return response
+
     application.include_router(health_router, prefix="/api/v1")
     application.include_router(auth_router, prefix="/api/v1")
     application.include_router(cases_router, prefix="/api/v1")

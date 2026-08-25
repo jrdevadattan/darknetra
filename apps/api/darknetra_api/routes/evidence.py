@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import logging
 import re
-from functools import partial
 from typing import Annotated
 from uuid import UUID, uuid4
 
-import anyio
 from darknetra_api.authz.permissions import Permission
 from darknetra_api.authz.policy import (
     AuthorizationDenied,
@@ -17,10 +15,7 @@ from darknetra_api.authz.policy import (
 from darknetra_api.dependencies.auth import DbSession, get_current_auth_context
 from darknetra_api.middleware.upload_limit import MULTIPART_ENVELOPE_MAX_BYTES
 from darknetra_api.policy.ingestion import (
-    DEFAULT_PREFIX_BYTES,
-    EvidenceSourceMetadata,
     UploadPolicyError,
-    preserve_upload,
 )
 from darknetra_api.schemas.evidence import (
     EvidenceIngestResponse,
@@ -42,6 +37,10 @@ from darknetra_api.services.evidence_ingest import (
     IngestPublisher,
     persist_preserved_upload,
     publish_ingest_payload,
+)
+from darknetra_api.services.multipart_upload import (
+    InvalidMultipartError,
+    stream_multipart_upload,
 )
 from darknetra_api.services.sensitive_values import (
     SensitiveRevealReasonError,
@@ -65,9 +64,6 @@ from fastapi import (
     status,
 )
 from pydantic import ValidationError
-from starlette.datastructures import UploadFile
-from starlette.exceptions import HTTPException as StarletteHTTPException
-from starlette.formparsers import MultiPartException
 
 router = APIRouter(prefix="/cases/{case_id}/evidence", tags=["evidence"])
 logger = logging.getLogger(__name__)
@@ -166,59 +162,28 @@ async def ingest_evidence_route(
         if declared_length > settings.evidence_upload_max_bytes + MULTIPART_ENVELOPE_MAX_BYTES:
             raise _upload_error("UPLOAD_TOO_LARGE", status_code=413)
 
+    object_store = get_evidence_object_store(request)
     try:
-        form = await request.form(
-            max_files=1,
-            max_fields=1,
-            max_part_size=MULTIPART_ENVELOPE_MAX_BYTES,
+        metadata, preserved = await stream_multipart_upload(
+            request,
+            object_store=object_store,
+            max_bytes=settings.evidence_upload_max_bytes,
         )
-    except (MultiPartException, StarletteHTTPException) as exc:
+    except InvalidMultipartError as exc:
         raise _upload_error("INVALID_MULTIPART", status_code=400) from exc
-
-    try:
-        if set(form) != {"file", "metadata"}:
-            raise _upload_error("INVALID_MULTIPART", status_code=422)
-        file_values = form.getlist("file")
-        metadata_values = form.getlist("metadata")
-        if len(file_values) != 1 or len(metadata_values) != 1:
-            raise _upload_error("INVALID_MULTIPART", status_code=422)
-        file = file_values[0]
-        metadata_json = metadata_values[0]
-        if not isinstance(file, UploadFile) or not isinstance(metadata_json, str):
-            raise _upload_error("INVALID_MULTIPART", status_code=422)
-
-        try:
-            metadata = EvidenceSourceMetadata.model_validate_json(metadata_json)
-        except ValidationError as exc:
-            raise _upload_error("INVALID_EVIDENCE_METADATA", status_code=422) from exc
-
-        object_store = get_evidence_object_store(request)
-        try:
-            preserved = await anyio.to_thread.run_sync(
-                partial(
-                    preserve_upload,
-                    stream=file.file,
-                    object_store=object_store,
-                    metadata=metadata,
-                    filename=file.filename,
-                    declared_content_type=file.content_type,
-                    max_bytes=settings.evidence_upload_max_bytes,
-                    prefix_bytes=DEFAULT_PREFIX_BYTES,
-                )
-            )
-        except UploadPolicyError as exc:
-            status_code = 413 if exc.code == "UPLOAD_TOO_LARGE" else 415
-            raise _upload_error(exc.code, status_code=status_code) from exc
-        except ObjectKeyError as exc:
-            raise _upload_error("INVALID_OBJECT_KEY", status_code=400) from exc
-        except ObjectHashMismatchError as exc:
-            raise _upload_error("EVIDENCE_HASH_MISMATCH", status_code=409) from exc
-        except ObjectIntegrityError as exc:
-            raise _upload_error("EVIDENCE_OBJECT_INTEGRITY_FAILURE", status_code=409) from exc
-        except (ObjectStoreConfigurationError, OSError) as exc:
-            raise _upload_error("EVIDENCE_STORE_UNAVAILABLE", status_code=503) from exc
-    finally:
-        await form.close()
+    except ValidationError as exc:
+        raise _upload_error("INVALID_EVIDENCE_METADATA", status_code=422) from exc
+    except UploadPolicyError as exc:
+        status_code = 413 if exc.code == "UPLOAD_TOO_LARGE" else 415
+        raise _upload_error(exc.code, status_code=status_code) from exc
+    except ObjectKeyError as exc:
+        raise _upload_error("INVALID_OBJECT_KEY", status_code=400) from exc
+    except ObjectHashMismatchError as exc:
+        raise _upload_error("EVIDENCE_HASH_MISMATCH", status_code=409) from exc
+    except ObjectIntegrityError as exc:
+        raise _upload_error("EVIDENCE_OBJECT_INTEGRITY_FAILURE", status_code=409) from exc
+    except (ObjectStoreConfigurationError, OSError) as exc:
+        raise _upload_error("EVIDENCE_STORE_UNAVAILABLE", status_code=503) from exc
 
     crypto = getattr(request.app.state, "sensitive_field_crypto", None)
     if not isinstance(crypto, SensitiveFieldCrypto):
@@ -238,8 +203,7 @@ async def ingest_evidence_route(
         )
     except Exception as exc:  # noqa: BLE001
         logger.error(
-            "evidence persistence failed code=EVIDENCE_PERSISTENCE_FAILED "
-            "case_id=%s error_type=%s",
+            "evidence persistence failed code=EVIDENCE_PERSISTENCE_FAILED case_id=%s error_type=%s",
             case_id,
             type(exc).__name__,
         )

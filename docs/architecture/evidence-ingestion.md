@@ -3,8 +3,11 @@
 `POST /api/v1/cases/{case_id}/evidence` accepts one multipart `file` and one JSON
 `metadata` field. Case owners and collectors can upload evidence when their current
 case membership grants the same role. The endpoint applies the existing authentication,
-CSRF, forced-password-change, and case anti-enumeration rules before it asks Starlette
-to parse or spool any multipart body bytes.
+CSRF, forced-password-change, and case anti-enumeration rules before it asks for any
+body bytes. After authorization, a route-owned `python-multipart` parser accepts exactly
+one file and one JSON metadata field. It bounds the boundary, header count, header bytes,
+and metadata bytes independently and maps malformed parser input to the redacted
+`INVALID_MULTIPART` response.
 
 The file limit defaults to 100 MiB through
 `DARKNETRA_EVIDENCE_UPLOAD_MAX_BYTES`. Configuration cannot exceed 500 MiB. An ASGI
@@ -12,8 +15,12 @@ receive wrapper limits the full multipart request to the file policy plus a 64 K
 envelope allowance while bytes arrive. Crossing that boundary raises a private receive
 signal which aborts multipart parsing immediately; it is never converted into a normal
 end-of-body event. A second wrapper counts the file bytes and stops at limit plus one.
-It supplies bounded reads to the storage layer and replays the MIME inspection prefix
-without changing the stored digest.
+The parser divides ASGI messages into at most 64 KiB pieces and puts file pieces onto a
+depth-two queue. One AnyIO worker thread presents that queue as a blocking stream to the
+object store; awaited queue writes provide backpressure, so the request producer cannot
+run away from storage. No framework upload file or second whole-file temporary copy is
+created. The bounded reader replays the MIME inspection prefix without changing the
+stored digest.
 
 The classifier reads at most 64 KiB and recognizes WARC, WARC.GZ, HTML, XHTML, UTF-8
 text, JSON, CSV, ZIP, PNG, JPEG, WebP, and PDF. It rejects executable signatures,
@@ -24,11 +31,17 @@ byte for text, HTML/XHTML, CSV, and JSON. JSON additionally uses a bounded-memor
 streaming syntax validator with a fixed nesting ceiling, so a valid prefix cannot hide
 a binary or malformed tail.
 
-The API runs upload-file access and `LocalObjectStore.put_verified` in one worker thread.
-The object store promotes and verifies the content-addressed object before PostgreSQL
-receives metadata. If PostgreSQL later rejects the transaction, the API retains the
-object as an orphan. A later reconciliation process can remove unreferenced objects;
-request failure code must not remove a final object that another row may share.
+The API runs `LocalObjectStore.put_verified` in that worker thread. The worker may write
+only Task 3's owned staging file while multipart parsing continues. A completion gate
+withholds stream EOF until the complete envelope, exact part cardinality, metadata, and
+full-file classifier have succeeded. A file-policy failure stops request consumption;
+a parser error, disconnect, or task cancellation before that point rejects the gate,
+wakes the worker, waits for Task 3 cleanup, and cannot promote a final object. The object
+store promotes
+and verifies content before PostgreSQL receives metadata. If PostgreSQL later rejects
+the transaction, the API retains the now-valid final object as an orphan. A later
+reconciliation process can remove unreferenced objects; request failure code must not
+remove a final object that another row may share.
 
 One PostgreSQL commit creates the `PRESERVED` artifact, protected source fields,
 `EVIDENCE_INGESTED`, `CUSTODY_CREATED`, and a `PENDING` job. Source locator uses the

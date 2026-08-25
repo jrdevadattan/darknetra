@@ -5,6 +5,7 @@ import csv
 import json
 import re
 import zlib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -53,15 +54,9 @@ class EvidenceSourceMetadata(BaseModel):
     original_timezone: str | None = Field(default=None, min_length=1, max_length=80)
     tool_name: str | None = Field(default=None, min_length=1, max_length=120)
     tool_version: str | None = Field(default=None, min_length=1, max_length=80)
-    source_locator: str | None = Field(
-        default=None, min_length=1, max_length=8192, repr=False
-    )
-    authority_reference: str | None = Field(
-        default=None, min_length=1, max_length=4096, repr=False
-    )
-    protected_note: str | None = Field(
-        default=None, min_length=1, max_length=10000, repr=False
-    )
+    source_locator: str | None = Field(default=None, min_length=1, max_length=8192, repr=False)
+    authority_reference: str | None = Field(default=None, min_length=1, max_length=4096, repr=False)
+    protected_note: str | None = Field(default=None, min_length=1, max_length=10000, repr=False)
 
     @field_validator("captured_at")
     @classmethod
@@ -190,9 +185,7 @@ class _BoundedPrefixReplayStream:
         output = bytearray()
         if self._replay_offset < len(self._prefix):
             replay_size = min(size, len(self._prefix) - self._replay_offset)
-            output.extend(
-                self._prefix[self._replay_offset : self._replay_offset + replay_size]
-            )
+            output.extend(self._prefix[self._replay_offset : self._replay_offset + replay_size])
             self._replay_offset += replay_size
         remaining = size - len(output)
         if remaining and not self._source_eof:
@@ -542,6 +535,41 @@ class _ValidatedUploadStream:
         return b""
 
 
+class _DeferredDeclarationStream:
+    """Withhold object-store EOF until the whole multipart envelope is valid."""
+
+    def __init__(
+        self,
+        source: _ValidatedUploadStream,
+        *,
+        detected: DetectedUpload,
+        metadata_provider: Callable[[], EvidenceSourceMetadata],
+        filename: str | None,
+        declared_content_type: str | None,
+    ) -> None:
+        self._source = source
+        self._detected = detected
+        self._metadata_provider = metadata_provider
+        self._filename = filename
+        self._declared_content_type = declared_content_type
+        self.metadata: EvidenceSourceMetadata | None = None
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self._source.read(size)
+        if chunk:
+            return chunk
+        if self.metadata is None:
+            metadata = self._metadata_provider()
+            validate_declared_upload(
+                self._detected,
+                metadata=metadata,
+                filename=self._filename,
+                declared_content_type=self._declared_content_type,
+            )
+            self.metadata = metadata
+        return b""
+
+
 def _detected(source_type: EvidenceSourceType) -> DetectedUpload:
     media_type, parser_family = _DETECTED[source_type]
     return DetectedUpload(
@@ -662,9 +690,11 @@ def validate_declared_upload(
             "filename extension does not match the uploaded bytes",
         )
     declared = (declared_content_type or "").split(";", 1)[0].strip().lower()
-    if declared and declared != "application/octet-stream" and declared not in _DECLARED_MIME[
-        detected.source_type
-    ]:
+    if (
+        declared
+        and declared != "application/octet-stream"
+        and declared not in _DECLARED_MIME[detected.source_type]
+    ):
         raise UploadPolicyError(
             "DECLARED_MIME_MISMATCH",
             "declared MIME type does not match the uploaded bytes",
@@ -709,6 +739,47 @@ def preserve_upload(
     )
 
 
+def preserve_upload_after_envelope(
+    *,
+    stream: BinaryIO,
+    object_store: ObjectStore,
+    metadata_provider: Callable[[], EvidenceSourceMetadata],
+    filename: str | None,
+    declared_content_type: str | None,
+    max_bytes: int = DEFAULT_UPLOAD_MAX_BYTES,
+    prefix_bytes: int = DEFAULT_PREFIX_BYTES,
+) -> tuple[EvidenceSourceMetadata, PreservedUpload]:
+    """Preserve a stream only after its multipart envelope is declared valid."""
+
+    bounded = _BoundedPrefixReplayStream(
+        stream,
+        max_bytes=max_bytes,
+        prefix_bytes=prefix_bytes,
+    )
+    detected = detect_upload(bounded.prefix, complete=bounded.prefix_is_complete)
+    validated = _ValidatedUploadStream(bounded, detected)
+    deferred = _DeferredDeclarationStream(
+        validated,
+        detected=detected,
+        metadata_provider=metadata_provider,
+        filename=filename,
+        declared_content_type=declared_content_type,
+    )
+    stored = object_store.put_verified(deferred)
+    if not validated.finished or deferred.metadata is None:
+        raise UploadPolicyError(
+            "INVALID_UPLOAD_STREAM",
+            "object store did not consume the complete upload stream",
+        )
+    if stored.size_bytes == 0:
+        raise UploadPolicyError("EMPTY_UPLOAD", "upload must contain at least one byte")
+    return deferred.metadata, PreservedUpload(
+        stored=stored,
+        media_type=detected.media_type,
+        parser_family=detected.parser_family,
+    )
+
+
 __all__ = [
     "DEFAULT_PREFIX_BYTES",
     "DEFAULT_UPLOAD_MAX_BYTES",
@@ -720,5 +791,6 @@ __all__ = [
     "UploadPolicyError",
     "detect_upload",
     "preserve_upload",
+    "preserve_upload_after_envelope",
     "validate_declared_upload",
 ]
