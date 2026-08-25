@@ -1,6 +1,6 @@
 import importlib
-from collections.abc import Awaitable, Callable
 from typing import Any
+from uuid import UUID
 
 import pytest
 import sqlalchemy as sa
@@ -14,19 +14,20 @@ from darknetra_api.models.enums import CaseSensitivity, CaseStatus, GlobalRole
 from darknetra_api.models.user import User
 from darknetra_api.security.encryption import SensitiveFieldCrypto
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def reveal_module() -> Any:
     return importlib.import_module("darknetra_api.services.sensitive_values")
 
 
-def make_user(username: str, role: GlobalRole) -> User:
+def make_user(username: str, *roles: GlobalRole) -> User:
     return User(
         username=username,
         username_normalized=username.casefold(),
         display_name=username,
         password_hash="not-used",
-        global_roles=[role],
+        global_roles=list(roles),
         is_active=True,
         must_change_password=False,
     )
@@ -41,30 +42,33 @@ def crypto() -> SensitiveFieldCrypto:
 
 
 class FixtureProvider:
-    def __init__(self, records: dict[tuple[object, str, str, str], object]) -> None:
+    def __init__(self, records: dict[tuple[UUID, str, str, str], object]) -> None:
         self.records = records
-        self.calls = 0
+        self.calls: list[tuple[UUID, str, str, str]] = []
 
     async def __call__(
         self,
         *,
-        case_id: object,
+        case_id: UUID,
         resource_type: str,
         resource_id: str,
         field_name: str,
         session: object,
     ) -> object | None:
         del session
+        key = (case_id, resource_type, resource_id, field_name)
+        self.calls.append(key)
+        return self.records.get(key)
+
+
+class OwningFeaturePolicy:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self, **kwargs: object) -> bool:
+        del kwargs
         self.calls += 1
-        return self.records.get((case_id, resource_type, resource_id, field_name))
-
-
-PermissionPredicate = Callable[..., Awaitable[bool]]
-
-
-async def owning_feature_policy(*, actor: User, **kwargs: object) -> bool:
-    del kwargs
-    return GlobalRole.VIEWER not in actor.global_roles
+        return True
 
 
 async def clear_state() -> None:
@@ -88,32 +92,37 @@ async def clean_state() -> None:
     await clear_state()
 
 
-async def add_membership(session: object, case: Case, user: User, role: GlobalRole) -> None:
-    session.add(CaseMembership(case_id=case.id, user_id=user.id))  # type: ignore[attr-defined]
-    await session.flush()  # type: ignore[attr-defined]
-    membership = await session.scalar(  # type: ignore[attr-defined]
-        select(CaseMembership).where(
-            CaseMembership.case_id == case.id,
-            CaseMembership.user_id == user.id,
-        )
-    )
-    session.add(CaseMembershipRole(membership_id=membership.id, role=role))  # type: ignore[attr-defined]
+async def add_membership(
+    session: AsyncSession,
+    case: Case,
+    user: User,
+    role: GlobalRole,
+) -> None:
+    membership = CaseMembership(case_id=case.id, user_id=user.id)
+    session.add(membership)
+    await session.flush()
+    session.add(CaseMembershipRole(membership_id=membership.id, role=role))
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_real_case_authorization_policy_and_audit_transaction() -> None:
-    """Catches reveal authorization drifting from persisted case membership and audit behavior."""
+async def test_real_effective_roles_scoped_not_found_and_audit_transaction() -> None:
+    """Exercises persisted effective roles, scoped 404 equivalence, and audited reveal."""
     module = reveal_module()
     crypto_service = crypto()
-    resource_id = "evidence-integration-reveal"
+    visible_resource_id = "evidence-integration-reveal"
+    cross_case_resource_id = "evidence-other-case"
     plaintext = "https://integration-private.example/source"
 
     async with async_session_factory() as session:
         owner = make_user("sensitive-owner", GlobalRole.CASE_OWNER)
-        viewer = make_user("sensitive-viewer", GlobalRole.VIEWER)
+        mixed_viewer = make_user(
+            "sensitive-mixed-viewer",
+            GlobalRole.VIEWER,
+            GlobalRole.ANALYST,
+        )
         outsider = make_user("sensitive-outsider", GlobalRole.ANALYST)
-        session.add_all([owner, viewer, outsider])
+        session.add_all([owner, mixed_viewer, outsider])
         await session.flush()
         visible_case = Case(
             case_code="SENSITIVE-VISIBLE",
@@ -134,71 +143,92 @@ async def test_real_case_authorization_policy_and_audit_transaction() -> None:
         session.add_all([visible_case, hidden_case])
         await session.flush()
         await add_membership(session, visible_case, owner, GlobalRole.CASE_OWNER)
-        await add_membership(session, visible_case, viewer, GlobalRole.VIEWER)
+        await add_membership(session, visible_case, mixed_viewer, GlobalRole.VIEWER)
         await add_membership(session, hidden_case, outsider, GlobalRole.ANALYST)
         await session.commit()
 
-        stored = module.SensitiveValue(
+        visible_stored = module.SensitiveValue(
             envelope=crypto_service.encrypt(
                 plaintext,
                 purpose="evidence.source_locator",
-                resource_id=resource_id,
-            ),
-            purpose="evidence.source_locator",
+                resource_id=visible_resource_id,
+            )
+        )
+        cross_case_stored = module.SensitiveValue(
+            envelope=crypto_service.encrypt(
+                "other-case-secret",
+                purpose="evidence.source_locator",
+                resource_id=cross_case_resource_id,
+            )
         )
         provider = FixtureProvider(
             {
                 (
                     visible_case.id,
                     "evidence",
-                    resource_id,
+                    visible_resource_id,
                     "source_locator",
-                ): stored
+                ): visible_stored,
+                (
+                    hidden_case.id,
+                    "evidence",
+                    cross_case_resource_id,
+                    "source_locator",
+                ): cross_case_stored,
             }
         )
-        context = module.SensitiveRevealContext(
+        policy = OwningFeaturePolicy()
+        module.bind_sensitive_reveal_context(
+            session,
             provider=provider,
-            permission_predicate=owning_feature_policy,
+            permission_predicate=policy,
             crypto=crypto_service,
             request_id="request-integration-reveal",
         )
 
         with pytest.raises(AuthorizationDenied, match="permission denied"):
             await module.reveal_sensitive_value(
-                actor=viewer,
+                actor=mixed_viewer,
                 case_id=visible_case.id,
                 resource_type="evidence",
-                resource_id=resource_id,
+                resource_id=visible_resource_id,
                 field_name="source_locator",
-                reason="Viewer must not reveal this value",
+                reason="Mixed global roles must use effective case membership",
                 session=session,
-                context=context,
             )
 
-        with pytest.raises(CaseNotFound, match="resource not found"):
-            await module.reveal_sensitive_value(
-                actor=owner,
-                case_id=hidden_case.id,
-                resource_type="evidence",
-                resource_id=resource_id,
-                field_name="source_locator",
-                reason="Cross-case access must remain hidden",
-                session=session,
-                context=context,
-            )
+        resource_outcomes: list[tuple[type[BaseException], tuple[object, ...]]] = []
+        for resource_id in (cross_case_resource_id, "evidence-unknown"):
+            with pytest.raises(CaseNotFound) as caught:
+                await module.reveal_sensitive_value(
+                    actor=owner,
+                    case_id=visible_case.id,
+                    resource_type="evidence",
+                    resource_id=resource_id,
+                    field_name="source_locator",
+                    reason="Cross-case and unknown resources must share one outcome",
+                    session=session,
+                )
+            resource_outcomes.append((type(caught.value), caught.value.args))
+
+        assert resource_outcomes == [
+            (CaseNotFound, ("resource not found",)),
+            (CaseNotFound, ("resource not found",)),
+        ]
+        assert policy.calls == 0
 
         revealed = await module.reveal_sensitive_value(
             actor=owner,
             case_id=visible_case.id,
             resource_type="evidence",
-            resource_id=resource_id,
+            resource_id=visible_resource_id,
             field_name="source_locator",
             reason="Validate original source provenance",
             session=session,
-            context=context,
         )
 
         assert revealed == plaintext
+        assert policy.calls == 1
         event = await session.scalar(
             select(AuditEvent).where(AuditEvent.event_type == "SENSITIVE_VALUE_REVEALED")
         )
@@ -206,7 +236,7 @@ async def test_real_case_authorization_policy_and_audit_transaction() -> None:
         assert event.actor_user_id == owner.id
         assert event.case_id == visible_case.id
         assert event.resource_type == "evidence"
-        assert event.resource_id == resource_id
+        assert event.resource_id == visible_resource_id
         assert event.metadata_json == {
             "field_name": "source_locator",
             "reason": "Validate original source provenance",

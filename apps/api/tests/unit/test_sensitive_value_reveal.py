@@ -1,27 +1,31 @@
 import importlib
-from collections.abc import Awaitable, Callable
+import inspect
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from darknetra_api.authz.policy import AuthorizationDenied, CaseNotFound
 from darknetra_api.models.audit import AuditEvent
 from darknetra_api.models.enums import GlobalRole
 from darknetra_api.models.user import User
-from darknetra_api.security.encryption import SensitiveFieldCrypto
+from darknetra_api.security.encryption import (
+    SensitiveFieldCrypto,
+    SensitiveFieldDecryptionError,
+)
 
 
 def reveal_module() -> Any:
     return importlib.import_module("darknetra_api.services.sensitive_values")
 
 
-def make_user(role: GlobalRole) -> User:
+def make_user(*roles: GlobalRole) -> User:
+    label = "-".join(role.value.casefold() for role in roles)
     return User(
-        username=f"{role.value.casefold()}-user",
-        username_normalized=f"{role.value.casefold()}-user",
-        display_name=f"{role.value} User",
+        username=f"{label}-user",
+        username_normalized=f"{label}-user",
+        display_name=f"{label} User",
         password_hash="not-used",
-        global_roles=[role],
+        global_roles=list(roles),
         is_active=True,
         must_change_password=False,
     )
@@ -37,6 +41,7 @@ def crypto() -> SensitiveFieldCrypto:
 
 class FakeSession:
     def __init__(self, *, commit_error: Exception | None = None) -> None:
+        self.info: dict[str, object] = {}
         self.added: list[object] = []
         self.committed = False
         self.commit_error = commit_error
@@ -50,15 +55,35 @@ class FakeSession:
         self.committed = True
 
 
-class TrackingProvider:
-    def __init__(self, value: object | None) -> None:
-        self.value = value
+class ScopedProvider:
+    def __init__(self, records: dict[tuple[UUID, str, str, str], object]) -> None:
+        self.records = records
+        self.calls: list[tuple[UUID, str, str, str]] = []
+
+    async def __call__(
+        self,
+        *,
+        case_id: UUID,
+        resource_type: str,
+        resource_id: str,
+        field_name: str,
+        session: object,
+    ) -> object | None:
+        del session
+        key = (case_id, resource_type, resource_id, field_name)
+        self.calls.append(key)
+        return self.records.get(key)
+
+
+class TrackingPermission:
+    def __init__(self, result: bool) -> None:
+        self.result = result
         self.calls = 0
 
-    async def __call__(self, **kwargs: object) -> object | None:
+    async def __call__(self, **kwargs: object) -> bool:
         del kwargs
         self.calls += 1
-        return self.value
+        return self.result
 
 
 class TrackingCrypto:
@@ -71,123 +96,149 @@ class TrackingCrypto:
         return self.delegate.decrypt(*args, **kwargs)  # type: ignore[arg-type]
 
 
-PermissionPredicate = Callable[..., Awaitable[bool]]
-
-
-async def allow_reveal(**kwargs: object) -> bool:
-    del kwargs
-    return True
-
-
-async def deny_reveal(**kwargs: object) -> bool:
-    del kwargs
-    return False
-
-
-def make_context(
+def encrypted_value(
     *,
-    provider: TrackingProvider,
-    permission: PermissionPredicate = allow_reveal,
+    plaintext: str,
+    resource_id: str,
+    purpose: str = "evidence.source_locator",
+) -> tuple[object, SensitiveFieldCrypto]:
+    module = reveal_module()
+    crypto_service = crypto()
+    envelope = crypto_service.encrypt(plaintext, purpose=purpose, resource_id=resource_id)
+    return module.SensitiveValue(envelope=envelope), crypto_service
+
+
+def bind_context(
+    session: FakeSession,
+    *,
+    provider: ScopedProvider,
+    permission: TrackingPermission | None = None,
     crypto_service: object | None = None,
     request_id: str = "request-sensitive-reveal",
-) -> object:
-    module = reveal_module()
-    return module.SensitiveRevealContext(
+) -> None:
+    reveal_module().bind_sensitive_reveal_context(
+        session,
         provider=provider,
-        permission_predicate=permission,
+        permission_predicate=permission or TrackingPermission(True),
         crypto=crypto_service or crypto(),
         request_id=request_id,
     )
 
 
-def encrypted_value(*, plaintext: str, resource_id: str) -> tuple[object, SensitiveFieldCrypto]:
-    module = reveal_module()
-    crypto_service = crypto()
-    envelope = crypto_service.encrypt(
-        plaintext,
-        purpose="evidence.source_locator",
-        resource_id=resource_id,
-    )
-    return (
-        module.SensitiveValue(
-            envelope=envelope,
-            purpose="evidence.source_locator",
-        ),
-        crypto_service,
-    )
-
-
-@pytest.mark.asyncio
-async def test_viewer_is_denied_before_provider_lookup_or_decryption(
+def patch_case_authorization(
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    effective_roles: set[GlobalRole],
 ) -> None:
-    """Catches a permissive owning-feature predicate granting a VIEWER full-value access."""
     module = reveal_module()
 
     async def authorize(*args: object, **kwargs: object) -> None:
         del args, kwargs
 
+    async def roles(*args: object, **kwargs: object) -> set[GlobalRole]:
+        del args, kwargs
+        return effective_roles
+
     monkeypatch.setattr(module, "authorize_case", authorize)
-    resource_id = "evidence-viewer-denied"
+    monkeypatch.setattr(module, "_get_effective_case_roles", roles, raising=False)
+
+
+def test_public_reveal_signature_has_exact_seven_keyword_only_arguments() -> None:
+    """Catches dependency injection leaking into the public caller contract."""
+    signature = inspect.signature(reveal_module().reveal_sensitive_value)
+
+    assert list(signature.parameters) == [
+        "actor",
+        "case_id",
+        "resource_type",
+        "resource_id",
+        "field_name",
+        "reason",
+        "session",
+    ]
+    assert all(
+        parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        for parameter in signature.parameters.values()
+    )
+
+
+@pytest.mark.asyncio
+async def test_mixed_global_roles_with_effective_viewer_membership_is_denied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches global ANALYST masking an effective VIEWER-only case membership."""
+    module = reveal_module()
+    patch_case_authorization(monkeypatch, effective_roles={GlobalRole.VIEWER})
+    case_id = uuid4()
+    resource_id = "evidence-effective-viewer"
     stored, crypto_service = encrypted_value(plaintext="viewer-secret", resource_id=resource_id)
-    provider = TrackingProvider(stored)
+    provider = ScopedProvider({(case_id, "evidence", resource_id, "source_locator"): stored})
     tracking_crypto = TrackingCrypto(crypto_service)
+    session = FakeSession()
+    bind_context(session, provider=provider, crypto_service=tracking_crypto)
 
     with pytest.raises(AuthorizationDenied, match="permission denied"):
         await module.reveal_sensitive_value(
-            actor=make_user(GlobalRole.VIEWER),
-            case_id=uuid4(),
+            actor=make_user(GlobalRole.VIEWER, GlobalRole.ANALYST),
+            case_id=case_id,
             resource_type="evidence",
             resource_id=resource_id,
             field_name="source_locator",
             reason="Investigating source provenance",
-            session=FakeSession(),
-            context=make_context(
-                provider=provider,
-                permission=allow_reveal,
-                crypto_service=tracking_crypto,
-            ),
+            session=session,
         )
 
-    assert provider.calls == 0
+    assert len(provider.calls) == 1
     assert tracking_crypto.decrypt_calls == 0
+    assert session.added == []
 
 
 @pytest.mark.asyncio
-async def test_owning_feature_permission_predicate_can_deny_non_viewer(
+async def test_owning_feature_permission_denies_only_after_scoped_resource_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Catches the service bypassing the owning feature's resource-specific reveal policy."""
+    """Catches resource policy running before case-scoped existence is established."""
     module = reveal_module()
-
-    async def authorize(*args: object, **kwargs: object) -> None:
-        del args, kwargs
-
-    monkeypatch.setattr(module, "authorize_case", authorize)
-    provider = TrackingProvider(None)
+    patch_case_authorization(monkeypatch, effective_roles={GlobalRole.ANALYST})
+    case_id = uuid4()
+    resource_id = "evidence-policy-denied"
+    stored, crypto_service = encrypted_value(plaintext="policy-secret", resource_id=resource_id)
+    provider = ScopedProvider({(case_id, "evidence", resource_id, "source_locator"): stored})
+    permission = TrackingPermission(False)
+    tracking_crypto = TrackingCrypto(crypto_service)
+    session = FakeSession()
+    bind_context(
+        session,
+        provider=provider,
+        permission=permission,
+        crypto_service=tracking_crypto,
+    )
 
     with pytest.raises(AuthorizationDenied, match="permission denied"):
         await module.reveal_sensitive_value(
             actor=make_user(GlobalRole.ANALYST),
-            case_id=uuid4(),
+            case_id=case_id,
             resource_type="evidence",
-            resource_id="evidence-policy-denied",
+            resource_id=resource_id,
             field_name="source_locator",
             reason="Investigating source provenance",
-            session=FakeSession(),
-            context=make_context(provider=provider, permission=deny_reveal),
+            session=session,
         )
 
-    assert provider.calls == 0
+    assert len(provider.calls) == 1
+    assert permission.calls == 1
+    assert tracking_crypto.decrypt_calls == 0
 
 
 @pytest.mark.asyncio
-async def test_inaccessible_and_unknown_cases_share_not_found_outcome_before_reason_validation(
+async def test_inaccessible_and_unknown_cases_share_not_found_before_reason_or_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Catches validation or lookup leaking whether an inaccessible case exists."""
     module = reveal_module()
-    provider = TrackingProvider(None)
+    provider = ScopedProvider({})
+    session = FakeSession()
+    bind_context(session, provider=provider)
 
     async def not_found(*args: object, **kwargs: object) -> None:
         del args, kwargs
@@ -204,8 +255,7 @@ async def test_inaccessible_and_unknown_cases_share_not_found_outcome_before_rea
                 resource_id="evidence-hidden",
                 field_name="source_locator",
                 reason="short",
-                session=FakeSession(),
-                context=make_context(provider=provider),
+                session=session,
             )
         outcomes.append((type(caught.value), caught.value.args))
 
@@ -213,7 +263,7 @@ async def test_inaccessible_and_unknown_cases_share_not_found_outcome_before_rea
         (CaseNotFound, ("resource not found",)),
         (CaseNotFound, ("resource not found",)),
     ]
-    assert provider.calls == 0
+    assert provider.calls == []
 
 
 @pytest.mark.parametrize("reason", ["", " " * 20, "123456789", "x" * 501])
@@ -222,16 +272,14 @@ async def test_reason_must_be_between_10_and_500_trimmed_characters(
     monkeypatch: pytest.MonkeyPatch,
     reason: str,
 ) -> None:
-    """Catches blank, too-short, or overlong justifications reaching the decrypt boundary."""
+    """Catches invalid justifications reaching scoped lookup or decryption."""
     module = reveal_module()
+    patch_case_authorization(monkeypatch, effective_roles={GlobalRole.ANALYST})
+    provider = ScopedProvider({})
+    session = FakeSession()
+    bind_context(session, provider=provider)
 
-    async def authorize(*args: object, **kwargs: object) -> None:
-        del args, kwargs
-
-    monkeypatch.setattr(module, "authorize_case", authorize)
-    provider = TrackingProvider(None)
-
-    with pytest.raises(module.SensitiveRevealReasonError, match="10 and 500"):
+    with pytest.raises(module.SensitiveRevealReasonError, match="between 10 and 500 characters"):
         await module.reveal_sensitive_value(
             actor=make_user(GlobalRole.ANALYST),
             case_id=uuid4(),
@@ -239,36 +287,82 @@ async def test_reason_must_be_between_10_and_500_trimmed_characters(
             resource_id="evidence-invalid-reason",
             field_name="source_locator",
             reason=reason,
-            session=FakeSession(),
-            context=make_context(provider=provider),
+            session=session,
         )
 
-    assert provider.calls == 0
+    assert provider.calls == []
 
 
 @pytest.mark.asyncio
-async def test_provider_miss_uses_repository_standard_not_found_outcome(
+async def test_unknown_and_cross_case_resource_ids_share_not_found_before_predicate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Catches a case-scoped resource miss exposing a provider-specific result or error."""
+    """Catches a cross-case scoped miss becoming a distinguishable permission denial."""
     module = reveal_module()
+    patch_case_authorization(monkeypatch, effective_roles={GlobalRole.ANALYST})
+    visible_case_id = uuid4()
+    other_case_id = uuid4()
+    cross_resource_id = "evidence-other-case"
+    stored, _ = encrypted_value(plaintext="other-case-secret", resource_id=cross_resource_id)
+    provider = ScopedProvider(
+        {(other_case_id, "evidence", cross_resource_id, "source_locator"): stored}
+    )
+    permission = TrackingPermission(False)
+    session = FakeSession()
+    bind_context(session, provider=provider, permission=permission)
 
-    async def authorize(*args: object, **kwargs: object) -> None:
-        del args, kwargs
+    outcomes: list[tuple[type[BaseException], tuple[object, ...]]] = []
+    for resource_id in (cross_resource_id, "evidence-unknown"):
+        with pytest.raises(CaseNotFound) as caught:
+            await module.reveal_sensitive_value(
+                actor=make_user(GlobalRole.ANALYST),
+                case_id=visible_case_id,
+                resource_type="evidence",
+                resource_id=resource_id,
+                field_name="source_locator",
+                reason="Investigating source provenance",
+                session=session,
+            )
+        outcomes.append((type(caught.value), caught.value.args))
 
-    monkeypatch.setattr(module, "authorize_case", authorize)
+    assert outcomes == [
+        (CaseNotFound, ("resource not found",)),
+        (CaseNotFound, ("resource not found",)),
+    ]
+    assert permission.calls == 0
 
-    with pytest.raises(CaseNotFound, match="resource not found"):
+
+@pytest.mark.asyncio
+async def test_requested_field_derives_purpose_independently_of_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches provider confusion decrypting field B while authorizing and auditing field A."""
+    module = reveal_module()
+    patch_case_authorization(monkeypatch, effective_roles={GlobalRole.ANALYST})
+    case_id = uuid4()
+    resource_id = "evidence-purpose-confusion"
+    stored, crypto_service = encrypted_value(
+        plaintext="custody-secret",
+        resource_id=resource_id,
+        purpose="evidence.custody_notes",
+    )
+    provider = ScopedProvider({(case_id, "evidence", resource_id, "source_locator"): stored})
+    session = FakeSession()
+    bind_context(session, provider=provider, crypto_service=crypto_service)
+
+    with pytest.raises(SensitiveFieldDecryptionError, match="decryption failed"):
         await module.reveal_sensitive_value(
             actor=make_user(GlobalRole.ANALYST),
-            case_id=uuid4(),
+            case_id=case_id,
             resource_type="evidence",
-            resource_id="evidence-missing",
+            resource_id=resource_id,
             field_name="source_locator",
             reason="Investigating source provenance",
-            session=FakeSession(),
-            context=make_context(provider=TrackingProvider(None)),
+            session=session,
         )
+
+    assert session.added == []
+    assert session.committed is False
 
 
 @pytest.mark.parametrize("reason", ["x" * 10, "x" * 500])
@@ -279,61 +373,56 @@ async def test_reason_accepts_inclusive_policy_boundaries(
 ) -> None:
     """Catches exclusive-bound validation rejecting a policy-valid reveal reason."""
     module = reveal_module()
-
-    async def authorize(*args: object, **kwargs: object) -> None:
-        del args, kwargs
-
-    monkeypatch.setattr(module, "authorize_case", authorize)
+    patch_case_authorization(monkeypatch, effective_roles={GlobalRole.ANALYST})
+    case_id = uuid4()
     resource_id = "evidence-reason-boundary"
     stored, crypto_service = encrypted_value(plaintext="boundary-secret", resource_id=resource_id)
+    provider = ScopedProvider({(case_id, "evidence", resource_id, "source_locator"): stored})
+    session = FakeSession()
+    bind_context(session, provider=provider, crypto_service=crypto_service)
 
     revealed = await module.reveal_sensitive_value(
         actor=make_user(GlobalRole.ANALYST),
-        case_id=uuid4(),
+        case_id=case_id,
         resource_type="evidence",
         resource_id=resource_id,
         field_name="source_locator",
         reason=reason,
-        session=FakeSession(),
-        context=make_context(
-            provider=TrackingProvider(stored),
-            crypto_service=crypto_service,
-        ),
+        session=session,
     )
 
     assert revealed == "boundary-secret"
 
 
 @pytest.mark.asyncio
-async def test_success_returns_plaintext_and_commits_plaintext_free_audit(
+async def test_exact_seven_argument_call_returns_plaintext_and_commits_safe_audit(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Catches a reveal that omits its audit or copies the revealed value into durable metadata."""
+    """Catches a reveal requiring extra arguments or persisting plaintext in its audit."""
     module = reveal_module()
-
-    async def authorize(*args: object, **kwargs: object) -> None:
-        del args, kwargs
-
-    monkeypatch.setattr(module, "authorize_case", authorize)
+    patch_case_authorization(monkeypatch, effective_roles={GlobalRole.CASE_OWNER})
     plaintext = "https://private-source.example/path?token=secret"
+    case_id = uuid4()
     resource_id = "evidence-audited"
     stored, crypto_service = encrypted_value(plaintext=plaintext, resource_id=resource_id)
+    provider = ScopedProvider({(case_id, "evidence", resource_id, "source_locator"): stored})
     session = FakeSession()
+    bind_context(
+        session,
+        provider=provider,
+        crypto_service=crypto_service,
+        request_id="request-audited-reveal",
+    )
 
     revealed = await module.reveal_sensitive_value(
         actor=make_user(GlobalRole.CASE_OWNER),
-        case_id=uuid4(),
+        case_id=case_id,
         resource_type="evidence",
         resource_id=resource_id,
         field_name="source_locator",
         reason="  Verify source provenance for review  ",
         session=session,
-        context=make_context(
-            provider=TrackingProvider(stored),
-            crypto_service=crypto_service,
-            request_id="request-audited-reveal",
-        ),
     )
 
     assert revealed == plaintext
@@ -359,29 +448,24 @@ async def test_failed_audit_commit_prevents_reveal_response(
 ) -> None:
     """Catches plaintext being returned before its reveal audit is durably committed."""
     module = reveal_module()
-
-    async def authorize(*args: object, **kwargs: object) -> None:
-        del args, kwargs
-
-    monkeypatch.setattr(module, "authorize_case", authorize)
+    patch_case_authorization(monkeypatch, effective_roles={GlobalRole.CASE_OWNER})
     plaintext = "commit-must-succeed-before-return"
+    case_id = uuid4()
     resource_id = "evidence-audit-failure"
     stored, crypto_service = encrypted_value(plaintext=plaintext, resource_id=resource_id)
+    provider = ScopedProvider({(case_id, "evidence", resource_id, "source_locator"): stored})
     session = FakeSession(commit_error=RuntimeError("synthetic audit commit failure"))
+    bind_context(session, provider=provider, crypto_service=crypto_service)
 
     with pytest.raises(RuntimeError, match="synthetic audit commit failure"):
         await module.reveal_sensitive_value(
             actor=make_user(GlobalRole.CASE_OWNER),
-            case_id=uuid4(),
+            case_id=case_id,
             resource_type="evidence",
             resource_id=resource_id,
             field_name="source_locator",
             reason="Verify source provenance for review",
             session=session,
-            context=make_context(
-                provider=TrackingProvider(stored),
-                crypto_service=crypto_service,
-            ),
         )
 
     assert session.committed is False
