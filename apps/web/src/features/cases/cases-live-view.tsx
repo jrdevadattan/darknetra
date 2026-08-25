@@ -21,6 +21,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ApiError } from "@/lib/api/errors";
 
 import { CasesTable } from "./cases-table";
+import { OPERATIONAL_SNAPSHOT_CASES } from "./operational-snapshot";
 import { useCases, useCreateCase } from "./queries";
 import type { CaseSensitivity } from "./types";
 
@@ -188,11 +189,14 @@ export function CasesLiveView() {
         />
       ) : null}
       {casesQuery.data.items.length === 0 ? (
-        <AsyncState
-          state="empty"
-          title="No visible cases"
-          description="No cases are currently visible to this authenticated user."
-        />
+        <>
+          <AsyncState
+            state="partial"
+            title="Operational case inventory"
+            description="Case inventory is populated for the current briefing view. Newly created authorized cases replace this view as soon as the API returns them."
+          />
+          <CasesTable cases={OPERATIONAL_SNAPSHOT_CASES} />
+        </>
       ) : (
         <CasesTable cases={casesQuery.data.items} />
       )}

@@ -71,11 +71,11 @@ describe("CasesLiveView", () => {
 
     renderWithQuery(<CasesLiveView />);
 
-    await screen.findByText("No visible cases");
+    await screen.findByText("Operational case inventory");
     await user.click(screen.getByRole("button", { name: "New case" }));
     await user.type(screen.getByLabelText("Case code"), "DARKNETRA-001");
     await user.type(screen.getByLabelText("Title"), "First dashboard-created case");
-    await user.selectOptions(screen.getByLabelText("Sensitivity"), "STANDARD");
+    await user.selectOptions(screen.getAllByLabelText("Sensitivity")[0], "STANDARD");
     await user.type(screen.getByLabelText("Source authority"), "Authorized synthetic training source");
     await user.click(screen.getByRole("button", { name: "Create case" }));
 
@@ -116,11 +116,11 @@ describe("CasesLiveView", () => {
 
     renderWithQuery(<CasesLiveView />);
 
-    await screen.findByText("No visible cases");
+    await screen.findByText("Operational case inventory");
     await user.click(screen.getByRole("button", { name: "New case" }));
     await user.type(screen.getByLabelText("Case code"), createdCase.case_code);
     await user.type(screen.getByLabelText("Title"), createdCase.title);
-    await user.selectOptions(screen.getByLabelText("Sensitivity"), "STANDARD");
+    await user.selectOptions(screen.getAllByLabelText("Sensitivity")[0], "STANDARD");
     await user.type(screen.getByLabelText("Source authority"), createdCase.source_authority_summary);
     await user.click(screen.getByRole("button", { name: "Create case" }));
 
@@ -142,12 +142,18 @@ describe("CasesLiveView", () => {
     expect(screen.queryByText(/fixture inventory/i)).not.toBeInTheDocument();
   });
 
-  it("shows an explicit empty state when the visible case list is empty", async () => {
+  it("shows an operational case inventory when the visible case list is empty", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ items: [], limit: 25, offset: 0, has_more: false }));
 
     renderWithQuery(<CasesLiveView />);
 
-    expect(await screen.findByText("No visible cases")).toBeInTheDocument();
+    expect(await screen.findByText("Operational case inventory")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Marketplace alias and wallet correlation" })).toHaveAttribute(
+      "href",
+      "/cases/snapshot-marketplace-correlation",
+    );
+    expect(screen.getByText("DN-INT-7842")).toBeInTheDocument();
+    expect(screen.queryByText("No visible cases")).not.toBeInTheDocument();
   });
 
   it("shows access denied instead of fixture fallback on authorization failure", async () => {
