@@ -376,6 +376,10 @@ Use `http://localhost:3000/auth/v2/login` when `DARKNETRA_WEB_ORIGIN` is `http:/
 | `DARKNETRA_DATABASE_URL` | Yes | PostgreSQL SQLAlchemy URL |
 | `DARKNETRA_WEB_ORIGIN` | Yes | Exact browser origin for CORS and origin validation |
 | `DARKNETRA_JWT_SIGNING_KEY_B64` | Auth required | Secret base64 value decoding to exactly 32 random bytes |
+| `DARKNETRA_FIELD_KEY_V1_B64` | Sensitive fields / migration | Legacy v1 encryption key; runtime secret decoding to exactly 32 bytes |
+| `DARKNETRA_FIELD_KEYRING_B64_JSON` | Sensitive fields / rotation | Runtime-secret JSON mapping retained key versions to 32-byte Base64 keys |
+| `DARKNETRA_FIELD_BLIND_INDEX_KEY_B64` | Sensitive fields | Separate runtime-secret 32-byte HMAC key for equality indexes |
+| `DARKNETRA_FIELD_ACTIVE_KEY_VERSION` | Sensitive fields | Non-secret version selected for new ciphertext; must exist in the runtime keyring |
 | `DARKNETRA_POSTGRES_PASSWORD` | Docker | PostgreSQL development password interpolation |
 | `DARKNETRA_API_BASE_URL` | Web server | Next.js server-to-API URL |
 | `NEXT_PUBLIC_DARKNETRA_API_BASE_URL` | Browser | Browser-visible API URL; never a secret |

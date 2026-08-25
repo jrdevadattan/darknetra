@@ -4,10 +4,10 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from darknetra_api.security.encryption import (
-    SensitiveFieldConfigurationError,
     SensitiveFieldCrypto,
     decode_key_b64,
 )
+from darknetra_api.security.keyring import SensitiveFieldKeyring, validate_keyring_b64_json
 
 _FIELD_KEY_V1_VARIABLE = "DARKNETRA_FIELD_KEY_V1_B64"
 _BLIND_INDEX_KEY_VARIABLE = "DARKNETRA_FIELD_BLIND_INDEX_KEY_B64"
@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     web_origin: str = "http://localhost:3000"
     jwt_signing_key_b64: str = ""
     field_key_v1_b64: str = Field(default="", repr=False)
+    field_keyring_b64_json: str = Field(default="", repr=False)
     field_blind_index_key_b64: str = Field(default="", repr=False)
     field_active_key_version: str = "v1"
 
@@ -42,33 +43,20 @@ class Settings(BaseSettings):
         return self.jwt_signing_key_b64
 
     def require_sensitive_field_crypto(self) -> SensitiveFieldCrypto:
-        if not self.field_key_v1_b64:
-            raise SensitiveFieldConfigurationError(
-                f"{_FIELD_KEY_V1_VARIABLE} must be configured"
-            )
-        if not self.field_blind_index_key_b64:
-            raise SensitiveFieldConfigurationError(
-                f"{_BLIND_INDEX_KEY_VARIABLE} must be configured"
-            )
-        return SensitiveFieldCrypto(
-            field_keys={
-                "v1": decode_key_b64(
-                    self.field_key_v1_b64,
-                    variable=_FIELD_KEY_V1_VARIABLE,
-                )
-            },
-            active_key_version=self.field_active_key_version,
-            blind_index_key=decode_key_b64(
-                self.field_blind_index_key_b64,
-                variable=_BLIND_INDEX_KEY_VARIABLE,
-            ),
-        )
+        return SensitiveFieldKeyring.from_settings(self).crypto()
 
     @field_validator("field_key_v1_b64")
     @classmethod
     def validate_field_key_v1_b64(cls, value: str) -> str:
         if value:
             decode_key_b64(value, variable=_FIELD_KEY_V1_VARIABLE)
+        return value
+
+    @field_validator("field_keyring_b64_json")
+    @classmethod
+    def validate_field_keyring_b64_json(cls, value: str) -> str:
+        if value:
+            validate_keyring_b64_json(value)
         return value
 
     @field_validator("field_blind_index_key_b64")

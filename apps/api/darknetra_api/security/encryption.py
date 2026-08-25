@@ -3,6 +3,7 @@ import binascii
 import hashlib
 import hmac
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
@@ -11,6 +12,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 KEY_BYTES = 32
 NONCE_BYTES = 12
+_KEY_VERSION_PATTERN = re.compile(r"^v[1-9][0-9]*$")
 
 
 class SensitiveFieldConfigurationError(ValueError):
@@ -19,6 +21,10 @@ class SensitiveFieldConfigurationError(ValueError):
 
 class SensitiveFieldDecryptionError(ValueError):
     """Raised when an encrypted sensitive field cannot be authenticated."""
+
+
+class UnknownKeyVersionError(SensitiveFieldDecryptionError):
+    """Raised when an envelope names a key version absent from the runtime keyring."""
 
 
 @dataclass(frozen=True)
@@ -47,7 +53,11 @@ class SensitiveFieldCrypto:
         blind_index_key: bytes,
     ) -> None:
         keys = dict(field_keys)
+        if not keys:
+            raise SensitiveFieldConfigurationError("at least one field key must be configured")
         for version, key in keys.items():
+            if not isinstance(version, str) or not _KEY_VERSION_PATTERN.fullmatch(version):
+                raise SensitiveFieldConfigurationError("invalid sensitive field key version")
             self._validate_key(key, label=f"field key {version!r}")
         self._validate_key(blind_index_key, label="blind index key")
         if active_key_version not in keys:
@@ -56,6 +66,14 @@ class SensitiveFieldCrypto:
         self._field_keys = keys
         self._active_key_version = active_key_version
         self._blind_index_key = blind_index_key
+
+    @property
+    def active_key_version(self) -> str:
+        return self._active_key_version
+
+    @property
+    def key_versions(self) -> frozenset[str]:
+        return frozenset(self._field_keys)
 
     def __repr__(self) -> str:
         return (
@@ -80,6 +98,11 @@ class SensitiveFieldCrypto:
     def decrypt(self, value: EncryptedValue, *, purpose: str, resource_id: str) -> str:
         try:
             key = self._field_keys[value.key_version]
+        except KeyError:
+            raise UnknownKeyVersionError(
+                f"unknown sensitive field key version {value.key_version!r}"
+            ) from None
+        try:
             nonce = base64.b64decode(value.nonce_b64, validate=True)
             ciphertext = base64.b64decode(value.ciphertext_b64, validate=True)
             plaintext = AESGCM(key).decrypt(
@@ -92,7 +115,7 @@ class SensitiveFieldCrypto:
                 ),
             )
             return plaintext.decode("utf-8")
-        except (InvalidTag, KeyError, UnicodeDecodeError, binascii.Error, TypeError, ValueError):
+        except (InvalidTag, UnicodeDecodeError, binascii.Error, TypeError, ValueError):
             raise SensitiveFieldDecryptionError("sensitive field decryption failed") from None
 
     def blind_index(self, plaintext: str, *, purpose: str) -> str:

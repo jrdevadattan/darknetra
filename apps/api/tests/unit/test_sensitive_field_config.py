@@ -1,8 +1,12 @@
 import base64
+import json
 
 import pytest
 from darknetra_api.config import Settings
-from darknetra_api.security.encryption import SensitiveFieldConfigurationError
+from darknetra_api.security.encryption import (
+    SensitiveFieldConfigurationError,
+    SensitiveFieldCrypto,
+)
 from pydantic import ValidationError
 
 
@@ -14,14 +18,17 @@ def test_sensitive_field_settings_load_from_explicit_environment_variables(
     monkeypatch,
 ) -> None:
     field_key = encoded_key(0x11)
+    keyring = json.dumps({"v1": field_key, "v2": encoded_key(0x33)})
     blind_index_key = encoded_key(0x22)
     monkeypatch.setenv("DARKNETRA_FIELD_KEY_V1_B64", field_key)
+    monkeypatch.setenv("DARKNETRA_FIELD_KEYRING_B64_JSON", keyring)
     monkeypatch.setenv("DARKNETRA_FIELD_BLIND_INDEX_KEY_B64", blind_index_key)
     monkeypatch.setenv("DARKNETRA_FIELD_ACTIVE_KEY_VERSION", "v7")
 
     settings = Settings(_env_file=None)
 
     assert settings.field_key_v1_b64 == field_key
+    assert settings.field_keyring_b64_json == keyring
     assert settings.field_blind_index_key_b64 == blind_index_key
     assert settings.field_active_key_version == "v7"
 
@@ -32,17 +39,20 @@ def test_sensitive_field_active_key_version_defaults_to_v1() -> None:
 
 def test_sensitive_field_keys_are_redacted_from_settings_repr() -> None:
     field_key = encoded_key(0x33)
+    keyring = json.dumps({"v1": field_key, "v2": encoded_key(0x55)})
     blind_index_key = encoded_key(0x44)
 
     rendered = repr(
         Settings(
             field_key_v1_b64=field_key,
+            field_keyring_b64_json=keyring,
             field_blind_index_key_b64=blind_index_key,
             _env_file=None,
         )
     )
 
     assert field_key not in rendered
+    assert keyring not in rendered
     assert blind_index_key not in rendered
 
 
@@ -95,6 +105,68 @@ def test_sensitive_field_crypto_factory_decodes_runtime_settings() -> None:
         )
         == "factory secret"
     )
+
+
+def test_sensitive_field_crypto_factory_supports_multiple_key_versions() -> None:
+    settings = Settings(
+        field_keyring_b64_json=json.dumps(
+            {"v1": encoded_key(0x11), "v2": encoded_key(0x33)}
+        ),
+        field_active_key_version="v2",
+        field_blind_index_key_b64=encoded_key(0x22),
+        _env_file=None,
+    )
+    v1_crypto = SensitiveFieldCrypto(
+        field_keys={"v1": bytes([0x11]) * 32},
+        active_key_version="v1",
+        blind_index_key=bytes([0x22]) * 32,
+    )
+    old_value = v1_crypto.encrypt(
+        "old secret",
+        purpose="custody.notes",
+        resource_id="record-a",
+    )
+
+    service = settings.require_sensitive_field_crypto()
+    new_value = service.encrypt(
+        "new secret",
+        purpose="custody.notes",
+        resource_id="record-b",
+    )
+
+    assert new_value.key_version == "v2"
+    assert (
+        service.decrypt(old_value, purpose="custody.notes", resource_id="record-a")
+        == "old secret"
+    )
+
+
+def test_sensitive_field_crypto_factory_rejects_unconfigured_active_version() -> None:
+    settings = Settings(
+        field_keyring_b64_json=json.dumps({"v1": encoded_key(0x11)}),
+        field_active_key_version="v2",
+        field_blind_index_key_b64=encoded_key(0x22),
+        _env_file=None,
+    )
+
+    with pytest.raises(
+        SensitiveFieldConfigurationError,
+        match="active field key version is not configured",
+    ):
+        settings.require_sensitive_field_crypto()
+
+
+def test_sensitive_field_settings_reject_invalid_versioned_key_material() -> None:
+    rejected_key = base64.b64encode(b"sensitive-but-short").decode("ascii")
+
+    with pytest.raises(ValidationError) as caught:
+        Settings(
+            field_keyring_b64_json=json.dumps({"v2": rejected_key}),
+            _env_file=None,
+        ).require_sensitive_field_crypto()
+
+    assert "exactly 32 bytes" in str(caught.value)
+    assert rejected_key not in str(caught.value)
 
 
 @pytest.mark.parametrize(
