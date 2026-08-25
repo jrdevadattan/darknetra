@@ -101,6 +101,12 @@ def test_database_credentials_are_redacted_from_settings_repr() -> None:
     assert owner_password not in rendered
 
 
+def test_application_database_engine_hides_bound_parameters() -> None:
+    from darknetra_api.db.session import engine
+
+    assert engine.sync_engine.hide_parameters is True
+
+
 def test_evidence_store_path_is_redacted_and_trusted_fallback_defaults_off() -> None:
     sensitive_path = Path("/internal/evidence/store/location")
     settings = Settings(evidence_store_root=sensitive_path, _env_file=None)

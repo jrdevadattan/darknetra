@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from functools import partial
 from typing import Annotated
@@ -58,20 +59,42 @@ from darknetra_api.storage.local import LocalObjectStore
 from fastapi import (
     APIRouter,
     Depends,
-    File,
-    Form,
     HTTPException,
     Request,
     Response,
-    UploadFile,
     status,
 )
 from pydantic import ValidationError
+from starlette.datastructures import UploadFile
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.formparsers import MultiPartException
 
 router = APIRouter(prefix="/cases/{case_id}/evidence", tags=["evidence"])
+logger = logging.getLogger(__name__)
 _REVEAL_PATH_PATTERN = re.compile(
     r"^/api/v1/cases/[^/]+/evidence/[^/]+/sensitive/[^/]+/[^/]+/reveal/?$"
 )
+_UPLOAD_OPENAPI = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["metadata", "file"],
+                    "properties": {
+                        "metadata": {
+                            "type": "string",
+                            "description": "JSON-encoded evidence source metadata",
+                        },
+                        "file": {"type": "string", "format": "binary"},
+                    },
+                }
+            }
+        },
+    }
+}
 
 
 def is_sensitive_reveal_path(path: str) -> bool:
@@ -109,14 +132,17 @@ def _upload_error(code: str, *, status_code: int) -> HTTPException:
     return HTTPException(status_code=status_code, detail={"code": code})
 
 
-@router.post("", response_model=EvidenceIngestResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "",
+    response_model=EvidenceIngestResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    openapi_extra=_UPLOAD_OPENAPI,
+)
 async def ingest_evidence_route(
     case_id: UUID,
     request: Request,
     context: Annotated[AuthContext, Depends(get_current_auth_context)],
     db: DbSession,
-    file: Annotated[UploadFile, File(...)],
-    metadata_json: Annotated[str, Form(alias="metadata")],
 ) -> EvidenceIngestResponse:
     _require_csrf(request, context)
     try:
@@ -141,53 +167,83 @@ async def ingest_evidence_route(
             raise _upload_error("UPLOAD_TOO_LARGE", status_code=413)
 
     try:
-        metadata = EvidenceSourceMetadata.model_validate_json(metadata_json)
-    except ValidationError as exc:
-        raise _upload_error("INVALID_EVIDENCE_METADATA", status_code=422) from exc
-
-    object_store = get_evidence_object_store(request)
-    publisher = get_ingest_publisher(request)
-    try:
-        preserved = await anyio.to_thread.run_sync(
-            partial(
-                preserve_upload,
-                stream=file.file,
-                object_store=object_store,
-                metadata=metadata,
-                filename=file.filename,
-                declared_content_type=file.content_type,
-                max_bytes=settings.evidence_upload_max_bytes,
-                prefix_bytes=DEFAULT_PREFIX_BYTES,
-            )
+        form = await request.form(
+            max_files=1,
+            max_fields=1,
+            max_part_size=MULTIPART_ENVELOPE_MAX_BYTES,
         )
-    except UploadPolicyError as exc:
-        status_code = 413 if exc.code == "UPLOAD_TOO_LARGE" else 415
-        raise _upload_error(exc.code, status_code=status_code) from exc
-    except ObjectKeyError as exc:
-        raise _upload_error("INVALID_OBJECT_KEY", status_code=400) from exc
-    except ObjectHashMismatchError as exc:
-        raise _upload_error("EVIDENCE_HASH_MISMATCH", status_code=409) from exc
-    except ObjectIntegrityError as exc:
-        raise _upload_error("EVIDENCE_OBJECT_INTEGRITY_FAILURE", status_code=409) from exc
-    except (ObjectStoreConfigurationError, OSError) as exc:
-        raise _upload_error("EVIDENCE_STORE_UNAVAILABLE", status_code=503) from exc
+    except (MultiPartException, StarletteHTTPException) as exc:
+        raise _upload_error("INVALID_MULTIPART", status_code=400) from exc
+
+    try:
+        if set(form) != {"file", "metadata"}:
+            raise _upload_error("INVALID_MULTIPART", status_code=422)
+        file_values = form.getlist("file")
+        metadata_values = form.getlist("metadata")
+        if len(file_values) != 1 or len(metadata_values) != 1:
+            raise _upload_error("INVALID_MULTIPART", status_code=422)
+        file = file_values[0]
+        metadata_json = metadata_values[0]
+        if not isinstance(file, UploadFile) or not isinstance(metadata_json, str):
+            raise _upload_error("INVALID_MULTIPART", status_code=422)
+
+        try:
+            metadata = EvidenceSourceMetadata.model_validate_json(metadata_json)
+        except ValidationError as exc:
+            raise _upload_error("INVALID_EVIDENCE_METADATA", status_code=422) from exc
+
+        object_store = get_evidence_object_store(request)
+        try:
+            preserved = await anyio.to_thread.run_sync(
+                partial(
+                    preserve_upload,
+                    stream=file.file,
+                    object_store=object_store,
+                    metadata=metadata,
+                    filename=file.filename,
+                    declared_content_type=file.content_type,
+                    max_bytes=settings.evidence_upload_max_bytes,
+                    prefix_bytes=DEFAULT_PREFIX_BYTES,
+                )
+            )
+        except UploadPolicyError as exc:
+            status_code = 413 if exc.code == "UPLOAD_TOO_LARGE" else 415
+            raise _upload_error(exc.code, status_code=status_code) from exc
+        except ObjectKeyError as exc:
+            raise _upload_error("INVALID_OBJECT_KEY", status_code=400) from exc
+        except ObjectHashMismatchError as exc:
+            raise _upload_error("EVIDENCE_HASH_MISMATCH", status_code=409) from exc
+        except ObjectIntegrityError as exc:
+            raise _upload_error("EVIDENCE_OBJECT_INTEGRITY_FAILURE", status_code=409) from exc
+        except (ObjectStoreConfigurationError, OSError) as exc:
+            raise _upload_error("EVIDENCE_STORE_UNAVAILABLE", status_code=503) from exc
     finally:
-        await file.close()
+        await form.close()
 
     crypto = getattr(request.app.state, "sensitive_field_crypto", None)
     if not isinstance(crypto, SensitiveFieldCrypto):
         raise _upload_error("SENSITIVE_FIELD_CRYPTO_UNAVAILABLE", status_code=503)
-    result = await persist_preserved_upload(
-        db,
-        case_id=case_id,
-        actor_user_id=context.user.id,
-        metadata=metadata,
-        preserved=preserved,
-        crypto=crypto,
-        request_id=request.headers.get("X-Request-ID") or str(uuid4()),
-        pipeline_version=settings.evidence_ingest_pipeline_version,
-        publisher=publisher,
-    )
+    publisher = get_ingest_publisher(request)
+    try:
+        result = await persist_preserved_upload(
+            db,
+            case_id=case_id,
+            actor_user_id=context.user.id,
+            metadata=metadata,
+            preserved=preserved,
+            crypto=crypto,
+            request_id=request.headers.get("X-Request-ID") or str(uuid4()),
+            pipeline_version=settings.evidence_ingest_pipeline_version,
+            publisher=publisher,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "evidence persistence failed code=EVIDENCE_PERSISTENCE_FAILED "
+            "case_id=%s error_type=%s",
+            case_id,
+            type(exc).__name__,
+        )
+        raise _upload_error("EVIDENCE_PERSISTENCE_FAILED", status_code=503) from None
     return EvidenceIngestResponse(
         evidence=PreservedEvidenceRead(
             id=result.evidence_id,

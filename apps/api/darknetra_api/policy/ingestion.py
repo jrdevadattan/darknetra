@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 import csv
 import json
 import re
@@ -20,6 +21,7 @@ DEFAULT_UPLOAD_MAX_BYTES = 100 * MIB
 HARD_UPLOAD_MAX_BYTES = 500 * MIB
 DEFAULT_PREFIX_BYTES = 64 * 1024
 _READ_CHUNK_BYTES = 64 * 1024
+_MAX_JSON_NESTING = 256
 
 
 class EvidenceSourceType(StrEnum):
@@ -214,6 +216,332 @@ class _BoundedPrefixReplayStream:
         return chunk
 
 
+class _StreamingJsonValidator:
+    """Validate JSON syntax incrementally with constant token memory."""
+
+    def __init__(self) -> None:
+        self._root_state = "value"
+        self._stack: list[list[str]] = []
+        self._mode = "normal"
+        self._string_is_key = False
+        self._unicode_remaining = 0
+        self._literal_remaining = ""
+        self._number_state = ""
+
+    def feed(self, text: str) -> None:
+        offset = 0
+        while offset < len(text):
+            character = text[offset]
+            consumed = self._feed_character(character)
+            if consumed:
+                offset += 1
+
+    def finish(self) -> None:
+        if self._mode == "number":
+            if self._number_state not in {"zero", "integer", "fraction", "exponent"}:
+                self._malformed()
+            self._mode = "normal"
+            self._complete_value()
+        if self._mode != "normal" or self._stack or self._root_state != "end":
+            self._malformed()
+
+    def _feed_character(self, character: str) -> bool:
+        if self._mode == "string":
+            if character == '"':
+                self._mode = "normal"
+                if self._string_is_key:
+                    self._stack[-1][1] = "colon"
+                else:
+                    self._complete_value()
+            elif character == "\\":
+                self._mode = "string_escape"
+            elif ord(character) < 0x20:
+                self._malformed()
+            return True
+
+        if self._mode == "string_escape":
+            if character == "u":
+                self._mode = "string_unicode"
+                self._unicode_remaining = 4
+            elif character in '"\\/bfnrt':
+                self._mode = "string"
+            else:
+                self._malformed()
+            return True
+
+        if self._mode == "string_unicode":
+            if character not in "0123456789abcdefABCDEF":
+                self._malformed()
+            self._unicode_remaining -= 1
+            if self._unicode_remaining == 0:
+                self._mode = "string"
+            return True
+
+        if self._mode == "literal":
+            if not self._literal_remaining or character != self._literal_remaining[0]:
+                self._malformed()
+            self._literal_remaining = self._literal_remaining[1:]
+            if not self._literal_remaining:
+                self._mode = "normal"
+                self._complete_value()
+            return True
+
+        if self._mode == "number":
+            return self._feed_number_character(character)
+
+        if character in " \t\r\n":
+            return True
+        if self._root_state == "end" and not self._stack:
+            self._malformed()
+        if character == "{":
+            self._require_value_position()
+            self._push("object", "key_or_end")
+            return True
+        if character == "[":
+            self._require_value_position()
+            self._push("array", "value_or_end")
+            return True
+        if character == '"':
+            if self._expects_object_key():
+                self._string_is_key = True
+            else:
+                self._require_value_position()
+                self._string_is_key = False
+            self._mode = "string"
+            return True
+        if character == "}":
+            self._close("object", {"key_or_end", "comma_or_end"})
+            return True
+        if character == "]":
+            self._close("array", {"value_or_end", "comma_or_end"})
+            return True
+        if character == ":":
+            if not self._stack or self._stack[-1] != ["object", "colon"]:
+                self._malformed()
+            self._stack[-1][1] = "value"
+            return True
+        if character == ",":
+            if not self._stack or self._stack[-1][1] != "comma_or_end":
+                self._malformed()
+            self._stack[-1][1] = "key" if self._stack[-1][0] == "object" else "value"
+            return True
+        if character in "tfn":
+            self._require_value_position()
+            self._mode = "literal"
+            self._literal_remaining = {
+                "t": "rue",
+                "f": "alse",
+                "n": "ull",
+            }[character]
+            return True
+        if character == "-" or character in "0123456789":
+            self._require_value_position()
+            self._mode = "number"
+            if character == "-":
+                self._number_state = "minus"
+            elif character == "0":
+                self._number_state = "zero"
+            else:
+                self._number_state = "integer"
+            return True
+        self._malformed()
+
+    def _feed_number_character(self, character: str) -> bool:
+        state = self._number_state
+        if state == "minus":
+            if character == "0":
+                self._number_state = "zero"
+            elif character in "123456789":
+                self._number_state = "integer"
+            else:
+                self._malformed()
+            return True
+        if state == "zero":
+            if character == ".":
+                self._number_state = "fraction_start"
+                return True
+            if character in "eE":
+                self._number_state = "exponent_start"
+                return True
+            return self._finish_number_and_reprocess()
+        if state == "integer":
+            if character in "0123456789":
+                return True
+            if character == ".":
+                self._number_state = "fraction_start"
+                return True
+            if character in "eE":
+                self._number_state = "exponent_start"
+                return True
+            return self._finish_number_and_reprocess()
+        if state == "fraction_start":
+            if character not in "0123456789":
+                self._malformed()
+            self._number_state = "fraction"
+            return True
+        if state == "fraction":
+            if character in "0123456789":
+                return True
+            if character in "eE":
+                self._number_state = "exponent_start"
+                return True
+            return self._finish_number_and_reprocess()
+        if state == "exponent_start":
+            if character in "+-":
+                self._number_state = "exponent_sign"
+            elif character in "0123456789":
+                self._number_state = "exponent"
+            else:
+                self._malformed()
+            return True
+        if state == "exponent_sign":
+            if character not in "0123456789":
+                self._malformed()
+            self._number_state = "exponent"
+            return True
+        if state == "exponent":
+            if character in "0123456789":
+                return True
+            return self._finish_number_and_reprocess()
+        self._malformed()
+
+    def _finish_number_and_reprocess(self) -> bool:
+        self._mode = "normal"
+        self._complete_value()
+        return False
+
+    def _expects_object_key(self) -> bool:
+        return bool(
+            self._stack
+            and self._stack[-1][0] == "object"
+            and self._stack[-1][1] in {"key_or_end", "key"}
+        )
+
+    def _require_value_position(self) -> None:
+        if not self._stack:
+            if self._root_state != "value":
+                self._malformed()
+            return
+        kind, state = self._stack[-1]
+        if kind == "array" and state in {"value_or_end", "value"}:
+            return
+        if kind == "object" and state == "value":
+            return
+        self._malformed()
+
+    def _push(self, kind: str, state: str) -> None:
+        if len(self._stack) >= _MAX_JSON_NESTING:
+            self._malformed()
+        self._stack.append([kind, state])
+
+    def _close(self, kind: str, allowed_states: set[str]) -> None:
+        if (
+            not self._stack
+            or self._stack[-1][0] != kind
+            or self._stack[-1][1] not in allowed_states
+        ):
+            self._malformed()
+        self._stack.pop()
+        self._complete_value()
+
+    def _complete_value(self) -> None:
+        if not self._stack:
+            if self._root_state != "value":
+                self._malformed()
+            self._root_state = "end"
+            return
+        kind, state = self._stack[-1]
+        if kind == "array" and state in {"value_or_end", "value"}:
+            self._stack[-1][1] = "comma_or_end"
+            return
+        if kind == "object" and state == "value":
+            self._stack[-1][1] = "comma_or_end"
+            return
+        self._malformed()
+
+    @staticmethod
+    def _malformed() -> None:
+        raise UploadPolicyError("MALFORMED_MEDIA", "malformed JSON upload")
+
+
+class _StreamingTextValidator:
+    def __init__(self, *, validate_json: bool) -> None:
+        self._decoder = codecs.getincrementaldecoder("utf-8-sig")("strict")
+        self._characters = 0
+        self._disallowed_controls = 0
+        self._json = _StreamingJsonValidator() if validate_json else None
+
+    def feed(self, chunk: bytes) -> None:
+        try:
+            text = self._decoder.decode(chunk, final=False)
+        except UnicodeDecodeError as exc:
+            raise UploadPolicyError(
+                "UNSUPPORTED_MEDIA_TYPE",
+                "text upload is not valid UTF-8",
+            ) from exc
+        self._observe(text)
+
+    def finish(self) -> None:
+        try:
+            text = self._decoder.decode(b"", final=True)
+        except UnicodeDecodeError as exc:
+            raise UploadPolicyError(
+                "UNSUPPORTED_MEDIA_TYPE",
+                "text upload is not valid UTF-8",
+            ) from exc
+        self._observe(text)
+        if self._disallowed_controls > max(1, self._characters // 100):
+            raise UploadPolicyError(
+                "UNSUPPORTED_MEDIA_TYPE",
+                "text upload contains binary control bytes",
+            )
+        if self._json is not None:
+            self._json.finish()
+
+    def _observe(self, text: str) -> None:
+        if "\x00" in text:
+            raise UploadPolicyError(
+                "UNSUPPORTED_MEDIA_TYPE",
+                "text upload contains a NUL byte",
+            )
+        self._characters += len(text)
+        self._disallowed_controls += sum(
+            ord(character) < 32 and character not in "\t\r\n\f" for character in text
+        )
+        if self._json is not None:
+            self._json.feed(text)
+
+
+class _ValidatedUploadStream:
+    def __init__(self, source: _BoundedPrefixReplayStream, detected: DetectedUpload) -> None:
+        self._source = source
+        self._validator = (
+            _StreamingTextValidator(validate_json=detected.source_type is EvidenceSourceType.JSON)
+            if detected.source_type
+            in {
+                EvidenceSourceType.HTML,
+                EvidenceSourceType.XHTML,
+                EvidenceSourceType.TEXT,
+                EvidenceSourceType.JSON,
+                EvidenceSourceType.CSV,
+            }
+            else None
+        )
+        self.finished = False
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self._source.read(size)
+        if chunk:
+            if self._validator is not None:
+                self._validator.feed(chunk)
+            return chunk
+        if not self.finished:
+            if self._validator is not None:
+                self._validator.finish()
+            self.finished = True
+        return b""
+
+
 def _detected(source_type: EvidenceSourceType) -> DetectedUpload:
     media_type, parser_family = _DETECTED[source_type]
     return DetectedUpload(
@@ -223,9 +551,10 @@ def _detected(source_type: EvidenceSourceType) -> DetectedUpload:
     )
 
 
-def _decoded_text(prefix: bytes) -> str | None:
+def _decoded_text(prefix: bytes, *, complete: bool) -> str | None:
     try:
-        value = prefix.decode("utf-8-sig")
+        decoder = codecs.getincrementaldecoder("utf-8-sig")("strict")
+        value = decoder.decode(prefix, final=complete)
     except UnicodeDecodeError:
         return None
     if "\x00" in value:
@@ -282,7 +611,7 @@ def detect_upload(prefix: bytes, *, complete: bool) -> DetectedUpload:
     if prefix.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")):
         return _detected(EvidenceSourceType.ZIP)
 
-    text = _decoded_text(prefix)
+    text = _decoded_text(prefix, complete=complete)
     if text is None:
         raise UploadPolicyError("UNSUPPORTED_MEDIA_TYPE", "binary upload type is not supported")
     stripped = text.lstrip()
@@ -364,7 +693,13 @@ def preserve_upload(
         filename=filename,
         declared_content_type=declared_content_type,
     )
-    stored = object_store.put_verified(bounded)
+    validated = _ValidatedUploadStream(bounded, detected)
+    stored = object_store.put_verified(validated)
+    if not validated.finished:
+        raise UploadPolicyError(
+            "INVALID_UPLOAD_STREAM",
+            "object store did not consume the complete upload stream",
+        )
     if stored.size_bytes == 0:
         raise UploadPolicyError("EMPTY_UPLOAD", "upload must contain at least one byte")
     return PreservedUpload(

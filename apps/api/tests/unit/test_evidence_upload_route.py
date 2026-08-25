@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
+import logging
 import secrets
 import threading
 from collections.abc import AsyncIterator
@@ -11,6 +13,7 @@ from uuid import uuid4
 import darknetra_api.routes.evidence as evidence_route
 import httpx
 import pytest
+from darknetra_api.authz.policy import AuthorizationDenied, CaseNotFound
 from darknetra_api.config import Settings
 from darknetra_api.db.session import get_db_session
 from darknetra_api.dependencies.auth import get_current_auth_context
@@ -19,6 +22,7 @@ from darknetra_api.models.enums import GlobalRole
 from darknetra_api.models.user import User
 from darknetra_api.security.csrf import hash_csrf_token
 from darknetra_api.storage.base import ObjectStore, StoredObject
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 
@@ -89,6 +93,31 @@ def metadata_json() -> str:
         '"acquisition_method":"fixture","captured_at":"2026-08-25T10:30:00Z",'
         '"source_locator":"https://example.test/private"}'
     )
+
+
+def test_upload_openapi_describes_the_manual_multipart_contract() -> None:
+    application = create_app(
+        startup_settings_provider=settings,
+        web_origin="https://web.example",
+    )
+
+    operation = application.openapi()["paths"]["/api/v1/cases/{case_id}/evidence"]["post"]
+    request_body = operation["requestBody"]
+    schema = request_body["content"]["multipart/form-data"]["schema"]
+
+    assert request_body["required"] is True
+    assert schema == {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["metadata", "file"],
+        "properties": {
+            "metadata": {
+                "type": "string",
+                "description": "JSON-encoded evidence source metadata",
+            },
+            "file": {"type": "string", "format": "binary"},
+        },
+    }
 
 
 @pytest.fixture
@@ -205,6 +234,46 @@ def test_successful_upload_returns_only_redacted_accepted_metadata(upload_client
         assert forbidden not in serialized
 
 
+def test_unexpected_persistence_failure_returns_and_logs_only_redacted_error(
+    upload_client,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client, store, csrf = upload_client
+    exception_secret = "ciphertext-and-blind-index-must-not-leak"
+
+    async def fail_persistence(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError(exception_secret)
+
+    monkeypatch.setattr(evidence_route, "persist_preserved_upload", fail_persistence)
+    caplog.set_level(logging.ERROR, logger=evidence_route.__name__)
+
+    response = client.post(
+        f"/api/v1/cases/{uuid4()}/evidence",
+        headers={"X-CSRF-Token": csrf},
+        data={"metadata": metadata_json()},
+        files={"file": ("note.txt", b"orphaned safe text", "text/plain")},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": {"code": "EVIDENCE_PERSISTENCE_FAILED"}}
+    assert store.payloads == [b"orphaned safe text"]
+    rendered = response.text + caplog.text
+    for forbidden in (
+        exception_secret,
+        "https://example.test/private",
+        "ciphertext",
+        "blind_index",
+        "object_key",
+        "evidence-store",
+        "redis://",
+    ):
+        assert forbidden not in rendered
+    assert "code=EVIDENCE_PERSISTENCE_FAILED" in caplog.text
+    assert "error_type=RuntimeError" in caplog.text
+
+
 class CountingMultipartStream(httpx.AsyncByteStream):
     def __init__(self, chunks: list[bytes]) -> None:
         self.chunks = chunks
@@ -274,3 +343,154 @@ async def test_asgi_receive_limit_cuts_off_chunked_multipart_before_parser_spool
     assert response.json() == {"detail": {"code": "UPLOAD_TOO_LARGE"}}
     assert stream.yielded < len(chunks)
     assert unrelated.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_oversized_epilogue_aborts_before_storage_commit_or_publish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = settings()
+    application = create_app(
+        startup_settings_provider=lambda: runtime,
+        web_origin="https://web.example",
+    )
+    application.state.runtime_settings = runtime
+    application.state.sensitive_field_crypto = runtime.require_sensitive_field_crypto()
+    store = CapturingStore()
+    session = FakeSession()
+    published: list[dict[str, str]] = []
+    csrf = "epilogue-csrf"
+    context = SimpleNamespace(
+        user=SimpleNamespace(id=uuid4()),
+        auth_session=SimpleNamespace(csrf_token_hash=hash_csrf_token(csrf)),
+    )
+
+    async def auth_provider():
+        return context
+
+    async def db_provider():
+        yield session
+
+    async def authorized(*args, **kwargs) -> None:
+        del args, kwargs
+
+    async def publisher(payload: dict[str, str]) -> None:
+        published.append(payload)
+
+    monkeypatch.setattr(evidence_route, "authorize_case", authorized)
+    application.dependency_overrides[get_current_auth_context] = auth_provider
+    application.dependency_overrides[get_db_session] = db_provider
+    application.state.evidence_object_store = store
+    application.state.ingest_publisher = publisher
+
+    boundary = "darknetra-epilogue-boundary"
+    complete_parts = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="metadata"\r\n\r\n'
+        f"{metadata_json()}\r\n"
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="file"; filename="note.txt"\r\n'
+        "Content-Type: text/plain\r\n\r\n"
+        "ok\r\n"
+        f"--{boundary}--\r\n"
+    ).encode()
+    chunks = [complete_parts, *([b"x" * 4096] * 17)]
+    stream = CountingMultipartStream(chunks)
+    transport = httpx.ASGITransport(app=application, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+        response = await client.post(
+            f"/api/v1/cases/{uuid4()}/evidence",
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "X-CSRF-Token": csrf,
+            },
+            content=stream,
+        )
+
+    assert response.status_code == 413
+    assert response.json() == {"detail": {"code": "UPLOAD_TOO_LARGE"}}
+    assert stream.yielded < len(chunks)
+    assert store.payloads == []
+    assert session.added == []
+    assert session.committed is False
+    assert published == []
+
+
+@pytest.mark.parametrize(
+    ("denial", "csrf_header", "expected_status"),
+    [
+        ("unauthenticated", None, 401),
+        ("bad_csrf", "wrong-csrf", 403),
+        ("viewer", "preauth-csrf", 403),
+        ("cross_case", "preauth-csrf", 404),
+        ("nonexistent_case", "preauth-csrf", 404),
+    ],
+)
+@pytest.mark.asyncio
+async def test_auth_csrf_and_case_denials_do_not_consume_multipart_body(
+    monkeypatch: pytest.MonkeyPatch,
+    denial: str,
+    csrf_header: str | None,
+    expected_status: int,
+) -> None:
+    runtime = settings()
+    application = create_app(
+        startup_settings_provider=lambda: runtime,
+        web_origin="https://web.example",
+    )
+    application.state.runtime_settings = runtime
+    application.state.sensitive_field_crypto = runtime.require_sensitive_field_crypto()
+    csrf = "preauth-csrf"
+    context = SimpleNamespace(
+        user=SimpleNamespace(id=uuid4()),
+        auth_session=SimpleNamespace(csrf_token_hash=hash_csrf_token(csrf)),
+    )
+
+    async def auth_provider():
+        if denial == "unauthenticated":
+            raise HTTPException(status_code=401, detail="authentication required")
+        return context
+
+    async def db_provider():
+        yield FakeSession()
+
+    async def denied_authorization(*args, **kwargs) -> None:
+        del args, kwargs
+        if denial == "viewer":
+            raise AuthorizationDenied("permission denied")
+        if denial in {"cross_case", "nonexistent_case"}:
+            raise CaseNotFound("resource not found")
+
+    monkeypatch.setattr(evidence_route, "authorize_case", denied_authorization)
+    application.dependency_overrides[get_current_auth_context] = auth_provider
+    application.dependency_overrides[get_db_session] = db_provider
+    application.state.evidence_object_store = CapturingStore()
+
+    boundary = "darknetra-preauth-boundary"
+    multipart = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="metadata"\r\n\r\n'
+        f"{json.dumps({'payload': 'x' * 1024})}\r\n"
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="file"; filename="note.txt"\r\n'
+        "Content-Type: text/plain\r\n\r\n"
+        f"{'body' * 1024}\r\n"
+        f"--{boundary}--\r\n"
+    ).encode()
+    chunks = [multipart[index : index + 256] for index in range(0, len(multipart), 256)]
+    stream = CountingMultipartStream(chunks)
+    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    if csrf_header is not None:
+        headers["X-CSRF-Token"] = csrf_header
+    transport = httpx.ASGITransport(app=application, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+        response = await client.post(
+            f"/api/v1/cases/{uuid4()}/evidence",
+            headers=headers,
+            content=stream,
+        )
+
+    assert response.status_code == expected_status
+    assert stream.yielded == 0

@@ -9,6 +9,10 @@ MULTIPART_ENVELOPE_MAX_BYTES = 64 * 1024
 _UPLOAD_PATH = re.compile(r"^/api/v1/cases/[^/]+/evidence/?$")
 
 
+class _UploadBodyOverflow(BaseException):
+    """Private receive signal that must escape request parsing immediately."""
+
+
 class UploadBodyLimitMiddleware:
     """Bound the upload route while ASGI request bytes are still arriving."""
 
@@ -42,32 +46,20 @@ class UploadBodyLimitMiddleware:
                 return
 
         received = 0
-        overflow = False
-
         async def limited_receive() -> Message:
-            nonlocal overflow, received
-            if overflow:
-                return {"type": "http.request", "body": b"", "more_body": False}
+            nonlocal received
             message = await receive()
             if message["type"] == "http.request":
                 body = message.get("body", b"")
                 received += len(body)
                 if received > request_limit:
-                    overflow = True
-                    return {"type": "http.request", "body": b"", "more_body": False}
+                    raise _UploadBodyOverflow
             return message
 
-        pending_messages: list[Message] = []
-
-        async def buffered_send(message: Message) -> None:
-            pending_messages.append(message)
-
-        await self.app(scope, limited_receive, buffered_send)
-        if overflow:
+        try:
+            await self.app(scope, limited_receive, send)
+        except _UploadBodyOverflow:
             await self._reject(scope, send, code="UPLOAD_TOO_LARGE", status_code=413)
-            return
-        for message in pending_messages:
-            await send(message)
 
     @staticmethod
     async def _reject(scope: Scope, send: Send, *, code: str, status_code: int) -> None:

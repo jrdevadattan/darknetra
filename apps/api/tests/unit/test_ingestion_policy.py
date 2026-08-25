@@ -3,6 +3,8 @@ from __future__ import annotations
 import gzip
 import hashlib
 import io
+import os
+from pathlib import Path
 
 import pytest
 from darknetra_api.models.evidence import EvidenceSourceClass
@@ -14,6 +16,7 @@ from darknetra_api.policy.ingestion import (
     preserve_upload,
 )
 from darknetra_api.storage.base import StoredObject
+from darknetra_api.storage.local import LocalObjectStore
 
 
 class RecordingStream(io.BytesIO):
@@ -124,6 +127,108 @@ def test_streaming_limit_aborts_at_limit_plus_one_without_whole_file_read() -> N
     assert caught.value.code == "UPLOAD_TOO_LARGE"
     assert stream.tell() == 101
     assert -1 not in stream.read_sizes
+
+
+@pytest.mark.parametrize("invalid_offset", [64, 99])
+def test_text_validation_rejects_binary_bytes_after_the_detection_prefix(
+    invalid_offset: int,
+) -> None:
+    payload = b"a" * invalid_offset + b"\x00\xffMZTAIL"
+    store = CapturingStore()
+
+    with pytest.raises(UploadPolicyError) as caught:
+        preserve_upload(
+            stream=RecordingStream(payload),
+            object_store=store,
+            metadata=metadata(EvidenceSourceType.TEXT),
+            filename="a.txt",
+            declared_content_type="text/plain",
+            max_bytes=1024,
+            prefix_bytes=64,
+        )
+
+    assert caught.value.code == "UNSUPPORTED_MEDIA_TYPE"
+    assert store.payload == b""
+
+
+def test_json_validation_rejects_malformed_tail_after_the_detection_prefix() -> None:
+    payload = b'{"payload":"' + b"a" * 96 + b'" BROKEN'
+    store = CapturingStore()
+
+    with pytest.raises(UploadPolicyError) as caught:
+        preserve_upload(
+            stream=RecordingStream(payload),
+            object_store=store,
+            metadata=metadata(EvidenceSourceType.JSON),
+            filename="a.json",
+            declared_content_type="application/json",
+            max_bytes=1024,
+            prefix_bytes=64,
+        )
+
+    assert caught.value.code == "MALFORMED_MEDIA"
+    assert store.payload == b""
+
+
+def test_text_detection_allows_utf8_code_point_split_at_prefix_boundary() -> None:
+    payload = b"a" * 63 + "é after boundary".encode()
+    store = CapturingStore()
+
+    result = preserve_upload(
+        stream=RecordingStream(payload),
+        object_store=store,
+        metadata=metadata(EvidenceSourceType.TEXT),
+        filename="a.txt",
+        declared_content_type="text/plain",
+        max_bytes=1024,
+        prefix_bytes=64,
+    )
+
+    assert result.media_type == "text/plain"
+    assert store.payload == payload
+
+
+def test_json_validation_rejects_non_ascii_number_digits_after_prefix() -> None:
+    payload = b'{"payload":"' + b"a" * 96 + '","number":١}'.encode()
+    store = CapturingStore()
+
+    with pytest.raises(UploadPolicyError) as caught:
+        preserve_upload(
+            stream=RecordingStream(payload),
+            object_store=store,
+            metadata=metadata(EvidenceSourceType.JSON),
+            filename="a.json",
+            declared_content_type="application/json",
+            max_bytes=1024,
+            prefix_bytes=64,
+        )
+
+    assert caught.value.code == "MALFORMED_MEDIA"
+    assert store.payload == b""
+
+
+def test_late_text_validation_failure_leaves_real_store_staging_empty(
+    tmp_path: Path,
+) -> None:
+    store = LocalObjectStore(
+        tmp_path,
+        allow_trusted_volume_fallback=os.name == "nt",
+    )
+    payload = b"valid prefix" * 16 + b"\x00binary tail"
+
+    with pytest.raises(UploadPolicyError):
+        preserve_upload(
+            stream=RecordingStream(payload),
+            object_store=store,
+            metadata=metadata(EvidenceSourceType.TEXT),
+            filename="a.txt",
+            declared_content_type="text/plain",
+            max_bytes=1024,
+            prefix_bytes=64,
+        )
+
+    assert list((tmp_path / ".staging").iterdir()) == []
+    assert list((tmp_path / "sha256").rglob("*")) == []
 
 
 @pytest.mark.parametrize(

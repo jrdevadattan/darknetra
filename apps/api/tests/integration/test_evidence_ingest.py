@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import secrets
 from datetime import UTC, datetime
 from pathlib import Path
@@ -259,7 +260,7 @@ async def test_metadata_conflict_rolls_back_every_row_but_retains_promoted_orpha
         max_bytes=1024,
     )
     async with async_session_factory() as session:
-        with pytest.raises(IntegrityError):
+        with pytest.raises(IntegrityError) as caught:
             await persist_preserved_upload(
                 session,
                 case_id=case_id,
@@ -270,6 +271,8 @@ async def test_metadata_conflict_rolls_back_every_row_but_retains_promoted_orpha
                 request_id="conflict",
                 publisher=lambda payload: None,
             )
+
+    assert "SQL parameters hidden due to hide_parameters=True" in str(caught.value)
 
     async with async_session_factory() as session:
         assert await session.scalar(sa.select(sa.func.count()).select_from(EvidenceArtifact)) == 1
@@ -282,7 +285,10 @@ async def test_metadata_conflict_rolls_back_every_row_but_retains_promoted_orpha
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_real_upload_route_enforces_auth_csrf_role_and_case_scope(tmp_path: Path) -> None:
+async def test_real_upload_route_enforces_auth_csrf_role_and_case_scope(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     store = LocalObjectStore(tmp_path)
     async with async_session_factory() as session:
         collector = user("route-collector", GlobalRole.COLLECTOR)
@@ -378,6 +384,48 @@ async def test_real_upload_route_enforces_auth_csrf_role_and_case_scope(tmp_path
             )
             assert accepted.status_code == 202
             assert accepted.json()["job"]["status"] == "PENDING"
+
+            caplog.clear()
+            caplog.set_level(logging.ERROR, logger="darknetra_api.routes.evidence")
+            conflict = await client.post(
+                f"/api/v1/cases/{visible_id}/evidence",
+                headers={"X-CSRF-Token": collector_csrf},
+                **request_parts("https://example.test/accepted"),
+            )
+            assert conflict.status_code == 503
+            assert conflict.json() == {
+                "detail": {"code": "EVIDENCE_PERSISTENCE_FAILED"}
+            }
+            rendered = conflict.text + caplog.text
+            for forbidden in (
+                "https://example.test/accepted",
+                "route authority",
+                "ciphertext",
+                "blind_index",
+                "object_key",
+                str(tmp_path),
+                "redis://",
+            ):
+                assert forbidden not in rendered
+            assert "code=EVIDENCE_PERSISTENCE_FAILED" in caplog.text
+            assert "error_type=IntegrityError" in caplog.text
+
+        async with async_session_factory() as session:
+            assert await session.scalar(
+                sa.select(sa.func.count()).select_from(EvidenceArtifact)
+            ) == 1
+            assert await session.scalar(
+                sa.select(sa.func.count()).select_from(EvidenceSensitiveValue)
+            ) == 2
+            assert await session.scalar(
+                sa.select(sa.func.count()).select_from(AuditEvent)
+            ) == 1
+            assert await session.scalar(
+                sa.select(sa.func.count()).select_from(CustodyEvent)
+            ) == 1
+            assert await session.scalar(
+                sa.select(sa.func.count()).select_from(AnalysisJob)
+            ) == 1
     finally:
         del app.state.evidence_object_store
         del app.state.ingest_publisher
