@@ -60,6 +60,14 @@ class SensitiveFieldCrypto:
                 raise SensitiveFieldConfigurationError("invalid sensitive field key version")
             self._validate_key(key, label=f"field key {version!r}")
         self._validate_key(blind_index_key, label="blind index key")
+        if len(set(keys.values())) != len(keys):
+            raise SensitiveFieldConfigurationError(
+                "field encryption keys must use distinct key material"
+            )
+        if blind_index_key in keys.values():
+            raise SensitiveFieldConfigurationError(
+                "blind index key must differ from every field encryption key"
+            )
         if active_key_version not in keys:
             raise SensitiveFieldConfigurationError("active field key version is not configured")
 

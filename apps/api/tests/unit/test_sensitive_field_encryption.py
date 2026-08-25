@@ -127,6 +127,40 @@ def test_constructor_rejects_non_32_byte_keys() -> None:
         )
 
 
+def test_constructor_rejects_duplicate_encryption_key_material_without_disclosure() -> None:
+    reused_key = key(0x51)
+
+    with pytest.raises(
+        SensitiveFieldConfigurationError,
+        match="field encryption keys must use distinct key material",
+    ) as caught:
+        SensitiveFieldCrypto(
+            field_keys={"v1": reused_key, "v2": reused_key},
+            active_key_version="v2",
+            blind_index_key=key(0x52),
+        )
+
+    assert repr(reused_key) not in str(caught.value)
+    assert repr(reused_key) not in repr(caught.value)
+
+
+def test_constructor_rejects_blind_index_key_reuse_without_disclosure() -> None:
+    reused_key = key(0x61)
+
+    with pytest.raises(
+        SensitiveFieldConfigurationError,
+        match="blind index key must differ from every field encryption key",
+    ) as caught:
+        SensitiveFieldCrypto(
+            field_keys={"v1": reused_key},
+            active_key_version="v1",
+            blind_index_key=reused_key,
+        )
+
+    assert repr(reused_key) not in str(caught.value)
+    assert repr(reused_key) not in repr(caught.value)
+
+
 def test_service_repr_errors_and_logs_do_not_expose_secrets(caplog: pytest.LogCaptureFixture) -> None:
     service = crypto()
     plaintext = "never-emit-this-plaintext"

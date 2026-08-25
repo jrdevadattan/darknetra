@@ -169,6 +169,50 @@ def test_sensitive_field_settings_reject_invalid_versioned_key_material() -> Non
     assert rejected_key not in str(caught.value)
 
 
+def test_sensitive_field_factory_rejects_duplicate_decoded_key_material() -> None:
+    reused_key = encoded_key(0x71)
+    base64_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    final_character = base64_alphabet.index(reused_key[-2])
+    alternate_encoding = (
+        reused_key[:-2] + base64_alphabet[final_character ^ 0x01] + reused_key[-1]
+    )
+    assert alternate_encoding != reused_key
+    assert base64.b64decode(alternate_encoding, validate=True) == base64.b64decode(
+        reused_key, validate=True
+    )
+    settings = Settings(
+        field_keyring_b64_json=json.dumps(
+            {"v1": reused_key, "v2": alternate_encoding}
+        ),
+        field_active_key_version="v2",
+        field_blind_index_key_b64=encoded_key(0x72),
+        _env_file=None,
+    )
+
+    with pytest.raises(
+        SensitiveFieldConfigurationError,
+        match="field encryption keys must use distinct key material",
+    ) as caught:
+        settings.require_sensitive_field_crypto()
+
+    assert reused_key not in str(caught.value)
+    assert reused_key not in repr(caught.value)
+    assert alternate_encoding not in str(caught.value)
+    assert alternate_encoding not in repr(caught.value)
+
+
+def test_sensitive_field_settings_reject_duplicate_json_version_members() -> None:
+    first_key = encoded_key(0x81)
+    second_key = encoded_key(0x82)
+    duplicate_members = f'{{"v1":"{first_key}","v1":"{second_key}"}}'
+
+    with pytest.raises(ValidationError, match="duplicate key version") as caught:
+        Settings(field_keyring_b64_json=duplicate_members, _env_file=None)
+
+    assert first_key not in str(caught.value)
+    assert second_key not in str(caught.value)
+
+
 @pytest.mark.parametrize(
     ("configured_key", "missing_variable"),
     [

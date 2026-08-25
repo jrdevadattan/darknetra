@@ -192,7 +192,7 @@ def validate_keyring_b64_json(value: str) -> None:
 
 def _parse_json_mapping(value: str) -> dict[str, str]:
     try:
-        payload: Any = json.loads(value)
+        payload: Any = json.loads(value, object_pairs_hook=_unique_json_object)
     except (TypeError, json.JSONDecodeError) as exc:
         raise SensitiveFieldConfigurationError(
             f"{_KEYRING_VARIABLE} must be a JSON object"
@@ -204,6 +204,17 @@ def _parse_json_mapping(value: str) -> dict[str, str]:
         raise SensitiveFieldConfigurationError(
             f"{_KEYRING_VARIABLE} must map key versions to base64 strings"
         )
+    return payload
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for version, encoded in pairs:
+        if version in payload:
+            raise SensitiveFieldConfigurationError(
+                f"{_KEYRING_VARIABLE} contains a duplicate key version"
+            )
+        payload[version] = encoded
     return payload
 
 
