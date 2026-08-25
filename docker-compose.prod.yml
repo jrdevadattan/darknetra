@@ -1,0 +1,24 @@
+services:
+  api:
+    environment:
+      DARKNETRA_ENVIRONMENT: production
+      DARKNETRA_BUILD_VERSION: ${DARKNETRA_BUILD_VERSION:?build version required}
+      DARKNETRA_WEB_ORIGIN: ${DARKNETRA_PUBLIC_ORIGIN:?public origin required}
+    ports:
+      - "${DARKNETRA_BIND_IP:-127.0.0.1}:${DARKNETRA_API_PORT:-38001}:8000"
+
+  worker:
+    environment:
+      DARKNETRA_ENVIRONMENT: production
+      DARKNETRA_BUILD_VERSION: ${DARKNETRA_BUILD_VERSION:?build version required}
+      DARKNETRA_WEB_ORIGIN: ${DARKNETRA_PUBLIC_ORIGIN:?public origin required}
+
+  web:
+    build:
+      args:
+        NEXT_PUBLIC_DARKNETRA_API_BASE_URL: ${DARKNETRA_PUBLIC_ORIGIN:?public origin required}
+    environment:
+      DARKNETRA_API_BASE_URL: http://api:8000
+      NEXT_PUBLIC_DARKNETRA_API_BASE_URL: ${DARKNETRA_PUBLIC_ORIGIN:?public origin required}
+    ports:
+      - "${DARKNETRA_BIND_IP:-127.0.0.1}:${DARKNETRA_WEB_PORT:-38000}:3000"
