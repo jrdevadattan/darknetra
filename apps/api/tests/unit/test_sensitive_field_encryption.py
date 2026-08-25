@@ -8,6 +8,8 @@ from darknetra_api.security.encryption import (
     SensitiveFieldDecryptionError,
     decode_key_b64,
 )
+from hypothesis import given
+from hypothesis import strategies as st
 
 
 def key(byte: int) -> bytes:
@@ -147,3 +149,52 @@ def test_service_repr_errors_and_logs_do_not_expose_secrets(caplog: pytest.LogCa
     assert plaintext not in str(caught.value)
     assert plaintext not in repr(caught.value)
     assert plaintext not in caplog.text
+
+
+@given(plaintext=st.text(max_size=256))
+def test_hypothesis_utf8_round_trip_and_envelope_byte_lengths(plaintext: str) -> None:
+    service = crypto()
+
+    encrypted = service.encrypt(
+        plaintext,
+        purpose="evidence.source_locator",
+        resource_id="evidence-001",
+    )
+
+    assert len(base64.b64decode(encrypted.nonce_b64)) == 12
+    assert len(base64.b64decode(encrypted.ciphertext_b64)) == len(plaintext.encode("utf-8")) + 16
+    assert (
+        service.decrypt(
+            encrypted,
+            purpose="evidence.source_locator",
+            resource_id="evidence-001",
+        )
+        == plaintext
+    )
+
+
+@given(plaintext=st.text(max_size=128), tamper_nonce=st.booleans(), data=st.data())
+def test_hypothesis_single_byte_tampering_always_fails_authentication(
+    plaintext: str,
+    tamper_nonce: bool,
+    data: st.DataObject,
+) -> None:
+    service = crypto()
+    encrypted = service.encrypt(
+        plaintext,
+        purpose="wallet.value",
+        resource_id="wallet-1",
+    )
+    encoded = encrypted.nonce_b64 if tamper_nonce else encrypted.ciphertext_b64
+    tampered = bytearray(base64.b64decode(encoded))
+    offset = data.draw(st.integers(min_value=0, max_value=len(tampered) - 1))
+    tampered[offset] ^= 0x01
+    tampered_b64 = base64.b64encode(tampered).decode("ascii")
+    value = EncryptedValue(
+        key_version=encrypted.key_version,
+        nonce_b64=tampered_b64 if tamper_nonce else encrypted.nonce_b64,
+        ciphertext_b64=encrypted.ciphertext_b64 if tamper_nonce else tampered_b64,
+    )
+
+    with pytest.raises(SensitiveFieldDecryptionError):
+        service.decrypt(value, purpose="wallet.value", resource_id="wallet-1")
