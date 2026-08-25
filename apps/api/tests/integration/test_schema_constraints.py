@@ -14,6 +14,10 @@ from sqlalchemy.exc import IntegrityError
 async def _clear_schema() -> None:
     async with async_session_factory() as session:
         for table in (
+            "custody_events",
+            "evidence_derivations",
+            "evidence_sensitive_values",
+            "evidence_artifacts",
             "jobs",
             "audit_events",
             "case_membership_roles",

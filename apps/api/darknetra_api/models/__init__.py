@@ -2,6 +2,12 @@ from darknetra_api.models.audit import AuditEvent
 from darknetra_api.models.auth_session import AuthSession
 from darknetra_api.models.case import Case
 from darknetra_api.models.case_membership import CaseMembership, CaseMembershipRole
+from darknetra_api.models.custody import CustodyEvent
+from darknetra_api.models.evidence import (
+    EvidenceArtifact,
+    EvidenceDerivation,
+    EvidenceSensitiveValue,
+)
 from darknetra_api.models.job import AnalysisJob
 from darknetra_api.models.user import User
 
@@ -12,6 +18,10 @@ metadata_models = (
     CaseMembership,
     CaseMembershipRole,
     AuditEvent,
+    EvidenceArtifact,
+    EvidenceSensitiveValue,
+    EvidenceDerivation,
+    CustodyEvent,
     AnalysisJob,
 )
 
@@ -22,6 +32,10 @@ __all__ = [
     "Case",
     "CaseMembership",
     "CaseMembershipRole",
+    "CustodyEvent",
+    "EvidenceArtifact",
+    "EvidenceDerivation",
+    "EvidenceSensitiveValue",
     "User",
     "metadata_models",
 ]

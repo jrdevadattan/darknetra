@@ -187,12 +187,15 @@ def test_keyring_snapshots_source_mapping_before_validation_and_storage() -> Non
 def test_keyring_and_rotation_result_repr_redact_all_sensitive_material() -> None:
     """Catches maintenance object repr exposing keys, ciphertext, or blind indexes."""
     old_crypto = crypto(active_version="v1")
+    from darknetra_api.security.purposes import compose_sensitive_field_purpose
+
+    purpose = compose_sensitive_field_purpose("custody_event", "note")
     original = old_crypto.encrypt(
         "repr secret",
-        purpose="custody.notes",
+        purpose=purpose,
         resource_id="record-a",
     )
-    blind_index = old_crypto.blind_index("repr secret", purpose="custody.notes")
+    blind_index = old_crypto.blind_index("repr secret", purpose=purpose)
     keyring = SensitiveFieldKeyring(
         keys={"v1": key(0x11), "v2": key(0x22)},
         active_version="v2",
@@ -201,7 +204,7 @@ def test_keyring_and_rotation_result_repr_redact_all_sensitive_material() -> Non
     result = rotate_sensitive_field(
         value=original,
         blind_index=blind_index,
-        purpose="custody.notes",
+        purpose=purpose,
         resource_id="record-a",
         keyring=keyring,
     )
@@ -212,4 +215,7 @@ def test_keyring_and_rotation_result_repr_redact_all_sensitive_material() -> Non
     assert repr(key(0x33)) not in rendered
     assert original.nonce_b64 not in rendered
     assert original.ciphertext_b64 not in rendered
+    assert result.value.nonce_b64 not in rendered
+    assert result.value.ciphertext_b64 not in rendered
+    assert "repr secret" not in rendered
     assert blind_index not in rendered

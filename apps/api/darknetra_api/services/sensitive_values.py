@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
@@ -14,6 +13,7 @@ from darknetra_api.models.case_membership import CaseMembership, CaseMembershipR
 from darknetra_api.models.enums import GlobalRole
 from darknetra_api.models.user import User
 from darknetra_api.security.encryption import EncryptedValue, SensitiveFieldCrypto
+from darknetra_api.security.purposes import compose_sensitive_field_purpose
 from darknetra_api.services.audit import append_audit_event
 
 
@@ -72,7 +72,6 @@ class SensitiveRevealContext:
 
 
 _SESSION_CONTEXT_KEY = "darknetra.sensitive_reveal_context"
-_REVEAL_PURPOSE_PREFIX = "darknetra-sensitive-reveal:v1:"
 
 
 def bind_sensitive_reveal_context(
@@ -117,15 +116,6 @@ def _validate_reason(reason: str) -> str:
     if not 10 <= len(normalized) <= 500:
         raise SensitiveRevealReasonError("reveal reason must be between 10 and 500 characters")
     return normalized
-
-
-def _compose_reveal_purpose(*, resource_type: str, field_name: str) -> str:
-    components = json.dumps(
-        [resource_type, field_name],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return f"{_REVEAL_PURPOSE_PREFIX}{components}"
 
 
 async def _get_effective_case_roles(
@@ -199,10 +189,7 @@ async def reveal_sensitive_value(
 
     plaintext = context.crypto.decrypt(
         stored.envelope,
-        purpose=_compose_reveal_purpose(
-            resource_type=resource_type,
-            field_name=field_name,
-        ),
+        purpose=compose_sensitive_field_purpose(resource_type, field_name),
         resource_id=resource_id,
     )
     append_audit_event(

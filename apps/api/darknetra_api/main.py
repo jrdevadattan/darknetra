@@ -11,6 +11,7 @@ from darknetra_api.routes.admin import router as admin_router
 from darknetra_api.routes.audit import router as audit_router
 from darknetra_api.routes.auth import router as auth_router
 from darknetra_api.routes.cases import router as cases_router
+from darknetra_api.routes.evidence import router as evidence_router
 from darknetra_api.routes.memberships import router as memberships_router
 from darknetra_api.routes.users import router as users_router
 
@@ -33,9 +34,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         runtime_settings = await resolve_startup_settings(startup_settings_provider)
-        application.state.sensitive_field_crypto = (
-            runtime_settings.require_sensitive_field_crypto()
-        )
+        application.state.sensitive_field_crypto = runtime_settings.require_sensitive_field_crypto()
         try:
             yield
         finally:
@@ -52,6 +51,7 @@ def create_app(
     application.include_router(health_router, prefix="/api/v1")
     application.include_router(auth_router, prefix="/api/v1")
     application.include_router(cases_router, prefix="/api/v1")
+    application.include_router(evidence_router, prefix="/api/v1")
     application.include_router(memberships_router, prefix="/api/v1")
     application.include_router(users_router, prefix="/api/v1")
     application.include_router(admin_router, prefix="/api/v1")

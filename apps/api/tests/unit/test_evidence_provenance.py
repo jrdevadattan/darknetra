@@ -1,0 +1,207 @@
+from __future__ import annotations
+
+import secrets
+from datetime import UTC, datetime
+from uuid import uuid4
+
+import darknetra_api.services.evidence as evidence_service
+import pytest
+from darknetra_api.models.evidence import (
+    EvidenceArtifact,
+    EvidenceSensitiveValue,
+    EvidenceSensitiveValueKind,
+    EvidenceSourceClass,
+    EvidenceState,
+)
+from darknetra_api.schemas.evidence import (
+    EvidenceArtifactResponse,
+    EvidenceSensitiveValueSummary,
+)
+from darknetra_api.security.encrypted_fields import unpack_envelope
+from darknetra_api.security.encryption import SensitiveFieldCrypto
+from darknetra_api.security.keyring import SensitiveFieldKeyring
+from darknetra_api.security.purposes import compose_sensitive_field_purpose
+from darknetra_api.services.evidence import (
+    EvidenceDigestImmutableError,
+    build_sensitive_value,
+    rotate_evidence_sensitive_value,
+    update_artifact_metadata,
+)
+
+
+def crypto() -> SensitiveFieldCrypto:
+    return SensitiveFieldCrypto(
+        field_keys={"v1": secrets.token_bytes(32)},
+        active_key_version="v1",
+        blind_index_key=secrets.token_bytes(32),
+    )
+
+
+def test_public_purpose_composer_preserves_component_boundaries() -> None:
+    assert compose_sensitive_field_purpose("evidence.source", "locator") != (
+        compose_sensitive_field_purpose("evidence", "source.locator")
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "plaintext", "expects_index"),
+    [
+        (EvidenceSensitiveValueKind.SOURCE_LOCATOR, "HTTPS://Example.test/path", True),
+        (EvidenceSensitiveValueKind.AUTHORITY_REFERENCE, "warrant-42", False),
+        (EvidenceSensitiveValueKind.PROTECTED_NOTE, "analyst rationale", False),
+        (EvidenceSensitiveValueKind.CUSTODY_NOTE, "sealed by collector", False),
+        (EvidenceSensitiveValueKind.CONTACT, "private@example.test", False),
+        (EvidenceSensitiveValueKind.POLICY_RESTRICTED_WALLET, "0xabc", False),
+    ],
+)
+def test_sensitive_value_writer_persists_complete_envelope_and_only_documented_index(
+    kind: EvidenceSensitiveValueKind,
+    plaintext: str,
+    expects_index: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case_id = uuid4()
+    evidence_id = uuid4()
+    crypto_service = crypto()
+    composer_calls: list[tuple[str, str]] = []
+    pack_calls = []
+    real_composer = compose_sensitive_field_purpose
+    real_pack = evidence_service.pack_envelope
+
+    def tracked_composer(resource_type: str, field_name: str) -> str:
+        composer_calls.append((resource_type, field_name))
+        return real_composer(resource_type, field_name)
+
+    def tracked_pack(envelope):
+        pack_calls.append(envelope)
+        return real_pack(envelope)
+
+    monkeypatch.setattr(evidence_service, "compose_sensitive_field_purpose", tracked_composer)
+    monkeypatch.setattr(evidence_service, "pack_envelope", tracked_pack)
+    value = build_sensitive_value(
+        case_id=case_id,
+        evidence_id=evidence_id,
+        kind=kind,
+        plaintext=plaintext,
+        crypto=crypto_service,
+    )
+
+    envelope = unpack_envelope(
+        {
+            "key_version": value.key_version,
+            "nonce_b64": value.nonce_b64,
+            "ciphertext_b64": value.ciphertext_b64,
+        }
+    )
+    purpose = compose_sensitive_field_purpose("evidence", kind.value.lower())
+    assert crypto_service.decrypt(envelope, purpose=purpose, resource_id=str(evidence_id)) == plaintext
+    assert composer_calls == [("evidence", kind.value.lower())]
+    assert len(pack_calls) == 1
+    assert (value.blind_index is not None) is expects_index
+
+    rendered = repr(value)
+    assert plaintext not in rendered
+    assert value.key_version not in rendered
+    assert value.nonce_b64 not in rendered
+    assert value.ciphertext_b64 not in rendered
+    if value.blind_index is not None:
+        assert value.blind_index not in rendered
+
+
+def test_artifact_digest_fields_become_immutable_after_preservation() -> None:
+    artifact = EvidenceArtifact(
+        case_id=uuid4(),
+        source_class=EvidenceSourceClass.PUBLIC_OBSERVATION,
+        source_type="website",
+        acquisition_method="authorized-download",
+        collector_user_id=uuid4(),
+        captured_at=datetime.now(UTC),
+        ingested_at=datetime.now(UTC),
+        media_type="text/html",
+        size_bytes=12,
+        sha256="a" * 64,
+        sha512="b" * 128,
+        object_key="sha256/aa/" + "a" * 64,
+        state=EvidenceState.PRESERVED,
+        policy_restricted=False,
+        allow_original_download=False,
+    )
+
+    with pytest.raises(EvidenceDigestImmutableError):
+        update_artifact_metadata(artifact, sha256="c" * 64)
+
+
+def test_evidence_rotation_reuses_canonical_purpose_and_artifact_id() -> None:
+    case_id = uuid4()
+    evidence_id = uuid4()
+    old_key = secrets.token_bytes(32)
+    blind_index_key = secrets.token_bytes(32)
+    old_crypto = SensitiveFieldCrypto(
+        field_keys={"v1": old_key},
+        active_key_version="v1",
+        blind_index_key=blind_index_key,
+    )
+    value = build_sensitive_value(
+        case_id=case_id,
+        evidence_id=evidence_id,
+        kind=EvidenceSensitiveValueKind.CUSTODY_NOTE,
+        plaintext="rotation stays in the owning context",
+        crypto=old_crypto,
+    )
+    keyring = SensitiveFieldKeyring(
+        keys={"v1": old_key, "v2": secrets.token_bytes(32)},
+        active_version="v2",
+        blind_index_key=blind_index_key,
+    )
+
+    rotated = rotate_evidence_sensitive_value(value, keyring=keyring)
+    purpose = compose_sensitive_field_purpose("evidence", "custody_note")
+    assert keyring.crypto().decrypt(
+        rotated.value,
+        purpose=purpose,
+        resource_id=str(evidence_id),
+    ) == "rotation stays in the owning context"
+
+
+def test_ordinary_artifact_and_sensitive_repr_omit_storage_secrets() -> None:
+    artifact = EvidenceArtifact(
+        case_id=uuid4(),
+        source_class=EvidenceSourceClass.AUTHORIZED_IMPORT,
+        source_type="document",
+        acquisition_method="upload",
+        collector_user_id=uuid4(),
+        captured_at=datetime.now(UTC),
+        ingested_at=datetime.now(UTC),
+        media_type="application/pdf",
+        size_bytes=1,
+        sha256="a" * 64,
+        sha512="b" * 128,
+        object_key="sha256/aa/" + "a" * 64,
+        state=EvidenceState.PRESERVED,
+        policy_restricted=False,
+        allow_original_download=False,
+    )
+    artifact.id = uuid4()
+    artifact.created_at = datetime.now(UTC)
+    artifact.updated_at = datetime.now(UTC)
+    artifact_response = EvidenceArtifactResponse.model_validate(artifact).model_dump()
+    assert "object_key" not in artifact_response
+
+    sensitive = build_sensitive_value(
+        case_id=artifact.case_id,
+        evidence_id=artifact.id,
+        kind=EvidenceSensitiveValueKind.PROTECTED_NOTE,
+        plaintext="schema must not leak this",
+        crypto=crypto(),
+    )
+    sensitive.created_at = datetime.now(UTC)
+    sensitive_response = EvidenceSensitiveValueSummary.model_validate(sensitive).model_dump()
+    assert not {
+        "key_version",
+        "nonce_b64",
+        "ciphertext_b64",
+        "blind_index",
+    }.intersection(sensitive_response)
+
+    assert "ciphertext" not in EvidenceSensitiveValue.__table__.columns
+    assert EvidenceSensitiveValue.__table__.columns.blind_index.nullable is True

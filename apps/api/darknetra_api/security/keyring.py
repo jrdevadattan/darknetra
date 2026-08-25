@@ -29,7 +29,7 @@ class SensitiveFieldRotationResult:
     """Explicit replacement values produced by one maintenance rotation."""
 
     value: EncryptedValue
-    blind_index: str = field(repr=False)
+    blind_index: str | None = field(repr=False)
 
 
 class SensitiveFieldKeyring:
@@ -173,7 +173,7 @@ class SensitiveFieldKeyring:
 def rotate_sensitive_field(
     *,
     value: EncryptedValue,
-    blind_index: str,
+    blind_index: str | None,
     purpose: str,
     resource_id: str,
     keyring: SensitiveFieldKeyring,
