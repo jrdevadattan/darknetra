@@ -1,6 +1,152 @@
 # Plan 03a sensitive-field encryption verification
 
-## Verified revision and environments
+## Final fix verification
+
+### Tested tree identity
+
+- Verification window: `2026-08-25T05:14:54Z` through `2026-08-25T05:27:32Z`
+- Base commit: `8b3e25f20db1c81f371191e76c727b8d286f82ac`
+- Tested implementation commit: `e1c13e88d9ebe46c953c63358f33de78fb1db4ca`
+- Patch byte length: `71288`
+- Patch SHA-256: `f81b48f3d2eda4d1dd67a9f11223fbf7f7f225ab33d5d3bbd982d6cd40bd4579`
+- Branch: `codex/complete-roadmap`
+
+The tested-tree identity is the base commit plus the binary Git patch for every tracked final-fix
+change except this verification record. Excluding this record removes the hash self-reference. No
+other path is excluded. Run this command from the final tree to reproduce the byte length and hash:
+
+```bash
+uv run python - <<'PY'
+import hashlib
+import subprocess
+
+base = "8b3e25f20db1c81f371191e76c727b8d286f82ac"
+record = "docs/verification/plan-03a-sensitive-field-encryption.md"
+patch = subprocess.check_output(
+    [
+        "git",
+        "diff",
+        "--binary",
+        "--no-ext-diff",
+        base,
+        "--",
+        ".",
+        f":(exclude){record}",
+    ]
+)
+print(len(patch))
+print(hashlib.sha256(patch).hexdigest())
+PY
+```
+
+Expected output:
+
+```text
+71288
+f81b48f3d2eda4d1dd67a9f11223fbf7f7f225ab33d5d3bbd982d6cd40bd4579
+```
+
+### TDD evidence
+
+The first focused run after adding the collision, key-version, key-source, and mapping-isolation
+tests produced `9 failed, 47 passed in 10.46s`. The failures were:
+
+- colon-shifted AAD tuples authenticated as the same context;
+- the Hypothesis colon-boundary property found the same collision;
+- NUL-shifted blind-index tuples produced the same HMAC;
+- the Hypothesis NUL-boundary property found the same collision;
+- dotted resource-type and field-name tuples revealed plaintext;
+- decoded-equivalent legacy and JSON `v1` keys were rejected as conflicting;
+- the missing encryption-key error named only the legacy source;
+- a changing source mapping passed validation and stored different key material; and
+- settings accepted an invalid active key version.
+
+After the production changes, the focused crypto, config, encrypted-field, version, keyring, and
+reveal suite reported `81 passed in 2.06s`.
+
+### Local commands and observed results
+
+```powershell
+uv run pytest -q apps/api/tests/unit/test_sensitive_field_encryption.py apps/api/tests/unit/test_sensitive_field_config.py apps/api/tests/unit/test_encrypted_fields.py apps/api/tests/unit/test_sensitive_field_key_versions.py apps/api/tests/unit/test_sensitive_field_keyring.py apps/api/tests/unit/test_sensitive_value_reveal.py
+uv run pytest -q -m 'not integration'
+uv run ruff check .
+```
+
+Observed results:
+
+- Focused tests: exit 0, `81 passed in 2.06s`.
+- Non-integration suite: exit 0, `114 passed, 26 deselected, 1 warning in 4.92s`.
+- Ruff: exit 0, `All checks passed!`.
+- Final pre-commit rerun: exit 0, `114 passed, 26 deselected, 1 warning in 5.12s`; Ruff again
+  reported `All checks passed!`.
+- The warning is the existing Starlette deprecation for using `httpx` through
+  `starlette.testclient`.
+
+The E2E Compose configuration was run once without a JWT key and once with a runtime-generated
+32-byte key in a temporary env file. The absent-key command failed as required by the Compose
+`${DARKNETRA_JWT_SIGNING_KEY_B64:?...}` expression. The runtime env configuration parsed, the API
+environment contained a non-empty key, and the temporary file was removed. The verification script
+printed:
+
+```text
+COMPOSE_MISSING_KEY=failed_closed
+COMPOSE_RUNTIME_ENV=valid
+COMPOSE_RUNTIME_ENV_CLEANUP=removed
+```
+
+PyYAML parsed `.github/workflows/plan02-task13.yml`, and Git Bash `bash -n` accepted all 14 workflow
+run blocks. The tracked env, documentation, workflow, and Compose scan checked 62 text files. It
+found zero 32-byte Base64 key candidates and zero literal JWT, field-key, keyring, or blind-index
+assignments. The Plan 02 Task 13 workflow contains no `GITHUB_ENV` reference. It creates a masked
+mode-600 file under `RUNNER_TEMP`, checks the file before each Compose use, passes it with
+`--env-file`, and removes it during cleanup. A fresh Gitleaks binary was not available on the local
+host, so this final-fix section makes no fresh Gitleaks claim. A final repeat widened the tracked
+scope to 67 paths and again found zero Base64 key candidates and zero literal secret assignments;
+PyYAML and all 14 Bash blocks passed again.
+
+The changed Markdown structural check verified blank lines after headings, balanced code fences,
+and balanced bold markers outside inline code. `git diff --check` exited 0.
+
+### Isolated Linux full suite
+
+The full suite ran on GCP VM `unique-ops-phase1` in Compose project `plan03affc7f3a1b4` under
+`/tmp/plan03a-finalfix-c7f3a1b4`. The base Compose configuration parsed with no host ports. The run
+built the API image, started only its isolated PostgreSQL service, created separate main and E2E
+databases, applied both migrations, and ran Linux Ruff plus full pytest in the built API image.
+
+Observed results:
+
+- Linux Ruff: exit 0, `All checks passed!`.
+- Full pytest: exit 0, `140 passed, 1 warning in 68.35s`.
+- The warning was the same existing Starlette deprecation.
+- Cleanup removed the temporary container, network, volume, API image tag, archive, and `/tmp`
+  directory.
+- All nine containers in Compose project `unique-operations` remained unchanged. `docker compose
+  ls` listed that protected project as `running(9)` after cleanup.
+
+The first VM attempt built the unique API image but stopped before PostgreSQL startup because the
+script queried `docker compose images` before an API container existed. Its cleanup removed the
+temporary Compose resources and directory and confirmed the protected containers were unchanged.
+The exact remaining unique image tag was removed, the script was corrected to inspect the known
+project image tag, and the complete run above then passed and cleaned every artifact.
+
+### Security and plan checks
+
+- AES-GCM AAD and blind-index HMAC input use separate domains, format version 1, component counts,
+  and eight-byte unsigned big-endian length prefixes.
+- Regression and property tests cover colon, NUL, and dotted tuple ambiguity.
+- One shared `v[1-9][0-9]{0,62}` validator covers settings, JSON/direct keyrings, crypto,
+  decryption, pack, and unpack.
+- Legacy and JSON `v1` sources compare decoded bytes. Missing-key errors name JSON and legacy
+  sources. Mapping snapshot and repr redaction behavior have direct tests.
+- Plan 03 now requires verified Plan 03a, complete protected-value envelopes and HMAC blind
+  indexes, pack/unpack, audited reveal, read-only adapters, and startup/readiness crypto validation.
+- Blind-index rotation requires a complete offline rebuild or a versioned dual-write/backfill/
+  dual-read migration with matching backup handling.
+- No GitHub Actions run supplied final-fix evidence. This record makes no GitHub Actions success
+  claim.
+
+## Prior Plan 03a verification
 
 - Verification window: `2026-08-25T04:36:33Z` through `2026-08-25T04:38:47Z`
 - Tested code commit: `e199e06b6d0712b620922834809ff4cb76a02de9`
@@ -262,9 +408,10 @@ The Compose command used another runtime-generated 32-byte JWT key and exited 0.
 local env/document Base64 scan and static secret-assignment scan found zero candidates.
 
 The first Gitleaks run identified a static synthetic JWT value in `docker-compose.e2e.yml`. The E2E
-Compose overlay now requires `DARKNETRA_JWT_SIGNING_KEY_B64` from the runtime environment. The Plan
-02 Task 13 workflow generates 32 random bytes, masks the Base64 value, and writes it to
-`GITHUB_ENV`, matching the runtime pattern used by the other verification workflows.
+Compose overlay now requires `DARKNETRA_JWT_SIGNING_KEY_B64` from the runtime environment. At the
+time of this prior run, the Plan 02 Task 13 workflow wrote a generated masked value to
+`GITHUB_ENV`. The final-fix verification above supersedes that workflow design with the scoped
+mode-600 `RUNNER_TEMP` env file.
 
 ## Security properties exercised
 
