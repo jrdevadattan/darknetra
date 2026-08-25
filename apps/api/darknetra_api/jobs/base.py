@@ -19,13 +19,20 @@ class IngestTask(Task):
     retry_jitter = True
 
     @classmethod
-    def persistence_after_failure(cls, completed_retries: int) -> tuple[int, JobStatus]:
+    def _attempt_count(cls, completed_retries: int) -> int:
         if completed_retries < 0:
             raise ValueError("completed retries cannot be negative")
-        attempt_count = completed_retries + 1
-        status = (
-            JobStatus.FAILED
-            if completed_retries >= cls.max_retries
-            else JobStatus.RETRYING
-        )
-        return attempt_count, status
+        return completed_retries + 1
+
+    @classmethod
+    def persistence_on_retry(cls, completed_retries: int) -> tuple[int, JobStatus]:
+        if completed_retries >= cls.max_retries:
+            raise ValueError("an exhausted task cannot transition to retrying")
+        return cls._attempt_count(completed_retries), JobStatus.RETRYING
+
+    @classmethod
+    def persistence_on_terminal_failure(
+        cls,
+        completed_retries: int,
+    ) -> tuple[int, JobStatus]:
+        return cls._attempt_count(completed_retries), JobStatus.FAILED

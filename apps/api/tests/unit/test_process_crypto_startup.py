@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from darknetra_api.config import Settings, get_settings
-from darknetra_api.main import create_app
+from darknetra_api.main import create_app, create_production_app
 from fastapi.testclient import TestClient
 
 CRYPTO_ENV_NAMES = (
@@ -54,7 +54,10 @@ def invalid_crypto_settings(case: str) -> Settings:
 
 def test_api_startup_accepts_sync_settings_provider() -> None:
     settings = Settings(**valid_crypto_settings(), _env_file=None)
-    application = create_app(startup_settings_provider=lambda: settings)
+    application = create_app(
+        startup_settings_provider=lambda: settings,
+        web_origin="https://sync.example",
+    )
 
     with TestClient(application) as client:
         response = client.get("/api/v1/health/ready")
@@ -72,7 +75,10 @@ def test_api_startup_accepts_async_settings_provider() -> None:
     async def settings_provider() -> Settings:
         return settings
 
-    application = create_app(startup_settings_provider=settings_provider)
+    application = create_app(
+        startup_settings_provider=settings_provider,
+        web_origin="https://async.example",
+    )
 
     with TestClient(application) as client:
         assert client.get("/api/v1/health/ready").status_code == 200
@@ -81,7 +87,10 @@ def test_api_startup_accepts_async_settings_provider() -> None:
 def test_request_dependency_override_is_independent_from_startup_provider() -> None:
     startup = Settings(build_version="startup", **valid_crypto_settings(), _env_file=None)
     request = Settings(build_version="request", **valid_crypto_settings(), _env_file=None)
-    application = create_app(startup_settings_provider=lambda: startup)
+    application = create_app(
+        startup_settings_provider=lambda: startup,
+        web_origin="https://startup.example",
+    )
     application.dependency_overrides[get_settings] = lambda: request
 
     try:
@@ -96,7 +105,7 @@ def test_production_default_startup_provider_uses_runtime_environment(monkeypatc
     monkeypatch.setenv("DARKNETRA_FIELD_BLIND_INDEX_KEY_B64", encoded_random_key())
     get_settings.cache_clear()
     try:
-        application = create_app()
+        application = create_production_app()
         with TestClient(application) as client:
             assert client.get("/api/v1/health/ready").status_code == 200
     finally:
@@ -117,10 +126,46 @@ def test_api_startup_fails_closed_for_invalid_crypto(
     case: str,
 ) -> None:
     settings = invalid_crypto_settings(case)
-    application = create_app(startup_settings_provider=lambda: settings)
+    application = create_app(
+        startup_settings_provider=lambda: settings,
+        web_origin="https://invalid-case.example",
+    )
 
     with pytest.raises(ValueError), TestClient(application):
         pass
+
+
+def test_injected_app_ignores_invalid_ambient_settings_and_uses_supplied_cors(
+    monkeypatch,
+) -> None:
+    supplied = Settings(**valid_crypto_settings(), _env_file=None)
+    intended_origin = "https://investigator.example"
+    monkeypatch.setenv("DARKNETRA_FIELD_ACTIVE_KEY_VERSION", "invalid")
+    get_settings.cache_clear()
+    try:
+        application = create_app(
+            startup_settings_provider=lambda: supplied,
+            web_origin=intended_origin,
+        )
+        with TestClient(application) as client:
+            response = client.options(
+                "/api/v1/health/live",
+                headers={
+                    "Origin": intended_origin,
+                    "Access-Control-Request-Method": "GET",
+                },
+            )
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == intended_origin
+    finally:
+        get_settings.cache_clear()
+
+
+def test_custom_startup_provider_requires_explicit_web_origin() -> None:
+    supplied = Settings(**valid_crypto_settings(), _env_file=None)
+
+    with pytest.raises(TypeError, match="web_origin"):
+        create_app(startup_settings_provider=lambda: supplied)  # type: ignore[call-arg]
 
 
 def worker_environment(settings: Settings) -> dict[str, str]:

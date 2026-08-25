@@ -19,7 +19,10 @@ def _test_settings() -> Settings:
     )
 
 
-app = create_app(startup_settings_provider=_test_settings)
+app = create_app(
+    startup_settings_provider=_test_settings,
+    web_origin="http://localhost:3000",
+)
 
 
 @pytest.fixture

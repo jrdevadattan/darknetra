@@ -27,8 +27,8 @@ async def resolve_startup_settings(provider: StartupSettingsProvider) -> Setting
 
 def create_app(
     *,
-    startup_settings_provider: StartupSettingsProvider = get_settings,
-    web_origin: str | None = None,
+    startup_settings_provider: StartupSettingsProvider,
+    web_origin: str,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -44,7 +44,7 @@ def create_app(
     application = FastAPI(title="DARKNETRA API", version="0.1.0", lifespan=lifespan)
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=[web_origin or get_settings().web_origin],
+        allow_origins=[web_origin],
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "X-CSRF-Token", "X-Request-ID"],
@@ -59,7 +59,21 @@ def create_app(
     return application
 
 
-app = create_app()
+def create_production_app() -> FastAPI:
+    settings = get_settings()
+    return create_app(
+        startup_settings_provider=lambda: settings,
+        web_origin=settings.web_origin,
+    )
 
 
-__all__ = ["StartupSettingsProvider", "app", "create_app", "resolve_startup_settings"]
+app = create_production_app()
+
+
+__all__ = [
+    "StartupSettingsProvider",
+    "app",
+    "create_app",
+    "create_production_app",
+    "resolve_startup_settings",
+]
