@@ -805,6 +805,7 @@ async def test_runtime_role_cannot_mutate_or_truncate_custody() -> None:
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_database_derives_canonical_parameters_digest_and_rejects_mismatch() -> None:
+    boundary_integer = int("9" * 1000)
     samples = [
         {"z": [1, True, None], "a": {"é": "東京"}},
         {
@@ -816,6 +817,7 @@ async def test_database_derives_canonical_parameters_digest_and_rejects_mismatch
             "large_integer": 123456789012345678901234567890,
             "nested": [1e30, {"value": -3.0}],
         },
+        {"nested": [{"boundary": boundary_integer}]},
     ]
     async with async_session_factory() as session:
         for parameters in samples:
@@ -834,6 +836,14 @@ async def test_database_derives_canonical_parameters_digest_and_rejects_mismatch
                             "SELECT darknetra_derivation_parameters_digest(CAST(:value AS jsonb))"
                         ).bindparams(value=json.dumps({"unsupported": unsupported}))
                     )
+
+        with pytest.raises(DBAPIError, match="1,000 decimal digits"):
+            async with session.begin_nested():
+                await session.scalar(
+                    sa.text(
+                        "SELECT darknetra_derivation_parameters_digest(CAST(:value AS jsonb))"
+                    ).bindparams(value=json.dumps({"too_large": int("9" * 1001)}))
+                )
 
         owner = user("digest-authority-owner", GlobalRole.CASE_OWNER)
         session.add(owner)
@@ -874,9 +884,18 @@ async def test_database_derives_canonical_parameters_digest_and_rejects_mismatch
             transformer_version="1",
             parameters=samples[1],
         )
-        session.add(valid)
+        boundary_valid = build_evidence_derivation(
+            case_id=case.id,
+            parent_evidence_id=parent.id,
+            child_evidence_id=child.id,
+            transformation="boundary-extract",
+            transformer_version="1",
+            parameters=samples[2],
+        )
+        session.add_all([valid, boundary_valid])
         await session.commit()
         valid_id = valid.id
+        boundary_valid_id = boundary_valid.id
         session.expunge_all()
         loaded = await session.get(EvidenceDerivation, valid_id)
         assert loaded is not None
@@ -890,6 +909,9 @@ async def test_database_derives_canonical_parameters_digest_and_rejects_mismatch
         assert loaded.parameters_json["nested"][0] == (
             1000000000000000000000000000000
         )
+        boundary_loaded = await session.get(EvidenceDerivation, boundary_valid_id)
+        assert boundary_loaded is not None
+        assert boundary_loaded.parameters_json["nested"][0]["boundary"] == boundary_integer
         with pytest.raises(IntegrityError):
             async with session.begin_nested():
                 await session.execute(

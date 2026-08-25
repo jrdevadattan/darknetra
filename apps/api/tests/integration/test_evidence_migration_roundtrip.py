@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 REPO_ROOT = Path(__file__).resolve().parents[4]
-FINAL_EVIDENCE_REVISION = "c3f80a92d614"
+FINAL_EVIDENCE_REVISION = "d4e91b7a2c08"
 HISTORICAL_DOMAIN = b"DARKNETRA-DERIVATION-PARAMETERS\x00v1\x00"
 
 
@@ -104,16 +104,18 @@ async def _clear(session) -> None:
     await session.commit()
 
 
-async def test_populated_compatible_downgrade_and_upgrade_preserve_data() -> None:
+async def test_old_c3_populated_database_upgrades_to_new_d4_child() -> None:
     if not _migration_tests_enabled():
         pytest.skip("set DARKNETRA_RUN_MIGRATION_TESTS=1 for destructive migration proof")
+
+    _run_alembic("downgrade base")
+    _run_alembic("upgrade c3f80a92d614")
     engine, sessions = await _owner_session_factory()
     async with sessions() as session:
-        await _clear(session)
         owner = User(
-            username="migration-compatible-owner",
-            username_normalized="migration-compatible-owner",
-            display_name="migration-compatible-owner",
+            username="old-c3-owner",
+            username_normalized="old-c3-owner",
+            display_name="old-c3-owner",
             password_hash="not-used",
             global_roles=[GlobalRole.CASE_OWNER],
             is_active=True,
@@ -122,8 +124,8 @@ async def test_populated_compatible_downgrade_and_upgrade_preserve_data() -> Non
         session.add(owner)
         await session.flush()
         case = Case(
-            case_code="EVIDENCE-MIGRATION-COMPATIBLE",
-            title="Compatible migration data",
+            case_code="EVIDENCE-OLD-C3",
+            title="Old c3 populated database",
             status=CaseStatus.OPEN,
             sensitivity=CaseSensitivity.STANDARD,
             owner_user_id=owner.id,
@@ -139,22 +141,16 @@ async def test_populated_compatible_downgrade_and_upgrade_preserve_data() -> Non
             case_id=case.id,
             evidence_id=parent.id,
             kind=EvidenceSensitiveValueKind.CONTACT,
-            plaintext="compatible@example.test",
+            plaintext="old-c3@example.test",
             crypto=_crypto(),
         )
         derivation = build_evidence_derivation(
             case_id=case.id,
             parent_evidence_id=parent.id,
             child_evidence_id=child.id,
-            transformation="extract",
+            transformation="old-c3-extract",
             transformer_version="1",
-            parameters={
-                "integral_float": 1.0,
-                "negative_zero": -0.0,
-                "positive_exponent": 1e23,
-                "larger_exponent": 1e30,
-                "nested": [{"value": -1e23}],
-            },
+            parameters={"member": "safe.txt", "enabled": True, "note": None},
         )
         session.add_all([value, derivation])
         await session.commit()
@@ -162,90 +158,51 @@ async def test_populated_compatible_downgrade_and_upgrade_preserve_data() -> Non
         derivation_id = derivation.id
     await engine.dispose()
 
-    _run_alembic("downgrade b7c19a4e5d20")
-
-    engine, sessions = await _owner_session_factory()
-    async with sessions() as session:
-        assert await session.scalar(sa.text("SELECT version_num FROM alembic_version")) == (
-            "b7c19a4e5d20"
-        )
-        assert await session.scalar(
-            sa.text(
-                "SELECT count(*) FROM pg_proc "
-                "WHERE proname IN ('darknetra_canonical_jsonb', "
-                "'darknetra_derivation_parameters_digest', "
-                "'darknetra_historical_b7_canonical_jsonb', "
-                "'darknetra_historical_b7_derivation_parameters_digest')"
-            )
-        ) == 0
-        downgraded = (
-            await session.execute(
-                sa.text(
-                    "SELECT case_id, parent_evidence_id, child_evidence_id, transformation, "
-                    "transformer_version, parameters_json, parameters_digest "
-                    "FROM evidence_derivations WHERE id = :id"
-                ).bindparams(id=derivation_id)
-            )
-        ).one()
-        assert downgraded.parameters_digest == _historical_digest(
-            downgraded.parameters_json
-        )
-        with pytest.raises(IntegrityError):
-            async with session.begin_nested():
-                await session.execute(
-                    sa.text(
-                        "INSERT INTO evidence_derivations "
-                        "(id, case_id, parent_evidence_id, child_evidence_id, transformation, "
-                        "transformer_version, parameters_json, parameters_digest) "
-                        "VALUES (gen_random_uuid(), :case_id, :parent_id, :child_id, "
-                        ":transformation, :transformer_version, CAST(:parameters AS jsonb), "
-                        ":digest)"
-                    ).bindparams(
-                        case_id=downgraded.case_id,
-                        parent_id=downgraded.parent_evidence_id,
-                        child_id=downgraded.child_evidence_id,
-                        transformation=downgraded.transformation,
-                        transformer_version=downgraded.transformer_version,
-                        parameters=json.dumps(downgraded.parameters_json),
-                        digest=_historical_digest(downgraded.parameters_json),
-                    )
-                )
-        assert await session.scalar(
-            sa.text("SELECT count(*) FROM evidence_sensitive_values WHERE id = :id").bindparams(
-                id=value_id
-            )
-        ) == 1
-    await engine.dispose()
-
     _run_alembic("upgrade head")
 
     engine, sessions = await _owner_session_factory()
     async with sessions() as session:
+        assert await session.scalar(sa.text("SELECT version_num FROM alembic_version")) == (
+            FINAL_EVIDENCE_REVISION
+        )
+        assert await session.scalar(
+            sa.text(
+                "SELECT count(*) FROM pg_proc WHERE proname = "
+                "'darknetra_jsonb_contains_number'"
+            )
+        ) == 1
         assert await session.scalar(
             sa.text("SELECT count(*) FROM evidence_sensitive_values WHERE id = :id").bindparams(
                 id=value_id
             )
         ) == 1
-        digest = await session.scalar(
+        assert await session.scalar(
             sa.text(
-                "SELECT parameters_digest FROM evidence_derivations WHERE id = :id"
+                "SELECT parameters_digest = "
+                "darknetra_derivation_parameters_digest(parameters_json) "
+                "FROM evidence_derivations WHERE id = :id"
             ).bindparams(id=derivation_id)
-        )
-        assert isinstance(digest, str) and len(digest) == 64
+        ) is True
         await _clear(session)
     await engine.dispose()
 
 
-async def test_incompatible_downgrade_refuses_atomically_and_preserves_upgraded_data() -> None:
+async def test_numeric_parameters_refuse_d4_downgrade_atomically() -> None:
     if not _migration_tests_enabled():
         pytest.skip("set DARKNETRA_RUN_MIGRATION_TESTS=1 for destructive migration proof")
+    original_parameters = [
+        ("positive-exponent", {"number": 1e23}),
+        ("negative-exponent", {"number": -1e23}),
+        ("larger-exponent", {"number": 1e30}),
+        ("negative-zero", {"number": -0.0}),
+    ]
     engine, sessions = await _owner_session_factory()
     async with sessions() as session:
         await _clear(session)
         owner = User(
-            username="migration-incompatible-owner",
-            username_normalized="migration-incompatible-owner",
-            display_name="migration-incompatible-owner",
+            username="numeric-downgrade-owner",
+            username_normalized="numeric-downgrade-owner",
+            display_name="numeric-downgrade-owner",
             password_hash="not-used",
             global_roles=[GlobalRole.CASE_OWNER],
             is_active=True,
@@ -254,8 +211,8 @@ async def test_incompatible_downgrade_refuses_atomically_and_preserves_upgraded_
         session.add(owner)
         await session.flush()
         case = Case(
-            case_code="EVIDENCE-MIGRATION-INCOMPATIBLE",
-            title="Incompatible migration data",
+            case_code="EVIDENCE-NUMERIC-DOWNGRADE",
+            title="Numeric downgrade ambiguity",
             status=CaseStatus.OPEN,
             sensitivity=CaseSensitivity.STANDARD,
             owner_user_id=owner.id,
@@ -264,7 +221,101 @@ async def test_incompatible_downgrade_refuses_atomically_and_preserves_upgraded_
         session.add(case)
         await session.flush()
         parent = _artifact(case, owner, "c")
-        child = _artifact(case, owner, "d")
+        children = [_artifact(case, owner, suffix) for suffix in ("d", "e", "f", "7", "8")]
+        session.add_all([parent, *children])
+        await session.flush()
+        derivations = [
+            build_evidence_derivation(
+                case_id=case.id,
+                parent_evidence_id=parent.id,
+                child_evidence_id=children[index].id,
+                transformation=transformation,
+                transformer_version="1",
+                parameters=parameters,
+            )
+            for index, (transformation, parameters) in enumerate(original_parameters)
+        ]
+        session.add_all(derivations)
+        await session.commit()
+        case_id = case.id
+        parent_id = parent.id
+        retry_child_id = children[-1].id
+        original_rows = {
+            row.id: row.parameters_digest for row in derivations
+        }
+    await engine.dispose()
+
+    refused = _run_alembic("downgrade c3f80a92d614", expect_success=False)
+    assert refused.returncode != 0
+    assert "numeric derivation parameters have ambiguous historical JSON tokens" in (
+        refused.stdout + refused.stderr
+    )
+
+    engine, sessions = await _owner_session_factory()
+    async with sessions() as session:
+        assert await session.scalar(
+            sa.text("SELECT version_num FROM alembic_version")
+        ) == FINAL_EVIDENCE_REVISION
+        assert await session.scalar(
+            sa.text(
+                "SELECT count(*) FROM pg_proc WHERE proname = "
+                "'darknetra_jsonb_contains_number'"
+            )
+        ) == 1
+        persisted = dict(
+            (
+                await session.execute(
+                    sa.text("SELECT id, parameters_digest FROM evidence_derivations")
+                )
+            ).all()
+        )
+        assert persisted == original_rows
+        for transformation, parameters in original_parameters:
+            retry = build_evidence_derivation(
+                case_id=case_id,
+                parent_evidence_id=parent_id,
+                child_evidence_id=retry_child_id,
+                transformation=transformation,
+                transformer_version="1",
+                parameters=parameters,
+            )
+            with pytest.raises(IntegrityError):
+                async with session.begin_nested():
+                    session.add(retry)
+                    await session.flush()
+        await _clear(session)
+    await engine.dispose()
+
+
+async def test_repeated_values_and_distinct_lineage_downgrade_safely_to_b7() -> None:
+    if not _migration_tests_enabled():
+        pytest.skip("set DARKNETRA_RUN_MIGRATION_TESTS=1 for destructive migration proof")
+    engine, sessions = await _owner_session_factory()
+    async with sessions() as session:
+        await _clear(session)
+        owner = User(
+            username="supported-downgrade-owner",
+            username_normalized="supported-downgrade-owner",
+            display_name="supported-downgrade-owner",
+            password_hash="not-used",
+            global_roles=[GlobalRole.CASE_OWNER],
+            is_active=True,
+            must_change_password=False,
+        )
+        session.add(owner)
+        await session.flush()
+        case = Case(
+            case_code="EVIDENCE-SUPPORTED-DOWNGRADE",
+            title="Supported repeated and lineage shapes",
+            status=CaseStatus.OPEN,
+            sensitivity=CaseSensitivity.STANDARD,
+            owner_user_id=owner.id,
+            source_authority_summary="Synthetic authorized fixture",
+        )
+        session.add(case)
+        await session.flush()
+        parent = _artifact(case, owner, "3")
+        child = _artifact(case, owner, "4")
         session.add_all([parent, child])
         await session.flush()
         crypto = _crypto()
@@ -273,7 +324,7 @@ async def test_incompatible_downgrade_refuses_atomically_and_preserves_upgraded_
                 case_id=case.id,
                 evidence_id=parent.id,
                 kind=EvidenceSensitiveValueKind.CONTACT,
-                plaintext=f"repeated-{number}@example.test",
+                plaintext=f"supported-{number}@example.test",
                 crypto=crypto,
             )
             for number in (1, 2)
@@ -285,37 +336,55 @@ async def test_incompatible_downgrade_refuses_atomically_and_preserves_upgraded_
                 child_evidence_id=child.id,
                 transformation="extract",
                 transformer_version="1",
-                parameters={"member": member},
+                parameters={"member": member, "enabled": True, "note": None},
             )
             for member in ("first.txt", "second.txt")
         ]
         session.add_all([*repeated, *lineage])
         await session.commit()
         repeated_ids = [row.id for row in repeated]
+        lineage_ids = [row.id for row in lineage]
     await engine.dispose()
 
-    refused = _run_alembic("downgrade b7c19a4e5d20", expect_success=False)
-    assert refused.returncode != 0
-    assert "cannot downgrade evidence invariants" in refused.stdout + refused.stderr
-
+    _run_alembic("downgrade c3f80a92d614")
     engine, sessions = await _owner_session_factory()
     async with sessions() as session:
+        assert await session.scalar(sa.text("SELECT version_num FROM alembic_version")) == (
+            "c3f80a92d614"
+        )
         assert await session.scalar(
-            sa.text("SELECT version_num FROM alembic_version")
-        ) == FINAL_EVIDENCE_REVISION
-        assert await session.scalar(
-            sa.text(
-                "SELECT count(*) FROM information_schema.columns "
-                "WHERE table_name = 'evidence_derivations' "
-                "AND column_name = 'parameters_digest'"
+            sa.text("SELECT count(*) FROM evidence_sensitive_values WHERE id = ANY(:ids)").bindparams(
+                ids=repeated_ids
             )
-        ) == 1
-        assert await session.scalar(
-            sa.text(
-                "SELECT count(*) FROM evidence_sensitive_values WHERE id = ANY(:ids)"
-            ).bindparams(ids=repeated_ids)
         ) == 2
-        assert await session.scalar(sa.text("SELECT count(*) FROM evidence_derivations")) == 2
+        assert await session.scalar(
+            sa.text("SELECT count(*) FROM evidence_derivations WHERE id = ANY(:ids)").bindparams(
+                ids=lineage_ids
+            )
+        ) == 2
+    await engine.dispose()
+
+    _run_alembic("downgrade b7c19a4e5d20")
+    engine, sessions = await _owner_session_factory()
+    async with sessions() as session:
+        assert await session.scalar(sa.text("SELECT version_num FROM alembic_version")) == (
+            "b7c19a4e5d20"
+        )
+        assert await session.scalar(
+            sa.text("SELECT count(*) FROM evidence_sensitive_values WHERE id = ANY(:ids)").bindparams(
+                ids=repeated_ids
+            )
+        ) == 2
+        assert await session.scalar(
+            sa.text("SELECT count(*) FROM evidence_derivations WHERE id = ANY(:ids)").bindparams(
+                ids=lineage_ids
+            )
+        ) == 2
+    await engine.dispose()
+
+    _run_alembic("upgrade head")
+    engine, sessions = await _owner_session_factory()
+    async with sessions() as session:
         await _clear(session)
     await engine.dispose()
 

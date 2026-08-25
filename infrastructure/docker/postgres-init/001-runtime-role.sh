@@ -37,25 +37,53 @@ REVOKE CREATE, TEMPORARY ON DATABASE :"database_name" FROM PUBLIC;
 REVOKE ALL PRIVILEGES ON DATABASE :"database_name" FROM darknetra_runtime;
 GRANT CONNECT ON DATABASE :"database_name" TO darknetra_runtime;
 
-SELECT format('REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM darknetra_runtime', nspname)
+SELECT format(
+  'REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM darknetra_runtime, PUBLIC',
+  nspname
+)
 FROM pg_namespace
 WHERE nspname <> 'public'
   AND nspname <> 'information_schema'
   AND nspname NOT LIKE 'pg\_%' ESCAPE '\'
 \gexec
-SELECT format('REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %I FROM darknetra_runtime', nspname)
+SELECT format(
+  'REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %I FROM darknetra_runtime, PUBLIC',
+  nspname
+)
 FROM pg_namespace
 WHERE nspname <> 'public'
   AND nspname <> 'information_schema'
   AND nspname NOT LIKE 'pg\_%' ESCAPE '\'
 \gexec
-SELECT format('REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA %I FROM darknetra_runtime', nspname)
+SELECT format(
+  'REVOKE ALL PRIVILEGES ON ALL ROUTINES IN SCHEMA %I FROM darknetra_runtime, PUBLIC',
+  nspname
+)
 FROM pg_namespace
 WHERE nspname <> 'public'
   AND nspname <> 'information_schema'
   AND nspname NOT LIKE 'pg\_%' ESCAPE '\'
 \gexec
-SELECT format('REVOKE ALL PRIVILEGES ON SCHEMA %I FROM darknetra_runtime', nspname)
+SELECT format(
+  'REVOKE ALL PRIVILEGES ON TYPE %I.%I FROM darknetra_runtime, PUBLIC',
+  namespace.nspname,
+  type_record.typname
+)
+FROM pg_type type_record
+JOIN pg_namespace namespace ON namespace.oid = type_record.typnamespace
+LEFT JOIN pg_class composite_record ON composite_record.oid = type_record.typrelid
+WHERE (
+    type_record.typtype IN ('d', 'e', 'm', 'r')
+    OR (type_record.typtype = 'c' AND composite_record.relkind = 'c')
+  )
+  AND namespace.nspname <> 'public'
+  AND namespace.nspname <> 'information_schema'
+  AND namespace.nspname NOT LIKE 'pg\_%' ESCAPE '\'
+\gexec
+SELECT format(
+  'REVOKE ALL PRIVILEGES ON SCHEMA %I FROM darknetra_runtime, PUBLIC',
+  nspname
+)
 FROM pg_namespace
 WHERE nspname <> 'public'
   AND nspname <> 'information_schema'
@@ -63,7 +91,7 @@ WHERE nspname <> 'public'
 \gexec
 
 SELECT DISTINCT format(
-  'ALTER DEFAULT PRIVILEGES FOR ROLE %I%s REVOKE ALL PRIVILEGES ON %s FROM darknetra_runtime',
+  'ALTER DEFAULT PRIVILEGES FOR ROLE %I%s REVOKE ALL PRIVILEGES ON %s FROM %s',
   grantor.rolname,
   CASE
     WHEN defaults.defaclnamespace = 0 THEN ''
@@ -75,14 +103,28 @@ SELECT DISTINCT format(
     WHEN 'f' THEN 'FUNCTIONS'
     WHEN 'T' THEN 'TYPES'
     WHEN 'n' THEN 'SCHEMAS'
-  END
+  END,
+  CASE WHEN privilege.grantee = 0 THEN 'PUBLIC' ELSE 'darknetra_runtime' END
 )
 FROM pg_default_acl defaults
 JOIN pg_roles grantor ON grantor.oid = defaults.defaclrole
 LEFT JOIN pg_namespace namespace ON namespace.oid = defaults.defaclnamespace
 CROSS JOIN LATERAL aclexplode(defaults.defaclacl) privilege
-JOIN pg_roles grantee ON grantee.oid = privilege.grantee
-WHERE grantee.rolname = 'darknetra_runtime'
+JOIN pg_roles runtime_role ON runtime_role.rolname = 'darknetra_runtime'
+WHERE (
+    privilege.grantee = runtime_role.oid
+    OR (
+      privilege.grantee = 0
+      AND (
+        defaults.defaclobjtype = 'n'
+        OR (
+          namespace.nspname <> 'public'
+          AND namespace.nspname <> 'information_schema'
+          AND namespace.nspname NOT LIKE 'pg\_%' ESCAPE '\'
+        )
+      )
+    )
+  )
   AND defaults.defaclobjtype IN ('r', 'S', 'f', 'T', 'n')
 \gexec
 

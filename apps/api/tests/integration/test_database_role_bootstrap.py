@@ -81,19 +81,45 @@ async def test_bootstrap_reconciles_deliberately_overprivileged_runtime_role() -
                 "CREATE SEQUENCE IF NOT EXISTS runtime_reconciliation_poison.probe_sequence; "
                 "CREATE OR REPLACE FUNCTION runtime_reconciliation_poison.probe_function() "
                 "RETURNS integer LANGUAGE sql AS 'SELECT 1'; "
+                "CREATE OR REPLACE PROCEDURE runtime_reconciliation_poison.probe_procedure() "
+                "LANGUAGE plpgsql AS 'BEGIN NULL; END'; "
+                "DO $$ BEGIN "
+                "IF NOT EXISTS (SELECT 1 FROM pg_type type_record "
+                "JOIN pg_namespace namespace ON namespace.oid = type_record.typnamespace "
+                "WHERE namespace.nspname = 'runtime_reconciliation_poison' "
+                "AND type_record.typname = 'probe_enum') THEN "
+                "CREATE TYPE runtime_reconciliation_poison.probe_enum AS ENUM ('value'); "
+                "END IF; END $$; "
+                "CREATE DOMAIN runtime_reconciliation_poison.probe_domain AS text; "
                 "GRANT ALL ON SCHEMA runtime_reconciliation_poison TO darknetra_runtime; "
                 "GRANT ALL ON ALL TABLES IN SCHEMA runtime_reconciliation_poison "
                 "TO darknetra_runtime; "
                 "GRANT ALL ON ALL SEQUENCES IN SCHEMA runtime_reconciliation_poison "
                 "TO darknetra_runtime; "
-                "GRANT ALL ON ALL FUNCTIONS IN SCHEMA runtime_reconciliation_poison "
+                "GRANT ALL ON ALL ROUTINES IN SCHEMA runtime_reconciliation_poison "
                 "TO darknetra_runtime; "
+                "GRANT USAGE ON TYPE runtime_reconciliation_poison.probe_enum, "
+                "runtime_reconciliation_poison.probe_domain TO darknetra_runtime; "
+                "GRANT ALL ON SCHEMA runtime_reconciliation_poison TO PUBLIC; "
+                "GRANT ALL ON ALL TABLES IN SCHEMA runtime_reconciliation_poison TO PUBLIC; "
+                "GRANT ALL ON ALL SEQUENCES IN SCHEMA runtime_reconciliation_poison TO PUBLIC; "
+                "GRANT ALL ON ALL ROUTINES IN SCHEMA runtime_reconciliation_poison TO PUBLIC; "
+                "GRANT USAGE ON TYPE runtime_reconciliation_poison.probe_enum, "
+                "runtime_reconciliation_poison.probe_domain TO PUBLIC; "
                 "ALTER DEFAULT PRIVILEGES IN SCHEMA runtime_reconciliation_poison "
                 "GRANT ALL ON TABLES TO darknetra_runtime; "
                 "ALTER DEFAULT PRIVILEGES IN SCHEMA runtime_reconciliation_poison "
                 "GRANT ALL ON SEQUENCES TO darknetra_runtime; "
                 "ALTER DEFAULT PRIVILEGES IN SCHEMA runtime_reconciliation_poison "
-                "GRANT ALL ON FUNCTIONS TO darknetra_runtime"
+                "GRANT ALL ON FUNCTIONS TO darknetra_runtime; "
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA runtime_reconciliation_poison "
+                "GRANT ALL ON TABLES TO PUBLIC; "
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA runtime_reconciliation_poison "
+                "GRANT ALL ON SEQUENCES TO PUBLIC; "
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA runtime_reconciliation_poison "
+                "GRANT ALL ON FUNCTIONS TO PUBLIC; "
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA runtime_reconciliation_poison "
+                "GRANT USAGE ON TYPES TO PUBLIC"
             )
         )
         await session.commit()
@@ -139,6 +165,31 @@ async def test_bootstrap_reconciles_deliberately_overprivileged_runtime_role() -
                 "WHERE member_role.rolname = 'darknetra_runtime'"
             )
         ) == 0
+        effective_nonpublic_privileges = (
+            await session.execute(
+                sa.text(
+                    "SELECT "
+                    "has_schema_privilege('darknetra_runtime', "
+                    "'runtime_reconciliation_poison', 'USAGE'), "
+                    "has_table_privilege('darknetra_runtime', "
+                    "'runtime_reconciliation_poison.probe', 'SELECT'), "
+                    "has_sequence_privilege('darknetra_runtime', "
+                    "'runtime_reconciliation_poison.probe_sequence', 'USAGE'), "
+                    "has_function_privilege('darknetra_runtime', "
+                    "'runtime_reconciliation_poison.probe_function()', 'EXECUTE'), "
+                    "(SELECT has_function_privilege('darknetra_runtime', procedure.oid, "
+                    "'EXECUTE') FROM pg_proc procedure "
+                    "JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace "
+                    "WHERE namespace.nspname = 'runtime_reconciliation_poison' "
+                    "AND procedure.proname = 'probe_procedure'), "
+                    "has_type_privilege('darknetra_runtime', "
+                    "'runtime_reconciliation_poison.probe_enum', 'USAGE'), "
+                    "has_type_privilege('darknetra_runtime', "
+                    "'runtime_reconciliation_poison.probe_domain', 'USAGE')"
+                )
+            )
+        ).one()
+        assert effective_nonpublic_privileges == (False,) * 7
         assert await session.scalar(
             sa.text(
                 "SELECT tableowner = current_user FROM pg_tables "
@@ -207,6 +258,15 @@ async def test_bootstrap_reconciles_deliberately_overprivileged_runtime_role() -
                 "AND namespace.nspname = 'runtime_reconciliation_poison'"
             )
         ) == 0
+        assert await session.scalar(
+            sa.text(
+                "SELECT count(*) FROM pg_default_acl defaults "
+                "CROSS JOIN LATERAL aclexplode(defaults.defaclacl) acl "
+                "LEFT JOIN pg_namespace namespace ON namespace.oid = defaults.defaclnamespace "
+                "WHERE acl.grantee = 0 "
+                "AND namespace.nspname = 'runtime_reconciliation_poison'"
+            )
+        ) == 0
         await session.execute(sa.text("DROP TABLE runtime_owned_reconciliation_probe"))
         await session.execute(
             sa.text("DROP SCHEMA runtime_owned_reconciliation_schema")
@@ -222,6 +282,14 @@ async def test_bootstrap_reconciles_deliberately_overprivileged_runtime_role() -
                 "REVOKE ALL ON SEQUENCES FROM darknetra_runtime; "
                 "ALTER DEFAULT PRIVILEGES IN SCHEMA runtime_reconciliation_poison "
                 "REVOKE ALL ON FUNCTIONS FROM darknetra_runtime; "
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA runtime_reconciliation_poison "
+                "REVOKE ALL ON TABLES FROM PUBLIC; "
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA runtime_reconciliation_poison "
+                "REVOKE ALL ON SEQUENCES FROM PUBLIC; "
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA runtime_reconciliation_poison "
+                "REVOKE ALL ON FUNCTIONS FROM PUBLIC; "
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA runtime_reconciliation_poison "
+                "REVOKE ALL ON TYPES FROM PUBLIC; "
                 "DROP SCHEMA runtime_reconciliation_poison CASCADE"
             )
         )

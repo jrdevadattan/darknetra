@@ -76,81 +76,10 @@ def _install_canonical_derivation_functions() -> None:
         $$
         """
     )
-    op.execute(
-        """
-        CREATE OR REPLACE FUNCTION darknetra_historical_b7_canonical_jsonb(value jsonb)
-        RETURNS text LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE AS $$
-        DECLARE
-          value_kind text;
-          rendered text;
-        BEGIN
-          value_kind := jsonb_typeof(value);
-          IF value_kind = 'object' THEN
-            SELECT '{' || COALESCE(
-              string_agg(
-                to_jsonb(entry.key)::text || ':' ||
-                darknetra_historical_b7_canonical_jsonb(entry.value),
-                ',' ORDER BY entry.key COLLATE "C"
-              ),
-              ''
-            ) || '}' INTO rendered
-            FROM jsonb_each(value) AS entry;
-          ELSIF value_kind = 'array' THEN
-            SELECT '[' || COALESCE(
-              string_agg(
-                darknetra_historical_b7_canonical_jsonb(element.value),
-                ',' ORDER BY element.ordinality
-              ),
-              ''
-            ) || ']' INTO rendered
-            FROM jsonb_array_elements(value) WITH ORDINALITY AS element(value, ordinality);
-          ELSE
-            rendered := value::text;
-          END IF;
-          RETURN rendered;
-        END;
-        $$
-        """
-    )
-    op.execute(
-        """
-        CREATE OR REPLACE FUNCTION
-        darknetra_historical_b7_derivation_parameters_digest(value jsonb) RETURNS text
-        LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $$
-          SELECT encode(
-            digest(
-              convert_to('DARKNETRA-DERIVATION-PARAMETERS', 'UTF8') ||
-              decode('00', 'hex') || convert_to('v1', 'UTF8') || decode('00', 'hex') ||
-              convert_to(darknetra_historical_b7_canonical_jsonb(value), 'UTF8'),
-              'sha256'
-            ),
-            'hex'
-          )
-        $$
-        """
-    )
 
 
 def upgrade() -> None:
     _install_canonical_derivation_functions()
-
-    op.execute(
-        """
-        DO $$
-        BEGIN
-          IF EXISTS (
-            SELECT 1
-            FROM evidence_derivations
-            GROUP BY parent_evidence_id, transformation, transformer_version,
-              darknetra_derivation_parameters_digest(parameters_json)
-            HAVING count(*) > 1
-          ) THEN
-            RAISE EXCEPTION
-              'cannot upgrade evidence invariants: canonical derivation identities collide';
-          END IF;
-        END $$
-        """
-    )
 
     op.drop_constraint(
         "ck_evidence_manifest_complete_after_staging",
@@ -299,15 +228,6 @@ def downgrade() -> None:
               'cannot downgrade evidence invariants: distinct-parameter lineage requires upgraded schema';
           END IF;
           IF EXISTS (
-            SELECT 1 FROM evidence_derivations
-            GROUP BY parent_evidence_id, transformation, transformer_version,
-              darknetra_historical_b7_derivation_parameters_digest(parameters_json)
-            HAVING count(*) > 1
-          ) THEN
-            RAISE EXCEPTION
-              'cannot downgrade evidence invariants: historical derivation identities collide';
-          END IF;
-          IF EXISTS (
             SELECT 1 FROM evidence_artifacts
             WHERE state <> 'STAGING' AND sha512 IS NULL
           ) THEN
@@ -353,10 +273,6 @@ def downgrade() -> None:
         "evidence_derivations",
         type_="check",
     )
-    op.execute(
-        "UPDATE evidence_derivations SET parameters_digest = "
-        "darknetra_historical_b7_derivation_parameters_digest(parameters_json)"
-    )
     op.create_check_constraint(
         "ck_evidence_derivation_parameters_digest",
         "evidence_derivations",
@@ -364,10 +280,6 @@ def downgrade() -> None:
     )
     op.execute("DROP FUNCTION darknetra_derivation_parameters_digest(jsonb)")
     op.execute("DROP FUNCTION darknetra_canonical_jsonb(jsonb)")
-    op.execute(
-        "DROP FUNCTION darknetra_historical_b7_derivation_parameters_digest(jsonb)"
-    )
-    op.execute("DROP FUNCTION darknetra_historical_b7_canonical_jsonb(jsonb)")
 
     op.drop_constraint(
         "ck_evidence_sensitive_ciphertext_b64",

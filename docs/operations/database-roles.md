@@ -17,8 +17,12 @@ role memberships, resets the role to `NOSUPERUSER`, `NOCREATEDB`,
 `NOCREATEROLE`, `NOREPLICATION`, `NOBYPASSRLS`, and `INHERIT`, transfers only
 objects it owns in the current database back to the configured owner, and
 revokes direct database CREATE/TEMP, removes direct privileges across every
-non-system schema in the current database, clears poisoned default ACLs, and
-rebuilds only the intended public-schema table and sequence grants. Database
+non-system schema in the current database, including tables, sequences, all
+routines (functions and procedures), and standalone user-defined types and
+domains. The same reconciliation revokes effective PUBLIC privileges outside
+the intended `public` application schema, clears poisoned runtime and PUBLIC
+default ACLs, and rebuilds only the intended public-schema table and sequence
+grants. Database
 TEMPORARY is also revoked from PUBLIC so it cannot be inherited by the runtime
 role. The reconciliation does not inspect or change other databases. The
 one-shot `migrate` service then

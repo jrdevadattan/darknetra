@@ -4,6 +4,7 @@ from logging.config import fileConfig
 from alembic import context
 from darknetra_api.config import get_settings
 from darknetra_api.db.base import Base
+from darknetra_api.db.migration_transitions import prepare_evidence_transition
 from darknetra_api.models import metadata_models
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
@@ -36,6 +37,10 @@ def run_migrations_offline() -> None:
 def do_run_migrations(connection) -> None:
     context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
     with context.begin_transaction():
+        migration_context = context.get_context()
+        if migration_context.script is None:
+            raise RuntimeError("Alembic script directory is unavailable")
+        prepare_evidence_transition(connection, config, migration_context.script)
         context.run_migrations()
 
 

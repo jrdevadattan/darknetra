@@ -110,6 +110,21 @@ def test_derivation_parameters_normalize_only_integer_valued_numbers() -> None:
             canonical_derivation_parameters_json({"unsupported": unsupported_type})
 
 
+def test_derivation_parameters_enforce_a_1000_digit_integer_bound() -> None:
+    positive = int("9" * 1000)
+    negative = -positive
+
+    rendered = canonical_derivation_parameters_json(
+        {"negative": negative, "positive": positive, "zero": 0}
+    )
+    assert b'"positive":' + (b"9" * 1000) in rendered
+    assert b'"negative":-' + (b"9" * 1000) in rendered
+    assert b'"zero":0' in rendered
+
+    with pytest.raises(ValueError, match="1,000 decimal digits"):
+        canonical_derivation_parameters_json({"too_large": int("9" * 1001)})
+
+
 def test_repeated_values_use_independent_row_identity_for_aad() -> None:
     evidence_id = uuid4()
     crypto_service = crypto()

@@ -9,11 +9,24 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 _DOMAIN = b"DARKNETRA-DERIVATION-PARAMETERS\x00v1\x00"
+MAX_CANONICAL_INTEGER_DIGITS = 1000
+_CANONICAL_INTEGER_LIMIT = 10**MAX_CANONICAL_INTEGER_DIGITS
+
+
+def _validate_canonical_integer(value: int) -> int:
+    if abs(value) >= _CANONICAL_INTEGER_LIMIT:
+        raise ValueError(
+            "derivation parameters integers must contain at most "
+            "1,000 decimal digits"
+        )
+    return value
 
 
 def _normalize_canonical_json_value(value: Any) -> Any:
-    if value is None or isinstance(value, (str, bool, int)):
+    if value is None or isinstance(value, (str, bool)):
         return value
+    if isinstance(value, int):
+        return _validate_canonical_integer(value)
     if isinstance(value, float):
         try:
             emitted_token = json.dumps(value, allow_nan=False)
@@ -26,7 +39,7 @@ def _normalize_canonical_json_value(value: Any) -> Any:
             raise ValueError(
                 "derivation parameters numbers must be finite and integer-valued"
             )
-        return int(decimal_value)
+        return _validate_canonical_integer(int(decimal_value))
     if isinstance(value, list | tuple):
         return [_normalize_canonical_json_value(item) for item in value]
     if isinstance(value, Mapping):
@@ -58,4 +71,8 @@ def derivation_parameters_digest(parameters: Mapping[str, Any]) -> str:
     return hashlib.sha256(_DOMAIN + canonical_derivation_parameters_json(parameters)).hexdigest()
 
 
-__all__ = ["canonical_derivation_parameters_json", "derivation_parameters_digest"]
+__all__ = [
+    "MAX_CANONICAL_INTEGER_DIGITS",
+    "canonical_derivation_parameters_json",
+    "derivation_parameters_digest",
+]

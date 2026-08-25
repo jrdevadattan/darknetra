@@ -27,8 +27,10 @@ integral. It then writes the full base-10 integer (`1.0` to `1`, `1e23` and
 `1e30` to their decimal integers, and `-0.0` to `0`). This token rule avoids
 deriving identity from binary floating-point approximation. Non-integral and
 non-finite numbers are rejected. PostgreSQL applies the same rule recursively
-to JSONB, including nested objects, arrays, negative exponents, and arbitrarily
-large integers.
+to JSONB, including nested objects, arrays, and negative exponents. Canonical
+integers may contain at most 1,000 decimal digits, excluding the sign; Python
+rejects larger integers before serialization and PostgreSQL rejects them before
+digesting a direct or bulk write.
 
 Sensitive envelopes require canonical Base64, not merely decodable Base64.
 Both Python and PostgreSQL strictly decode and re-encode each value and require
@@ -39,11 +41,15 @@ TRUNCATE from the runtime role. The application role also lacks those table
 privileges and does not own the schema; see
 `docs/operations/database-roles.md` for deployment requirements.
 
-Downgrading the invariant revision is lossless for data representable by the
-prior schema. If repeated protected values, distinct-parameter lineage, or a
-SHA-256-only preserved row cannot fit the targeted historical schema, an early
-transactional preflight refuses the downgrade before any DDL or data change.
-For compatible rows, the migration rewrites every derivation digest with the
-historical-b7 canonicalizer before restoring the historical check, so a retry
-under the old application identity remains blocked. Upgrade likewise refuses
-historical rows that would collapse to one current canonical work identity.
+JSONB does not retain an input number's original token, so a downgrade cannot
+honestly reconstruct historical numeric identity. The d4-to-c3 migration and
+the narrowly scoped c3-to-b7 transition guard therefore refuse any populated
+derivation parameter tree containing a JSON number before DDL or data changes.
+String, boolean, and null-only trees downgrade normally. Repeated protected
+values and distinct-parameter lineage are preserved: the Alembic environment
+uses an exact-revision c3-to-b7 adapter that executes every published c3
+downgrade operation while omitting only the two obsolete shape preflights that
+would have rejected those valid rows. The adapter is restricted to the
+published b7/c3/d4 revision IDs. Upgrade from b7 likewise performs an
+exact-revision preflight and refuses historical rows whose prospective current
+canonical work identities collide before c3 can change the schema.
