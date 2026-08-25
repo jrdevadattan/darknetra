@@ -18,6 +18,13 @@ jobs:
         with:
           ref: testing-codex
           fetch-depth: 0
+      - name: Generate runtime database credential
+        shell: bash
+        run: |
+          RUNTIME_DB_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          echo "::add-mask::$RUNTIME_DB_PASSWORD"
+          echo "DARKNETRA_POSTGRES_RUNTIME_PASSWORD=$RUNTIME_DB_PASSWORD" >> "$GITHUB_ENV"
+          unset RUNTIME_DB_PASSWORD
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -264,6 +271,7 @@ jobs:
 
           ## Docker workflow
           ```bash
+          export DARKNETRA_POSTGRES_RUNTIME_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
           docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d --wait
           ```
           The base file uses an internal bridge; the development overlay publishes only loopback ports 3000 and 8000.

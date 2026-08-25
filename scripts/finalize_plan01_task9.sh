@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ -z "${DARKNETRA_POSTGRES_RUNTIME_PASSWORD:-}" ]]; then
+  export DARKNETRA_POSTGRES_RUNTIME_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+fi
+
 run_gate() {
   test -f .github/workflows/ci.yml
   test -f .github/dependabot.yml

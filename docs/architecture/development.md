@@ -39,6 +39,23 @@ Open `http://127.0.0.1:3000/dashboard`.
 
 ## Docker workflow
 
+Copy the example environment and generate the required runtime-role credential
+before the first Compose command:
+
+```bash
+cp .env.example .env
+export DARKNETRA_POSTGRES_RUNTIME_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+```
+
+PowerShell users can set the same process-local value with:
+
+```powershell
+Copy-Item .env.example .env
+$env:DARKNETRA_POSTGRES_RUNTIME_PASSWORD = python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Reuse that value for startup, inspection, and teardown; never print or commit it.
+
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d --wait
 ```

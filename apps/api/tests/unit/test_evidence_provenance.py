@@ -91,6 +91,17 @@ def test_derivation_parameters_normalize_only_integer_valued_numbers() -> None:
         b'"positive_exponent":100000000000000000000}'
     )
 
+    assert canonical_derivation_parameters_json(
+        {
+            "negative_exponent": -1e23,
+            "nested": [1e30, {"positive_exponent": 1e23}],
+        }
+    ) == (
+        b'{"negative_exponent":-100000000000000000000000,'
+        b'"nested":[1000000000000000000000000000000,'
+        b'{"positive_exponent":100000000000000000000000}]}'
+    )
+
     for unsupported in (1e-7, 1.5, float("inf"), float("-inf")):
         with pytest.raises(ValueError, match="integer-valued"):
             canonical_derivation_parameters_json({"unsupported": unsupported})

@@ -16,7 +16,12 @@ including for an existing Compose volume. Reconciliation removes unintended
 role memberships, resets the role to `NOSUPERUSER`, `NOCREATEDB`,
 `NOCREATEROLE`, `NOREPLICATION`, `NOBYPASSRLS`, and `INHERIT`, transfers only
 objects it owns in the current database back to the configured owner, and
-rebuilds current/default table and sequence grants. The one-shot `migrate` service then
+revokes direct database CREATE/TEMP, removes direct privileges across every
+non-system schema in the current database, clears poisoned default ACLs, and
+rebuilds only the intended public-schema table and sequence grants. Database
+TEMPORARY is also revoked from PUBLIC so it cannot be inherited by the runtime
+role. The reconciliation does not inspect or change other databases. The
+one-shot `migrate` service then
 receives both URLs because Alembic selects the owner URL. The API and worker
 receive only the runtime URL. Deployments outside Compose must preserve the same
 split and arrange default privileges for future tables.

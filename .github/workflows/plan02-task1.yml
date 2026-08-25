@@ -27,6 +27,13 @@ jobs:
       - uses: astral-sh/setup-uv@v10.0.1
         with:
           version: '0.12.4'
+      - name: Generate runtime database credential
+        shell: bash
+        run: |
+          RUNTIME_DB_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          echo "::add-mask::$RUNTIME_DB_PASSWORD"
+          echo "DARKNETRA_POSTGRES_RUNTIME_PASSWORD=$RUNTIME_DB_PASSWORD" >> "$GITHUB_ENV"
+          unset RUNTIME_DB_PASSWORD
       - name: Lock and sync Python workspace
         run: |
           uv lock
@@ -62,4 +69,7 @@ jobs:
           fi
       - name: Tear down
         if: always()
-        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml down -v --remove-orphans
+        shell: bash
+        run: |
+          export DARKNETRA_POSTGRES_RUNTIME_PASSWORD="${DARKNETRA_POSTGRES_RUNTIME_PASSWORD:-cleanup-only-placeholder}"
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml down -v --remove-orphans

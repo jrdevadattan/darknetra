@@ -21,6 +21,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Generate runtime database credential
+        shell: bash
+        run: |
+          RUNTIME_DB_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          echo "::add-mask::$RUNTIME_DB_PASSWORD"
+          echo "DARKNETRA_POSTGRES_RUNTIME_PASSWORD=$RUNTIME_DB_PASSWORD" >> "$GITHUB_ENV"
+          unset RUNTIME_DB_PASSWORD
       - uses: astral-sh/setup-uv@v10.0.1
         with:
           version: '0.12.4'
@@ -219,6 +226,10 @@ jobs:
           cat > scripts/smoke.sh <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
+
+          if [[ -z "${DARKNETRA_POSTGRES_RUNTIME_PASSWORD:-}" ]]; then
+            export DARKNETRA_POSTGRES_RUNTIME_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          fi
 
           compose=(docker compose -f docker-compose.yml -f docker-compose.dev.yml)
           cleanup() { "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true; }

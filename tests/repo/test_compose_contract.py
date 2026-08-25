@@ -6,6 +6,22 @@ from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
 
+EXECUTABLE_COMPOSE_FILES = {
+    Path(".github/workflows/ci.yml"),
+    Path(".github/workflows/plan02-task1.yml"),
+    Path(".github/workflows/plan02-task13.yml"),
+    Path(".github/workflows/plan02-task14.yml"),
+    Path(".github/workflows/plan02-task2.yml"),
+    Path(".github/workflows/task08-docker.yml"),
+    Path(".github/workflows/task09-finalize-v2.yml"),
+    Path(".github/workflows/task09-finalize-v3.yml"),
+    Path(".github/workflows/task09-finalize-v4.yml"),
+    Path(".github/workflows/task09-finalize.yml"),
+    Path("Makefile"),
+    Path("scripts/finalize_plan01_task9.sh"),
+    Path("scripts/smoke.sh"),
+}
+
 
 def test_compose_baseline_is_non_privileged_and_has_no_host_or_docker_socket_access() -> None:
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
@@ -78,3 +94,46 @@ def test_e2e_runtime_database_credential_is_shared_by_every_consumer() -> None:
         database_url = services[service_name]["environment"]["DARKNETRA_DATABASE_URL"]
         assert urlsplit(database_url).password == runtime_password
         assert urlsplit(database_url).path == "/darknetra_e2e_test"
+
+
+def test_every_executable_compose_entrypoint_provisions_the_required_runtime_password() -> None:
+    discovered = {
+        path.relative_to(ROOT)
+        for path in [
+            *(ROOT / ".github" / "workflows").glob("*.yml"),
+            *(ROOT / "scripts").glob("*.sh"),
+            ROOT / "Makefile",
+        ]
+        if "docker compose" in path.read_text(encoding="utf-8")
+    }
+    assert discovered == EXECUTABLE_COMPOSE_FILES
+
+    for relative_path in discovered:
+        content = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert "DARKNETRA_POSTGRES_RUNTIME_PASSWORD" in content, relative_path
+
+    workflow_paths = {
+        path for path in discovered if path.parts[:2] == (".github", "workflows")
+    }
+    for relative_path in workflow_paths:
+        content = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert "secrets.token_urlsafe" in content, relative_path
+        assert "::add-mask::$RUNTIME_DB_PASSWORD" in content, relative_path
+
+    for relative_path in {
+        Path("Makefile"),
+        Path("scripts/finalize_plan01_task9.sh"),
+        Path("scripts/smoke.sh"),
+    }:
+        content = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert "secrets.token_urlsafe" in content, relative_path
+
+    cleanup_workflows = {
+        Path(".github/workflows/plan02-task1.yml"),
+        Path(".github/workflows/plan02-task2.yml"),
+        Path(".github/workflows/plan02-task13.yml"),
+        Path(".github/workflows/plan02-task14.yml"),
+    }
+    for relative_path in cleanup_workflows:
+        content = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert "cleanup-only-placeholder" in content, relative_path

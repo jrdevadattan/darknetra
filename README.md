@@ -225,6 +225,23 @@ Place the printed value in `.env` as:
 DARKNETRA_JWT_SIGNING_KEY_B64=<generated value>
 ```
 
+Compose also requires a fresh, nonblank runtime-role database password. After
+copying `.env.example`, set it in the shell before the first Compose command
+(the shell value overrides the blank example entry):
+
+```bash
+export DARKNETRA_POSTGRES_RUNTIME_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+```
+
+In PowerShell:
+
+```powershell
+$env:DARKNETRA_POSTGRES_RUNTIME_PASSWORD = python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Keep that same shell value for every command in this stack lifecycle. Do not
+print it or commit it to `.env`.
+
 The local defaults use `http://localhost:3000` as `DARKNETRA_WEB_ORIGIN`. Keep the browser hostname consistent: a session issued for `localhost` should be used through `localhost`, not silently mixed with `127.0.0.1`.
 
 ### 2. Build images and start PostgreSQL

@@ -18,6 +18,13 @@ jobs:
         with:
           ref: testing-codex
           fetch-depth: 0
+      - name: Generate runtime database credential
+        shell: bash
+        run: |
+          RUNTIME_DB_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          echo "::add-mask::$RUNTIME_DB_PASSWORD"
+          echo "DARKNETRA_POSTGRES_RUNTIME_PASSWORD=$RUNTIME_DB_PASSWORD" >> "$GITHUB_ENV"
+          unset RUNTIME_DB_PASSWORD
 
       - uses: actions/setup-python@v5
         with:
@@ -327,6 +334,12 @@ jobs:
               runs-on: ubuntu-latest
               steps:
                 - uses: actions/checkout@v4
+                - name: Generate runtime database credential
+                  run: |
+                    RUNTIME_DB_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+                    echo "::add-mask::$RUNTIME_DB_PASSWORD"
+                    echo "DARKNETRA_POSTGRES_RUNTIME_PASSWORD=$RUNTIME_DB_PASSWORD" >> "$GITHUB_ENV"
+                    unset RUNTIME_DB_PASSWORD
                 - run: docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
                 - run: docker compose -f docker-compose.yml -f docker-compose.dev.yml build
           EOF
@@ -402,6 +415,7 @@ jobs:
           ## Docker workflow
 
           ```bash
+          export DARKNETRA_POSTGRES_RUNTIME_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
           docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build -d --wait
           ```
 

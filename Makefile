@@ -1,3 +1,6 @@
+DARKNETRA_POSTGRES_RUNTIME_PASSWORD ?= $(shell python -c "import secrets; print(secrets.token_urlsafe(32))")
+export DARKNETRA_POSTGRES_RUNTIME_PASSWORD
+
 .PHONY: bootstrap dev test check build smoke
 
 bootstrap:

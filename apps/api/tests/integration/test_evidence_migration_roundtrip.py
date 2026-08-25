@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import secrets
 import subprocess
@@ -21,11 +23,13 @@ from darknetra_api.models.evidence import (
 from darknetra_api.models.user import User
 from darknetra_api.security.encryption import SensitiveFieldCrypto
 from darknetra_api.services.evidence import build_evidence_derivation, build_sensitive_value
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 REPO_ROOT = Path(__file__).resolve().parents[4]
 FINAL_EVIDENCE_REVISION = "c3f80a92d614"
+HISTORICAL_DOMAIN = b"DARKNETRA-DERIVATION-PARAMETERS\x00v1\x00"
 
 
 def _migration_tests_enabled() -> bool:
@@ -60,6 +64,17 @@ def _crypto() -> SensitiveFieldCrypto:
         active_key_version="v1",
         blind_index_key=secrets.token_bytes(32),
     )
+
+
+def _historical_digest(parameters: dict[str, object]) -> str:
+    rendered = json.dumps(
+        parameters,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(HISTORICAL_DOMAIN + rendered).hexdigest()
 
 
 def _artifact(case: Case, owner: User, suffix: str) -> EvidenceArtifact:
@@ -133,7 +148,13 @@ async def test_populated_compatible_downgrade_and_upgrade_preserve_data() -> Non
             child_evidence_id=child.id,
             transformation="extract",
             transformer_version="1",
-            parameters={"member": "safe.txt"},
+            parameters={
+                "integral_float": 1.0,
+                "negative_zero": -0.0,
+                "positive_exponent": 1e23,
+                "larger_exponent": 1e30,
+                "nested": [{"value": -1e23}],
+            },
         )
         session.add_all([value, derivation])
         await session.commit()
@@ -151,9 +172,44 @@ async def test_populated_compatible_downgrade_and_upgrade_preserve_data() -> Non
         assert await session.scalar(
             sa.text(
                 "SELECT count(*) FROM pg_proc "
-                "WHERE proname = 'darknetra_derivation_parameters_digest'"
+                "WHERE proname IN ('darknetra_canonical_jsonb', "
+                "'darknetra_derivation_parameters_digest', "
+                "'darknetra_historical_b7_canonical_jsonb', "
+                "'darknetra_historical_b7_derivation_parameters_digest')"
             )
         ) == 0
+        downgraded = (
+            await session.execute(
+                sa.text(
+                    "SELECT case_id, parent_evidence_id, child_evidence_id, transformation, "
+                    "transformer_version, parameters_json, parameters_digest "
+                    "FROM evidence_derivations WHERE id = :id"
+                ).bindparams(id=derivation_id)
+            )
+        ).one()
+        assert downgraded.parameters_digest == _historical_digest(
+            downgraded.parameters_json
+        )
+        with pytest.raises(IntegrityError):
+            async with session.begin_nested():
+                await session.execute(
+                    sa.text(
+                        "INSERT INTO evidence_derivations "
+                        "(id, case_id, parent_evidence_id, child_evidence_id, transformation, "
+                        "transformer_version, parameters_json, parameters_digest) "
+                        "VALUES (gen_random_uuid(), :case_id, :parent_id, :child_id, "
+                        ":transformation, :transformer_version, CAST(:parameters AS jsonb), "
+                        ":digest)"
+                    ).bindparams(
+                        case_id=downgraded.case_id,
+                        parent_id=downgraded.parent_evidence_id,
+                        child_id=downgraded.child_evidence_id,
+                        transformation=downgraded.transformation,
+                        transformer_version=downgraded.transformer_version,
+                        parameters=json.dumps(downgraded.parameters_json),
+                        digest=_historical_digest(downgraded.parameters_json),
+                    )
+                )
         assert await session.scalar(
             sa.text("SELECT count(*) FROM evidence_sensitive_values WHERE id = :id").bindparams(
                 id=value_id
@@ -366,3 +422,103 @@ async def test_historical_b7_populated_database_upgrades_to_new_head() -> None:
         ) is False
         await _clear(session)
     await engine.dispose()
+
+
+async def test_historical_b7_identity_collision_refuses_upgrade_atomically() -> None:
+    if not _migration_tests_enabled():
+        pytest.skip("set DARKNETRA_RUN_MIGRATION_TESTS=1 for destructive migration proof")
+
+    _run_alembic("downgrade base")
+    _run_alembic("upgrade b7c19a4e5d20")
+
+    engine, sessions = await _owner_session_factory()
+    async with sessions() as session:
+        owner = User(
+            username="historical-b7-collision-owner",
+            username_normalized="historical-b7-collision-owner",
+            display_name="historical-b7-collision-owner",
+            password_hash="not-used",
+            global_roles=[GlobalRole.CASE_OWNER],
+            is_active=True,
+            must_change_password=False,
+        )
+        session.add(owner)
+        await session.flush()
+        case = Case(
+            case_code="EVIDENCE-HISTORICAL-B7-COLLISION",
+            title="Historical b7 collision",
+            status=CaseStatus.OPEN,
+            sensitivity=CaseSensitivity.STANDARD,
+            owner_user_id=owner.id,
+            source_authority_summary="Synthetic authorized fixture",
+        )
+        session.add(case)
+        await session.flush()
+        parent = _artifact(case, owner, "7")
+        first_child = _artifact(case, owner, "8")
+        second_child = _artifact(case, owner, "9")
+        session.add_all([parent, first_child, second_child])
+        await session.flush()
+        for child_id, parameters in (
+            (first_child.id, {"n": 1}),
+            (second_child.id, {"n": 1.0}),
+        ):
+            await session.execute(
+                sa.text(
+                    "INSERT INTO evidence_derivations "
+                    "(id, case_id, parent_evidence_id, child_evidence_id, transformation, "
+                    "transformer_version, parameters_json, parameters_digest) "
+                    "VALUES (gen_random_uuid(), :case_id, :parent_id, :child_id, "
+                    "'collision', '1', CAST(:parameters AS jsonb), :digest)"
+                ).bindparams(
+                    case_id=case.id,
+                    parent_id=parent.id,
+                    child_id=child_id,
+                    parameters=json.dumps(parameters),
+                    digest=_historical_digest(parameters),
+                )
+            )
+        await session.commit()
+        original_digests = list(
+            (
+                await session.scalars(
+                    sa.text(
+                        "SELECT parameters_digest FROM evidence_derivations "
+                        "ORDER BY parameters_digest"
+                    )
+                )
+            ).all()
+        )
+    await engine.dispose()
+
+    refused = _run_alembic("upgrade head", expect_success=False)
+    assert refused.returncode != 0
+    assert "cannot upgrade evidence invariants" in refused.stdout + refused.stderr
+
+    engine, sessions = await _owner_session_factory()
+    async with sessions() as session:
+        assert await session.scalar(sa.text("SELECT version_num FROM alembic_version")) == (
+            "b7c19a4e5d20"
+        )
+        assert await session.scalar(
+            sa.text(
+                "SELECT count(*) FROM pg_proc WHERE proname IN "
+                "('darknetra_canonical_jsonb', 'darknetra_derivation_parameters_digest', "
+                "'darknetra_historical_b7_canonical_jsonb', "
+                "'darknetra_historical_b7_derivation_parameters_digest')"
+            )
+        ) == 0
+        assert list(
+            (
+                await session.scalars(
+                    sa.text(
+                        "SELECT parameters_digest FROM evidence_derivations "
+                        "ORDER BY parameters_digest"
+                    )
+                )
+            ).all()
+        ) == original_digests
+        assert await session.scalar(sa.text("SELECT count(*) FROM evidence_derivations")) == 2
+        await _clear(session)
+    await engine.dispose()
+    _run_alembic("upgrade head")

@@ -67,6 +67,35 @@ async def test_bootstrap_reconciles_deliberately_overprivileged_runtime_role() -
         await session.execute(
             sa.text("GRANT ALL PRIVILEGES ON custody_events TO darknetra_runtime")
         )
+        await session.execute(
+            sa.text(
+                "DO $$ BEGIN EXECUTE format("
+                "'GRANT CREATE, TEMPORARY ON DATABASE %I TO darknetra_runtime', "
+                "current_database()); END $$"
+            )
+        )
+        await session.execute(
+            sa.text(
+                "CREATE SCHEMA IF NOT EXISTS runtime_reconciliation_poison; "
+                "CREATE TABLE IF NOT EXISTS runtime_reconciliation_poison.probe (id integer); "
+                "CREATE SEQUENCE IF NOT EXISTS runtime_reconciliation_poison.probe_sequence; "
+                "CREATE OR REPLACE FUNCTION runtime_reconciliation_poison.probe_function() "
+                "RETURNS integer LANGUAGE sql AS 'SELECT 1'; "
+                "GRANT ALL ON SCHEMA runtime_reconciliation_poison TO darknetra_runtime; "
+                "GRANT ALL ON ALL TABLES IN SCHEMA runtime_reconciliation_poison "
+                "TO darknetra_runtime; "
+                "GRANT ALL ON ALL SEQUENCES IN SCHEMA runtime_reconciliation_poison "
+                "TO darknetra_runtime; "
+                "GRANT ALL ON ALL FUNCTIONS IN SCHEMA runtime_reconciliation_poison "
+                "TO darknetra_runtime; "
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA runtime_reconciliation_poison "
+                "GRANT ALL ON TABLES TO darknetra_runtime; "
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA runtime_reconciliation_poison "
+                "GRANT ALL ON SEQUENCES TO darknetra_runtime; "
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA runtime_reconciliation_poison "
+                "GRANT ALL ON FUNCTIONS TO darknetra_runtime"
+            )
+        )
         await session.commit()
 
     completed = await asyncio.to_thread(
@@ -141,12 +170,60 @@ async def test_bootstrap_reconciles_deliberately_overprivileged_runtime_role() -
             )
         ).one()
         assert custody_privileges == (True, True, False, False, False, False)
+        database_privileges = (
+            await session.execute(
+                sa.text(
+                    "SELECT has_database_privilege('darknetra_runtime', current_database(), "
+                    "'CONNECT'), has_database_privilege('darknetra_runtime', current_database(), "
+                    "'CREATE'), has_database_privilege('darknetra_runtime', current_database(), "
+                    "'TEMPORARY')"
+                )
+            )
+        ).one()
+        assert database_privileges == (True, False, False)
+        assert await session.scalar(
+            sa.text(
+                "SELECT count(*) FROM ("
+                "SELECT n.nspacl AS acl FROM pg_namespace n "
+                "WHERE n.nspname = 'runtime_reconciliation_poison' "
+                "UNION ALL SELECT c.relacl FROM pg_class c "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = 'runtime_reconciliation_poison' "
+                "UNION ALL SELECT p.proacl FROM pg_proc p "
+                "JOIN pg_namespace n ON n.oid = p.pronamespace "
+                "WHERE n.nspname = 'runtime_reconciliation_poison'"
+                ") protected CROSS JOIN LATERAL aclexplode(protected.acl) acl "
+                "JOIN pg_roles grantee ON grantee.oid = acl.grantee "
+                "WHERE grantee.rolname = 'darknetra_runtime'"
+            )
+        ) == 0
+        assert await session.scalar(
+            sa.text(
+                "SELECT count(*) FROM pg_default_acl defaults "
+                "CROSS JOIN LATERAL aclexplode(defaults.defaclacl) acl "
+                "JOIN pg_roles grantee ON grantee.oid = acl.grantee "
+                "LEFT JOIN pg_namespace namespace ON namespace.oid = defaults.defaclnamespace "
+                "WHERE grantee.rolname = 'darknetra_runtime' "
+                "AND namespace.nspname = 'runtime_reconciliation_poison'"
+            )
+        ) == 0
         await session.execute(sa.text("DROP TABLE runtime_owned_reconciliation_probe"))
         await session.execute(
             sa.text("DROP SCHEMA runtime_owned_reconciliation_schema")
         )
         await session.execute(
             sa.text("DROP ROLE darknetra_runtime_unintended_membership")
+        )
+        await session.execute(
+            sa.text(
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA runtime_reconciliation_poison "
+                "REVOKE ALL ON TABLES FROM darknetra_runtime; "
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA runtime_reconciliation_poison "
+                "REVOKE ALL ON SEQUENCES FROM darknetra_runtime; "
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA runtime_reconciliation_poison "
+                "REVOKE ALL ON FUNCTIONS FROM darknetra_runtime; "
+                "DROP SCHEMA runtime_reconciliation_poison CASCADE"
+            )
         )
         await session.commit()
     await engine.dispose()

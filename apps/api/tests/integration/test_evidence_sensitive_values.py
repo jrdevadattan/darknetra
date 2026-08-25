@@ -809,10 +809,12 @@ async def test_database_derives_canonical_parameters_digest_and_rejects_mismatch
         {"z": [1, True, None], "a": {"é": "東京"}},
         {
             "positive_exponent": 1e20,
+            "larger_positive_exponent": 1e23,
+            "negative_exponent": -1e23,
             "integral_float": 1.0,
             "negative_zero": -0.0,
             "large_integer": 123456789012345678901234567890,
-            "nested": [2.0, {"value": -3.0}],
+            "nested": [1e30, {"value": -3.0}],
         },
     ]
     async with async_session_factory() as session:
@@ -879,6 +881,15 @@ async def test_database_derives_canonical_parameters_digest_and_rejects_mismatch
         loaded = await session.get(EvidenceDerivation, valid_id)
         assert loaded is not None
         assert loaded.parameters_json["positive_exponent"] == 100000000000000000000
+        assert loaded.parameters_json["larger_positive_exponent"] == (
+            100000000000000000000000
+        )
+        assert loaded.parameters_json["negative_exponent"] == (
+            -100000000000000000000000
+        )
+        assert loaded.parameters_json["nested"][0] == (
+            1000000000000000000000000000000
+        )
         with pytest.raises(IntegrityError):
             async with session.begin_nested():
                 await session.execute(

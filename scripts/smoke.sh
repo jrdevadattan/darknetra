@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ -z "${DARKNETRA_POSTGRES_RUNTIME_PASSWORD:-}" ]]; then
+  export DARKNETRA_POSTGRES_RUNTIME_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+fi
+
 compose=(docker compose -f docker-compose.yml -f docker-compose.dev.yml)
 cleanup() { "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true; }
 finish() {

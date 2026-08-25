@@ -33,7 +33,59 @@ WHERE member_role.rolname = 'darknetra_runtime'
 
 REASSIGN OWNED BY darknetra_runtime TO :"owner_role";
 
+REVOKE CREATE, TEMPORARY ON DATABASE :"database_name" FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON DATABASE :"database_name" FROM darknetra_runtime;
 GRANT CONNECT ON DATABASE :"database_name" TO darknetra_runtime;
+
+SELECT format('REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA %I FROM darknetra_runtime', nspname)
+FROM pg_namespace
+WHERE nspname <> 'public'
+  AND nspname <> 'information_schema'
+  AND nspname NOT LIKE 'pg\_%' ESCAPE '\'
+\gexec
+SELECT format('REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA %I FROM darknetra_runtime', nspname)
+FROM pg_namespace
+WHERE nspname <> 'public'
+  AND nspname <> 'information_schema'
+  AND nspname NOT LIKE 'pg\_%' ESCAPE '\'
+\gexec
+SELECT format('REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA %I FROM darknetra_runtime', nspname)
+FROM pg_namespace
+WHERE nspname <> 'public'
+  AND nspname <> 'information_schema'
+  AND nspname NOT LIKE 'pg\_%' ESCAPE '\'
+\gexec
+SELECT format('REVOKE ALL PRIVILEGES ON SCHEMA %I FROM darknetra_runtime', nspname)
+FROM pg_namespace
+WHERE nspname <> 'public'
+  AND nspname <> 'information_schema'
+  AND nspname NOT LIKE 'pg\_%' ESCAPE '\'
+\gexec
+
+SELECT DISTINCT format(
+  'ALTER DEFAULT PRIVILEGES FOR ROLE %I%s REVOKE ALL PRIVILEGES ON %s FROM darknetra_runtime',
+  grantor.rolname,
+  CASE
+    WHEN defaults.defaclnamespace = 0 THEN ''
+    ELSE format(' IN SCHEMA %I', namespace.nspname)
+  END,
+  CASE defaults.defaclobjtype
+    WHEN 'r' THEN 'TABLES'
+    WHEN 'S' THEN 'SEQUENCES'
+    WHEN 'f' THEN 'FUNCTIONS'
+    WHEN 'T' THEN 'TYPES'
+    WHEN 'n' THEN 'SCHEMAS'
+  END
+)
+FROM pg_default_acl defaults
+JOIN pg_roles grantor ON grantor.oid = defaults.defaclrole
+LEFT JOIN pg_namespace namespace ON namespace.oid = defaults.defaclnamespace
+CROSS JOIN LATERAL aclexplode(defaults.defaclacl) privilege
+JOIN pg_roles grantee ON grantee.oid = privilege.grantee
+WHERE grantee.rolname = 'darknetra_runtime'
+  AND defaults.defaclobjtype IN ('r', 'S', 'f', 'T', 'n')
+\gexec
+
 GRANT USAGE ON SCHEMA public TO darknetra_runtime;
 REVOKE CREATE ON SCHEMA public FROM darknetra_runtime;
 REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM darknetra_runtime;
