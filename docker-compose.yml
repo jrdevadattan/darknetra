@@ -7,8 +7,10 @@ services:
       POSTGRES_DB: darknetra
       POSTGRES_USER: darknetra
       POSTGRES_PASSWORD: ${DARKNETRA_POSTGRES_PASSWORD:-darknetra-dev-only}
+      DARKNETRA_POSTGRES_RUNTIME_PASSWORD: ${DARKNETRA_POSTGRES_RUNTIME_PASSWORD:-darknetra-runtime-dev-only}
     volumes:
       - postgres-data:/var/lib/postgresql
+      - ./infrastructure/docker/postgres-init:/docker-entrypoint-initdb.d:ro
     networks:
       - app
     healthcheck:
@@ -28,6 +30,23 @@ services:
       timeout: 3s
       retries: 12
 
+  db-bootstrap:
+    image: postgres:18
+    command: ["/bin/sh", "/opt/darknetra/001-runtime-role.sh"]
+    environment:
+      POSTGRES_DB: darknetra
+      POSTGRES_USER: darknetra
+      PGPASSWORD: ${DARKNETRA_POSTGRES_PASSWORD:-darknetra-dev-only}
+      PGHOST: postgres
+      DARKNETRA_POSTGRES_RUNTIME_PASSWORD: ${DARKNETRA_POSTGRES_RUNTIME_PASSWORD:-darknetra-runtime-dev-only}
+    volumes:
+      - ./infrastructure/docker/postgres-init/001-runtime-role.sh:/opt/darknetra/001-runtime-role.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - app
+
   api:
     build:
       context: .
@@ -35,7 +54,7 @@ services:
     environment: &api-environment
       DARKNETRA_ENVIRONMENT: development
       DARKNETRA_BUILD_VERSION: docker-dev
-      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:${DARKNETRA_POSTGRES_PASSWORD:-darknetra-dev-only}@postgres:5432/darknetra
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra_runtime:${DARKNETRA_POSTGRES_RUNTIME_PASSWORD:-darknetra-runtime-dev-only}@postgres:5432/darknetra
       DARKNETRA_REDIS_URL: redis://redis:6379/0
       DARKNETRA_WEB_ORIGIN: ${DARKNETRA_WEB_ORIGIN:-http://localhost:3000}
       DARKNETRA_JWT_SIGNING_KEY_B64: ${DARKNETRA_JWT_SIGNING_KEY_B64:-}
@@ -46,6 +65,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     networks:
@@ -60,6 +81,30 @@ services:
       timeout: 4s
       retries: 12
       start_period: 5s
+
+  migrate:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api.Dockerfile
+    command:
+      - uv
+      - run
+      - --no-sync
+      - alembic
+      - -c
+      - apps/api/alembic.ini
+      - upgrade
+      - head
+    environment:
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra_runtime:${DARKNETRA_POSTGRES_RUNTIME_PASSWORD:-darknetra-runtime-dev-only}@postgres:5432/darknetra
+      DARKNETRA_DATABASE_OWNER_URL: postgresql+psycopg://darknetra:${DARKNETRA_POSTGRES_PASSWORD:-darknetra-dev-only}@postgres:5432/darknetra
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-bootstrap:
+        condition: service_completed_successfully
+    networks:
+      - app
 
   worker:
     build:
@@ -81,6 +126,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     networks:

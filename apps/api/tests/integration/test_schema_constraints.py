@@ -2,6 +2,7 @@ from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
+from darknetra_api.config import get_settings
 from darknetra_api.db.session import async_session_factory
 from darknetra_api.models.audit import AuditEvent
 from darknetra_api.models.case import Case
@@ -9,25 +10,23 @@ from darknetra_api.models.case_membership import CaseMembership
 from darknetra_api.models.enums import CaseSensitivity, CaseStatus
 from darknetra_api.models.user import User
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
 async def _clear_schema() -> None:
-    async with async_session_factory() as session:
-        for table in (
-            "custody_events",
-            "evidence_derivations",
-            "evidence_sensitive_values",
-            "evidence_artifacts",
-            "jobs",
-            "audit_events",
-            "case_membership_roles",
-            "case_memberships",
-            "cases",
-            "auth_sessions",
-            "users",
-        ):
-            await session.execute(sa.text(f"DELETE FROM {table}"))
+    settings = get_settings()
+    owner_engine = create_async_engine(settings.database_owner_url or settings.database_url)
+    owner_sessions = async_sessionmaker(owner_engine, expire_on_commit=False)
+    async with owner_sessions() as session:
+        await session.execute(
+            sa.text(
+                "TRUNCATE custody_events, evidence_derivations, evidence_sensitive_values, "
+                "evidence_artifacts, jobs, audit_events, case_membership_roles, "
+                "case_memberships, cases, auth_sessions, users CASCADE"
+            )
+        )
         await session.commit()
+    await owner_engine.dispose()
 
 
 @pytest.fixture(autouse=True)

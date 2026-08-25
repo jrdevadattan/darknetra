@@ -25,6 +25,7 @@ from darknetra_api.services.evidence import (
     EvidenceDigestImmutableError,
     build_sensitive_value,
     normalize_source_locator_for_dedup,
+    preserve_evidence_manifest,
     rotate_evidence_sensitive_value,
     update_artifact_metadata,
 )
@@ -189,6 +190,83 @@ def test_artifact_digest_fields_become_immutable_after_preservation() -> None:
 
     with pytest.raises(EvidenceDigestImmutableError):
         update_artifact_metadata(artifact, sha256="c" * 64)
+
+    with pytest.raises(EvidenceDigestImmutableError, match="cannot return to staging"):
+        update_artifact_metadata(artifact, state=EvidenceState.STAGING)
+
+
+def test_preservation_accepts_sha256_only_and_validates_optional_sha512() -> None:
+    artifact = EvidenceArtifact(
+        case_id=uuid4(),
+        source_class=EvidenceSourceClass.AUTHORIZED_IMPORT,
+        source_type="document",
+        acquisition_method="upload",
+        collector_user_id=uuid4(),
+        captured_at=datetime.now(UTC),
+        state=EvidenceState.STAGING,
+    )
+
+    preserve_evidence_manifest(
+        artifact,
+        media_type="application/octet-stream",
+        size_bytes=0,
+        sha256="a" * 64,
+        object_key="sha256/aa/" + "a" * 64,
+    )
+
+    assert artifact.state is EvidenceState.PRESERVED
+    assert artifact.sha512 is None
+
+    invalid_sha512 = EvidenceArtifact(
+        case_id=uuid4(),
+        source_class=EvidenceSourceClass.AUTHORIZED_IMPORT,
+        source_type="document",
+        acquisition_method="upload",
+        collector_user_id=uuid4(),
+        captured_at=datetime.now(UTC),
+        state=EvidenceState.STAGING,
+    )
+    with pytest.raises(ValueError, match="sha512"):
+        preserve_evidence_manifest(
+            invalid_sha512,
+            media_type="application/octet-stream",
+            size_bytes=1,
+            sha256="b" * 64,
+            sha512="not-canonical",
+            object_key="sha256/bb/" + "b" * 64,
+        )
+
+
+@pytest.mark.parametrize(
+    ("sha256", "object_key", "message"),
+    [
+        ("A" * 64, "sha256/aa/value", "sha256"),
+        ("a" * 64, "   ", "object_key"),
+    ],
+)
+def test_preservation_rejects_noncanonical_required_manifest_fields(
+    sha256: str,
+    object_key: str,
+    message: str,
+) -> None:
+    artifact = EvidenceArtifact(
+        case_id=uuid4(),
+        source_class=EvidenceSourceClass.AUTHORIZED_IMPORT,
+        source_type="document",
+        acquisition_method="upload",
+        collector_user_id=uuid4(),
+        captured_at=datetime.now(UTC),
+        state=EvidenceState.STAGING,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        preserve_evidence_manifest(
+            artifact,
+            media_type="application/octet-stream",
+            size_bytes=1,
+            sha256=sha256,
+            object_key=object_key,
+        )
 
 
 def test_evidence_rotation_reuses_canonical_purpose_and_value_id() -> None:

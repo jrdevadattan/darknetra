@@ -67,7 +67,7 @@ class EvidenceArtifact(Base):
         ),
         sa.CheckConstraint(
             "state = 'STAGING' OR (size_bytes IS NOT NULL AND sha256 IS NOT NULL "
-            "AND sha512 IS NOT NULL AND object_key IS NOT NULL)",
+            "AND object_key IS NOT NULL AND btrim(object_key) <> '')",
             name="ck_evidence_manifest_complete_after_staging",
         ),
     )
@@ -162,13 +162,17 @@ class EvidenceSensitiveValue(Base):
         ),
         sa.CheckConstraint(
             "nonce_b64 ~ '^[A-Za-z0-9+/]{16}$' "
-            "AND octet_length(decode(nonce_b64, 'base64')) = 12",
+            "AND octet_length(decode(nonce_b64, 'base64')) = 12 "
+            "AND translate(encode(decode(nonce_b64, 'base64'), 'base64'), E'\\n\\r', '') "
+            "= nonce_b64",
             name="ck_evidence_sensitive_nonce_b64",
         ),
         sa.CheckConstraint(
             "ciphertext_b64 ~ '^([A-Za-z0-9+/]{4})*"
             "([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$' "
-            "AND octet_length(decode(ciphertext_b64, 'base64')) >= 16",
+            "AND octet_length(decode(ciphertext_b64, 'base64')) >= 16 "
+            "AND translate(encode(decode(ciphertext_b64, 'base64'), 'base64'), E'\\n\\r', '') "
+            "= ciphertext_b64",
             name="ck_evidence_sensitive_ciphertext_b64",
         ),
         sa.CheckConstraint(
@@ -239,7 +243,7 @@ class EvidenceDerivation(Base):
             name="ck_evidence_derivation_not_self",
         ),
         sa.CheckConstraint(
-            "parameters_digest ~ '^[0-9a-f]{64}$'",
+            "parameters_digest = darknetra_derivation_parameters_digest(parameters_json)",
             name="ck_evidence_derivation_parameters_digest",
         ),
         sa.UniqueConstraint(
@@ -305,7 +309,11 @@ def _prevent_preserved_manifest_rewrite(
     inspection = sa.inspect(target)
     state_history = inspection.attrs.state.history
     old_state = state_history.deleted[0] if state_history.deleted else target.state
-    if old_state is EvidenceState.STAGING:
+    if old_state != EvidenceState.STAGING and target.state == EvidenceState.STAGING:
+        from darknetra_api.services.evidence import EvidenceDigestImmutableError
+
+        raise EvidenceDigestImmutableError("preserved evidence cannot return to staging")
+    if old_state == EvidenceState.STAGING:
         return
     for attribute_name in ("size_bytes", "sha256", "sha512", "object_key"):
         history = inspection.attrs[attribute_name].history
@@ -350,6 +358,19 @@ def _validate_derivation_parameters(
     mapper: Mapper[Any], connection: Any, target: EvidenceDerivation
 ) -> None:
     del mapper, connection
+    from darknetra_api.services.provenance import derivation_parameters_digest
+
+    expected = derivation_parameters_digest(target.parameters_json)
+    if target.parameters_digest != expected:
+        raise ValueError("derivation parameters digest does not match canonical parameters")
+
+
+@event.listens_for(EvidenceDerivation, "load")
+@event.listens_for(EvidenceDerivation, "refresh")
+def _validate_loaded_derivation_parameters(
+    target: EvidenceDerivation, context: Any, attrs: Any = None
+) -> None:
+    del context, attrs
     from darknetra_api.services.provenance import derivation_parameters_digest
 
     expected = derivation_parameters_digest(target.parameters_json)

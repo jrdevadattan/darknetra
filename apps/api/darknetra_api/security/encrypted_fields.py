@@ -97,9 +97,12 @@ def _decode_b64(value: Any) -> bytes | None:
     if not isinstance(value, str):
         return None
     try:
-        return base64.b64decode(value, validate=True)
+        decoded = base64.b64decode(value, validate=True)
     except (binascii.Error, ValueError):
         return None
+    if base64.b64encode(decoded).decode("ascii") != value:
+        return None
+    return decoded
 
 
 def _redact_email(plaintext: str) -> str:

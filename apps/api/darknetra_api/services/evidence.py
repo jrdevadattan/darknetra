@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -28,6 +29,8 @@ from darknetra_api.services.sensitive_values import SensitiveValue
 
 EVIDENCE_RESOURCE_TYPE = "evidence"
 _IMMUTABLE_MANIFEST_FIELDS = frozenset({"size_bytes", "sha256", "sha512", "object_key"})
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_SHA512_PATTERN = re.compile(r"^[0-9a-f]{128}$")
 _FIELD_REVEAL_ROLES = {
     EvidenceSensitiveValueKind.SOURCE_LOCATOR: frozenset(
         {GlobalRole.CASE_OWNER, GlobalRole.COLLECTOR, GlobalRole.ANALYST, GlobalRole.REVIEWER}
@@ -160,8 +163,8 @@ def preserve_evidence_manifest(
     media_type: str,
     size_bytes: int,
     sha256: str,
-    sha512: str,
     object_key: str,
+    sha512: str | None = None,
     ingested_at: datetime | None = None,
 ) -> None:
     """Set an artifact's authoritative preservation manifest exactly once."""
@@ -170,6 +173,14 @@ def preserve_evidence_manifest(
         raise EvidenceDigestImmutableError("evidence manifest has already been preserved")
     if size_bytes < 0:
         raise ValueError("size_bytes must be non-negative")
+    if not isinstance(sha256, str) or not _SHA256_PATTERN.fullmatch(sha256):
+        raise ValueError("sha256 must be canonical lowercase hexadecimal")
+    if sha512 is not None and (
+        not isinstance(sha512, str) or not _SHA512_PATTERN.fullmatch(sha512)
+    ):
+        raise ValueError("sha512 must be canonical lowercase hexadecimal when provided")
+    if not isinstance(object_key, str) or not object_key.strip():
+        raise ValueError("object_key must be nonblank")
     artifact.media_type = media_type
     artifact.size_bytes = size_bytes
     artifact.sha256 = sha256
@@ -208,8 +219,13 @@ def update_artifact_metadata(artifact: EvidenceArtifact, **changes: Any) -> None
     unknown = set(changes) - set(EvidenceArtifact.__table__.columns.keys())
     if unknown:
         raise ValueError(f"unknown evidence fields: {', '.join(sorted(unknown))}")
+    if (
+        artifact.state != EvidenceState.STAGING
+        and changes.get("state") == EvidenceState.STAGING
+    ):
+        raise EvidenceDigestImmutableError("preserved evidence cannot return to staging")
     for name, value in changes.items():
-        if name in _IMMUTABLE_MANIFEST_FIELDS and artifact.state is not EvidenceState.STAGING:
+        if name in _IMMUTABLE_MANIFEST_FIELDS and artifact.state != EvidenceState.STAGING:
             raise EvidenceDigestImmutableError("preserved evidence manifest cannot be rewritten")
         setattr(artifact, name, value)
 

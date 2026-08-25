@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Annotated
 from uuid import UUID, uuid4
 
@@ -26,6 +27,13 @@ from darknetra_api.services.sensitive_values import (
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 router = APIRouter(prefix="/cases/{case_id}/evidence", tags=["evidence"])
+_REVEAL_PATH_PATTERN = re.compile(
+    r"^/api/v1/cases/[^/]+/evidence/[^/]+/sensitive/[^/]+/[^/]+/reveal/?$"
+)
+
+
+def is_sensitive_reveal_path(path: str) -> bool:
+    return bool(_REVEAL_PATH_PATTERN.fullmatch(path))
 
 
 def _require_csrf(request: Request, context: AuthContext) -> None:
@@ -110,4 +118,4 @@ async def reveal_evidence_sensitive_value_route(
     return SensitiveValueRevealResponse(value=plaintext)
 
 
-__all__ = ["router"]
+__all__ = ["is_sensitive_reveal_path", "router"]

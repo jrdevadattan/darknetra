@@ -16,13 +16,14 @@ if not metadata_models:
     raise RuntimeError("SQLAlchemy model registry is empty")
 
 settings = get_settings()
-config.set_main_option("sqlalchemy.url", settings.database_url)
+migration_database_url = settings.database_owner_url or settings.database_url
+config.set_main_option("sqlalchemy.url", migration_database_url)
 target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
     context.configure(
-        url=settings.database_url,
+        url=migration_database_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},

@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     database_url: str = (
         "postgresql+psycopg://darknetra:darknetra-dev-only@127.0.0.1:5432/darknetra"
     )
+    database_owner_url: str = ""
     web_origin: str = "http://localhost:3000"
     jwt_signing_key_b64: str = ""
     field_key_v1_b64: str = Field(default="", repr=False)

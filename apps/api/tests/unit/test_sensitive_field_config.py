@@ -49,6 +49,19 @@ def test_sensitive_field_active_key_version_defaults_to_v1() -> None:
     assert Settings(_env_file=None).field_active_key_version == "v1"
 
 
+def test_database_owner_url_is_distinct_and_optional_for_runtime_startup() -> None:
+    runtime_url = "postgresql+psycopg://runtime:secret@db:5432/darknetra"
+    owner_url = "postgresql+psycopg://owner:secret@db:5432/darknetra"
+    settings = Settings(
+        database_url=runtime_url,
+        database_owner_url=owner_url,
+        _env_file=None,
+    )
+
+    assert settings.database_url == runtime_url
+    assert settings.database_owner_url == owner_url
+
+
 def test_sensitive_field_keys_are_redacted_from_settings_repr() -> None:
     field_key = encoded_key(0x33)
     keyring = json.dumps({"v1": field_key, "v2": encoded_key(0x55)})

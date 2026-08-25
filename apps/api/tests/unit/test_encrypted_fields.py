@@ -63,6 +63,18 @@ def test_unpack_envelope_restores_a_valid_persisted_envelope() -> None:
     assert unpack_envelope(stored) == EncryptedValue(**stored)
 
 
+def test_unpack_envelope_rejects_noncanonical_base64_padding_bits() -> None:
+    """Catches a decode-only validator accepting two spellings for the same bytes."""
+    stored = {
+        "key_version": "v1",
+        "nonce_b64": "AAECAwQFBgcICQoL",
+        "ciphertext_b64": "AAAAAAAAAAAAAAAAAAAAAB==",
+    }
+
+    with pytest.raises(EncryptedFieldValidationError, match="invalid encrypted field envelope"):
+        unpack_envelope(stored)
+
+
 @pytest.mark.parametrize(
     "stored",
     [
