@@ -1,9 +1,9 @@
-import type { ReactNode } from 'react';
+import type { ReactNode } from "react";
 
-import { ShieldCheck } from 'lucide-react';
+import { ShieldCheck } from "lucide-react";
+import Image from "next/image";
 
-import { Separator } from '@/components/ui/separator';
-import { APP_CONFIG } from '@/config/app-config';
+import { APP_CONFIG } from "@/config/app-config";
 
 export default function Layout({ children }: Readonly<{ children: ReactNode }>) {
   return (
@@ -18,20 +18,16 @@ export default function Layout({ children }: Readonly<{ children: ReactNode }>) 
             </p>
           </div>
 
-          <div className="absolute bottom-10 flex w-full justify-between px-10">
-            <div className="flex-1 space-y-1 text-primary-foreground">
-              <h2 className="font-medium">Protected workspace</h2>
-              <p className="text-primary-foreground/80 text-sm">
-                Access and refresh tokens remain in HttpOnly cookies; authorization is enforced by the API.
-              </p>
-            </div>
-            <Separator orientation="vertical" className="mx-3 h-auto!" />
-            <div className="flex-1 space-y-1 text-primary-foreground">
-              <h2 className="font-medium">Auditable sessions</h2>
-              <p className="text-primary-foreground/80 text-sm">
-                Sign-in, password changes, refresh rotation, and logout are recorded by the backend audit trail.
-              </p>
-            </div>
+          <div className="absolute inset-x-8 bottom-8 overflow-hidden rounded-2xl border border-primary-foreground/10 bg-black/20">
+            <Image
+              src="/images/darknetra-auth-visual.png"
+              alt="DARKNETRA secure intelligence workspace visual"
+              width={1536}
+              height={1024}
+              className="aspect-[3/2] h-auto w-full object-cover opacity-95"
+              priority
+              unoptimized
+            />
           </div>
         </div>
         <div className="relative order-1 flex h-full">{children}</div>
