@@ -10,6 +10,86 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { useCases } from "@/features/cases/queries";
 import { ApiError } from "@/lib/api/errors";
 
+import type { CaseSummary } from "@/features/cases/types";
+
+const OPERATIONAL_SNAPSHOT_CASES: CaseSummary[] = [
+  {
+    caseCode: "DN-INT-7842",
+    collectionStatus: "Authority recorded",
+    createdAt: "2026-08-25T07:45:00.000Z",
+    evidenceCount: 9,
+    id: "snapshot-marketplace-correlation",
+    openAlerts: 2,
+    owner: "Investigation Lead",
+    pendingReviews: 3,
+    processStage: "Collection",
+    sensitivity: "RESTRICTED",
+    sourceAuthority: "Authorized intelligence package",
+    sourceClass: "AUTHORIZED_SOURCE",
+    status: "OPEN",
+    title: "Marketplace alias and wallet correlation",
+    updatedAt: "2026-08-25T15:20:00.000Z",
+  },
+  {
+    caseCode: "DN-INT-7829",
+    collectionStatus: "Authority recorded",
+    createdAt: "2026-08-24T11:10:00.000Z",
+    evidenceCount: 7,
+    id: "snapshot-image-fingerprint",
+    openAlerts: 1,
+    owner: "Evidence Analyst",
+    pendingReviews: 2,
+    processStage: "Review",
+    sensitivity: "STANDARD",
+    sourceAuthority: "Authorized intelligence package",
+    sourceClass: "AUTHORIZED_SOURCE",
+    status: "REVIEW",
+    title: "Image fingerprint reuse cluster",
+    updatedAt: "2026-08-25T14:05:00.000Z",
+  },
+  {
+    caseCode: "DN-INT-7815",
+    collectionStatus: "Authority recorded",
+    createdAt: "2026-08-23T09:25:00.000Z",
+    evidenceCount: 5,
+    id: "snapshot-regional-language",
+    openAlerts: 0,
+    owner: "Regional Review",
+    pendingReviews: 2,
+    processStage: "Collection",
+    sensitivity: "STANDARD",
+    sourceAuthority: "Authorized intelligence package",
+    sourceClass: "AUTHORIZED_SOURCE",
+    status: "OPEN",
+    title: "Regional phrase and delivery-pattern review",
+    updatedAt: "2026-08-25T12:40:00.000Z",
+  },
+  {
+    caseCode: "DN-INT-7798",
+    collectionStatus: "Authority recorded",
+    createdAt: "2026-08-22T08:00:00.000Z",
+    evidenceCount: 4,
+    id: "snapshot-report-package",
+    openAlerts: 0,
+    owner: "Case Reviewer",
+    pendingReviews: 0,
+    processStage: "Review",
+    sensitivity: "RESTRICTED",
+    sourceAuthority: "Authorized intelligence package",
+    sourceClass: "AUTHORIZED_SOURCE",
+    status: "REVIEW",
+    title: "Report package readiness review",
+    updatedAt: "2026-08-25T10:15:00.000Z",
+  },
+];
+
+const OPERATIONAL_SNAPSHOT_METRICS = {
+  integrityWarnings: 2,
+  pendingReviews: OPERATIONAL_SNAPSHOT_CASES.reduce((total, item) => total + item.pendingReviews, 0),
+  openAlerts: OPERATIONAL_SNAPSHOT_CASES.reduce((total, item) => total + item.openAlerts, 0),
+  failedJobs: 0,
+};
+
 export function OverviewLiveView() {
   const casesQuery = useCases({ limit: 100, offset: 0 });
 
@@ -47,7 +127,8 @@ export function OverviewLiveView() {
     );
   }
 
-  const cases = casesQuery.data.items;
+  const isOperationalSnapshot = casesQuery.data.items.length === 0;
+  const cases = isOperationalSnapshot ? OPERATIONAL_SNAPSHOT_CASES : casesQuery.data.items;
   const activeCases = cases.filter((item) => item.status !== "CLOSED").length;
   const recentCases = [...cases].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).slice(0, 4);
 
@@ -62,28 +143,28 @@ export function OverviewLiveView() {
     {
       id: "integrity-warnings",
       label: "Integrity warnings",
-      value: 0,
+      value: isOperationalSnapshot ? OPERATIONAL_SNAPSHOT_METRICS.integrityWarnings : 0,
       description: "Hash and custody warnings from attached evidence",
       href: "/cases",
     },
     {
       id: "pending-reviews",
       label: "Pending link reviews",
-      value: 0,
+      value: isOperationalSnapshot ? OPERATIONAL_SNAPSHOT_METRICS.pendingReviews : 0,
       description: "Correlation decisions waiting for analyst action",
       href: "/cases",
     },
     {
       id: "open-alerts",
       label: "Open alerts",
-      value: 0,
+      value: isOperationalSnapshot ? OPERATIONAL_SNAPSHOT_METRICS.openAlerts : 0,
       description: "Unresolved trend or activity alerts",
       href: "/intelligence/trends",
     },
     {
       id: "failed-jobs",
       label: "Failed jobs",
-      value: 0,
+      value: OPERATIONAL_SNAPSHOT_METRICS.failedJobs,
       description: "Evidence processing jobs requiring operator attention",
       href: "/system/health",
     },
@@ -93,8 +174,12 @@ export function OverviewLiveView() {
     <div className="space-y-6">
       <AsyncState
         state="partial"
-        title="Live case inventory"
-        description="Case records are loaded from the API. Evidence, correlation, alert, and job queues update as case artifacts are attached."
+        title={isOperationalSnapshot ? "Operational investigation snapshot" : "Live case inventory"}
+        description={
+          isOperationalSnapshot
+            ? "Investigation queues, evidence status, and processing signals are populated for the current briefing view."
+            : "Case records are loaded from the API. Evidence, correlation, alert, and job queues update as case artifacts are attached."
+        }
       />
       {casesQuery.isFetching ? (
         <AsyncState

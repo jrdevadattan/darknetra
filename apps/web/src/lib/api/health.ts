@@ -1,5 +1,5 @@
 export interface ReadyHealthComponent {
-  name: "api";
+  name: "api" | "sensitive-field-crypto";
   status: "ready";
 }
 
@@ -40,7 +40,8 @@ function isReadyHealth(value: unknown): value is ReadyHealthResponse {
     candidate.version.length > 0 &&
     Array.isArray(candidate.components) &&
     candidate.components.every(
-      (component) => component?.name === "api" && component?.status === "ready",
+      (component) =>
+        (component?.name === "api" || component?.name === "sensitive-field-crypto") && component?.status === "ready",
     )
   );
 }
@@ -53,11 +54,7 @@ export async function fetchHealth(): Promise<ReadyHealthResponse> {
     });
 
     if (!response.ok) {
-      throw new HealthApiError(
-        "http",
-        `DARKNETRA API returned HTTP ${response.status}.`,
-        response.status,
-      );
+      throw new HealthApiError("http", `DARKNETRA API returned HTTP ${response.status}.`, response.status);
     }
 
     const payload: unknown = await response.json();
@@ -67,9 +64,6 @@ export async function fetchHealth(): Promise<ReadyHealthResponse> {
     return payload;
   } catch (error) {
     if (error instanceof HealthApiError) throw error;
-    throw new HealthApiError(
-      "network",
-      error instanceof Error ? error.message : "DARKNETRA API is unreachable.",
-    );
+    throw new HealthApiError("network", error instanceof Error ? error.message : "DARKNETRA API is unreachable.");
   }
 }

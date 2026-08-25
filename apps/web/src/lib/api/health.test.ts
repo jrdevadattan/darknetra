@@ -29,6 +29,33 @@ describe("fetchHealth", () => {
     });
   });
 
+  it("accepts additional ready components from the API health contract", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          status: "ready",
+          version: "test-build",
+          components: [
+            { name: "api", status: "ready" },
+            { name: "sensitive-field-crypto", status: "ready" },
+          ],
+        }),
+      }),
+    );
+
+    await expect(fetchHealth()).resolves.toEqual({
+      status: "ready",
+      version: "test-build",
+      components: [
+        { name: "api", status: "ready" },
+        { name: "sensitive-field-crypto", status: "ready" },
+      ],
+    });
+  });
+
   it("throws a typed http error for non-2xx responses", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 503 }));
 
