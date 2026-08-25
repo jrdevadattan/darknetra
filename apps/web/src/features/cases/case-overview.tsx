@@ -244,7 +244,7 @@ export function CaseOverview({ caseId }: { caseId: string }) {
           <Card>
             <CardHeader>
               <CardTitle>Alert queue</CardTitle>
-              <CardDescription>Prioritized signals for quick explanation during the video.</CardDescription>
+              <CardDescription>Prioritized signals for analyst review and escalation.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-2 text-sm">
               <p className="rounded-lg border p-3">High: Wallet reuse overlaps with alias and product phrase.</p>
@@ -256,40 +256,6 @@ export function CaseOverview({ caseId }: { caseId: string }) {
           </Card>
         </div>
       </div>
-      <Card>
-        <CardHeader>
-          <CardTitle>Video walkthrough script</CardTitle>
-          <CardDescription>2–5 minute selection script</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3 text-sm">
-          <p>
-            “This is DARKNETRA: an evidence-first intelligence workspace for investigations where speed matters, but
-            traceability matters even more. In simple terms, it turns a messy investigation into a clean case file that
-            an analyst can search, verify, connect, and explain.”
-          </p>
-          <p>
-            “The workflow begins by creating a case. That does not just create a folder. The platform records the case
-            code, sensitivity, owner, source authority, and audit trail. Every action after that is scoped to this case,
-            so the investigator always knows who did what, when, and under which authorization.”
-          </p>
-          <p>
-            “Once evidence enters the workspace, DARKNETRA treats it like a chain-of-custody object. The evidence ledger
-            shows captures, wallet observations, and message excerpts with integrity status and the signals extracted
-            from them. For a non-technical viewer, this means the system never loses the original source behind a
-            conclusion.”
-          </p>
-          <p>
-            “The advanced layer is the correlation graph. Instead of reading hundreds of disconnected notes, the analyst
-            sees aliases, wallets, evidence, and alerts connected together. The system highlights confidence levels,
-            unresolved alerts, and review points, so human analysts stay in control while the platform handles scale.”
-          </p>
-          <p>
-            “At the end, DARKNETRA produces a report-ready investigation package: timeline, graph summary, evidence
-            index, extracted entities, and analyst decisions. The value is simple: faster investigation, clearer
-            explanation, stronger auditability, and a case file that can stand up to review.”
-          </p>
-        </CardContent>
-      </Card>
     </div>
   );
 }

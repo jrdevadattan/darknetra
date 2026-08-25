@@ -182,7 +182,7 @@ describe("CaseShell", () => {
     expect(screen.getByText("Child route content")).toBeInTheDocument();
   });
 
-  it("explains case processing, evidence collection, and the video walkthrough script", async () => {
+  it("explains case processing and evidence collection without showing narration content", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(API_CASE)).mockResolvedValueOnce(jsonResponse(API_CASE));
 
     renderWithQuery(
@@ -198,11 +198,12 @@ describe("CaseShell", () => {
     expect(screen.getByText("Entity extraction")).toBeInTheDocument();
     expect(screen.getByText("Alert queue")).toBeInTheDocument();
     expect(screen.getByText("Report package")).toBeInTheDocument();
-    expect(screen.getByText("2–5 minute selection script")).toBeInTheDocument();
     expect(screen.getByText("34,982 observations indexed")).toBeInTheDocument();
     expect(screen.getByText("12 linked entities")).toBeInTheDocument();
     expect(screen.getByText("9 evidence artifacts")).toBeInTheDocument();
-    expect(screen.getByText("Video walkthrough script")).toBeInTheDocument();
+    expect(screen.queryByText("2–5 minute selection script")).not.toBeInTheDocument();
+    expect(screen.queryByText("Video walkthrough script")).not.toBeInTheDocument();
+    expect(screen.queryByText(/This is DARKNETRA: an evidence-first intelligence workspace/)).not.toBeInTheDocument();
     expect(screen.getAllByText(API_CASE.case_code).length).toBeGreaterThan(0);
     expect(screen.getByText(API_CASE.source_authority_summary)).toBeInTheDocument();
   });
