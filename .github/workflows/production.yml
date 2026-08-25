@@ -45,24 +45,15 @@ jobs:
           import secrets
 
           print(base64.b64encode(secrets.token_bytes(32)).decode("ascii"))
-          print(base64.b64encode(secrets.token_bytes(32)).decode("ascii"))
-          print(base64.b64encode(secrets.token_bytes(32)).decode("ascii"))
           print(secrets.token_urlsafe(32))
           PY
           )
           JWT_KEY="${GENERATED[0]}"
-          FIELD_KEY="${GENERATED[1]}"
-          BLIND_KEY="${GENERATED[2]}"
-          RUNTIME_DB_PASSWORD="${GENERATED[3]}"
+          RUNTIME_DB_PASSWORD="${GENERATED[1]}"
           echo "::add-mask::$JWT_KEY"
-          echo "::add-mask::$FIELD_KEY"
-          echo "::add-mask::$BLIND_KEY"
           echo "::add-mask::$RUNTIME_DB_PASSWORD"
           {
             echo "DARKNETRA_JWT_SIGNING_KEY_B64=$JWT_KEY"
-            echo "DARKNETRA_FIELD_KEY_V1_B64=$FIELD_KEY"
-            echo "DARKNETRA_FIELD_KEYRING_B64_JSON={\"v1\":\"$FIELD_KEY\"}"
-            echo "DARKNETRA_FIELD_BLIND_INDEX_KEY_B64=$BLIND_KEY"
             echo "DARKNETRA_POSTGRES_RUNTIME_PASSWORD=$RUNTIME_DB_PASSWORD"
           } >> "$GITHUB_ENV"
 
