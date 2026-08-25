@@ -11,6 +11,7 @@ from darknetra_api.models.case_membership import CaseMembership, CaseMembershipR
 from darknetra_api.models.enums import GlobalRole
 from darknetra_api.models.evidence import (
     EvidenceArtifact,
+    EvidenceDerivation,
     EvidenceSensitiveValue,
     EvidenceSensitiveValueKind,
     EvidenceState,
@@ -53,8 +54,31 @@ class EvidenceDigestImmutableError(ValueError):
     """A preserved evidence manifest or expected digest was rewritten."""
 
 
+def normalize_source_locator_for_dedup(locator: str) -> str:
+    """Return trimmed exact Unicode text; do not URL-normalize or case-fold."""
+
+    if not isinstance(locator, str):
+        raise TypeError("source locator must be a string")
+    normalized = locator.strip()
+    if not normalized:
+        raise ValueError("source locator must not be empty")
+    return normalized
+
+
 def sensitive_field_name(kind: EvidenceSensitiveValueKind) -> str:
     return kind.value.lower()
+
+
+def canonical_sensitive_field_name(field_name: str) -> str:
+    if not isinstance(field_name, str):
+        raise TypeError("invalid sensitive field name")
+    try:
+        canonical = EvidenceSensitiveValueKind(field_name.upper()).value.lower()
+    except (ValueError, AttributeError):
+        raise ValueError("invalid sensitive field name") from None
+    if field_name != canonical:
+        raise ValueError("sensitive field name must use canonical lowercase spelling")
+    return canonical
 
 
 def build_sensitive_value(
@@ -73,16 +97,17 @@ def build_sensitive_value(
 
     if not isinstance(plaintext, str) or not plaintext:
         raise ValueError("sensitive value plaintext must be non-empty")
+    value_id = uuid4()
     field_name = sensitive_field_name(kind)
     purpose = compose_sensitive_field_purpose(EVIDENCE_RESOURCE_TYPE, field_name)
-    envelope = crypto.encrypt(plaintext, purpose=purpose, resource_id=str(evidence_id))
+    envelope = crypto.encrypt(plaintext, purpose=purpose, resource_id=str(value_id))
     packed = pack_envelope(envelope)
     blind_index = None
     if kind is EvidenceSensitiveValueKind.SOURCE_LOCATOR:
-        normalized_locator = plaintext.strip()
+        normalized_locator = normalize_source_locator_for_dedup(plaintext)
         blind_index = crypto.blind_index(normalized_locator, purpose=purpose)
     return EvidenceSensitiveValue(
-        id=uuid4(),
+        id=value_id,
         case_id=case_id,
         evidence_id=evidence_id,
         kind=kind,
@@ -97,6 +122,38 @@ def build_sensitive_value(
     )
 
 
+async def persist_sensitive_value(
+    session: AsyncSession,
+    *,
+    case_id: UUID,
+    evidence_id: UUID,
+    kind: EvidenceSensitiveValueKind,
+    plaintext: str,
+    crypto: SensitiveFieldCrypto,
+    contact_kind: str | None = None,
+    wallet_network: str | None = None,
+    wallet_asset: str | None = None,
+    policy_sensitive: bool = True,
+) -> EvidenceSensitiveValue:
+    """Mandatory owning write boundary for protected evidence values."""
+
+    value = build_sensitive_value(
+        case_id=case_id,
+        evidence_id=evidence_id,
+        kind=kind,
+        plaintext=plaintext,
+        crypto=crypto,
+        contact_kind=contact_kind,
+        wallet_network=wallet_network,
+        wallet_asset=wallet_asset,
+        policy_sensitive=policy_sensitive,
+    )
+    validate_sensitive_value_storage(value)
+    session.add(value)
+    await session.flush()
+    return value
+
+
 def preserve_evidence_manifest(
     artifact: EvidenceArtifact,
     *,
@@ -109,9 +166,7 @@ def preserve_evidence_manifest(
 ) -> None:
     """Set an artifact's authoritative preservation manifest exactly once."""
 
-    if artifact.state is not EvidenceState.STAGING or any(
-        getattr(artifact, field) is not None for field in _IMMUTABLE_MANIFEST_FIELDS
-    ):
+    if artifact.state is not EvidenceState.STAGING:
         raise EvidenceDigestImmutableError("evidence manifest has already been preserved")
     if size_bytes < 0:
         raise ValueError("size_bytes must be non-negative")
@@ -132,13 +187,7 @@ def rotate_evidence_sensitive_value(
 ) -> SensitiveFieldRotationResult:
     """Rotate one stored evidence value with the same purpose used by write/reveal."""
 
-    envelope = unpack_envelope(
-        {
-            "key_version": value.key_version,
-            "nonce_b64": value.nonce_b64,
-            "ciphertext_b64": value.ciphertext_b64,
-        }
-    )
+    envelope = unpack_envelope(value.envelope_mapping())
     purpose = compose_sensitive_field_purpose(
         EVIDENCE_RESOURCE_TYPE,
         sensitive_field_name(value.kind),
@@ -147,7 +196,7 @@ def rotate_evidence_sensitive_value(
         value=envelope,
         blind_index=value.blind_index,
         purpose=purpose,
-        resource_id=str(value.evidence_id),
+        resource_id=str(value.id),
         keyring=keyring,
         rotate_blind_index=rotate_blind_index,
     )
@@ -160,13 +209,16 @@ def update_artifact_metadata(artifact: EvidenceArtifact, **changes: Any) -> None
     if unknown:
         raise ValueError(f"unknown evidence fields: {', '.join(sorted(unknown))}")
     for name, value in changes.items():
-        if name in _IMMUTABLE_MANIFEST_FIELDS and getattr(artifact, name) is not None:
+        if name in _IMMUTABLE_MANIFEST_FIELDS and artifact.state is not EvidenceState.STAGING:
             raise EvidenceDigestImmutableError("preserved evidence manifest cannot be rewritten")
         setattr(artifact, name, value)
 
 
 class EvidenceSensitiveValueProvider:
     """Read-only adapter for the shared audited reveal service."""
+
+    def __init__(self, *, expected_evidence_id: UUID) -> None:
+        self._expected_evidence_id = expected_evidence_id
 
     async def __call__(
         self,
@@ -180,26 +232,22 @@ class EvidenceSensitiveValueProvider:
         if resource_type != EVIDENCE_RESOURCE_TYPE:
             return None
         try:
-            evidence_id = UUID(resource_id)
-            kind = EvidenceSensitiveValueKind(field_name.upper())
-        except (ValueError, AttributeError):
+            value_id = UUID(resource_id)
+            canonical = canonical_sensitive_field_name(field_name)
+            kind = EvidenceSensitiveValueKind(canonical.upper())
+        except (TypeError, ValueError):
             return None
         row = await session.scalar(
             select(EvidenceSensitiveValue).where(
-                EvidenceSensitiveValue.evidence_id == evidence_id,
+                EvidenceSensitiveValue.id == value_id,
+                EvidenceSensitiveValue.evidence_id == self._expected_evidence_id,
                 EvidenceSensitiveValue.case_id == case_id,
                 EvidenceSensitiveValue.kind == kind,
             )
         )
         if row is None:
             return None
-        envelope = unpack_envelope(
-            {
-                "key_version": row.key_version,
-                "nonce_b64": row.nonce_b64,
-                "ciphertext_b64": row.ciphertext_b64,
-            }
-        )
+        envelope = unpack_envelope(row.envelope_mapping())
         return SensitiveValue(envelope=envelope)
 
 
@@ -220,8 +268,9 @@ class EvidenceSensitiveRevealPolicy:
         if resource_type != EVIDENCE_RESOURCE_TYPE:
             return False
         try:
-            kind = EvidenceSensitiveValueKind(field_name.upper())
-        except (ValueError, AttributeError):
+            canonical = canonical_sensitive_field_name(field_name)
+            kind = EvidenceSensitiveValueKind(canonical.upper())
+        except (TypeError, ValueError):
             return False
         membership_id = await session.scalar(
             select(CaseMembership.id).where(
@@ -244,14 +293,50 @@ class EvidenceSensitiveRevealPolicy:
         return bool(effective_roles.intersection(_FIELD_REVEAL_ROLES[kind]))
 
 
+def validate_sensitive_value_storage(value: EvidenceSensitiveValue) -> None:
+    unpack_envelope(value.envelope_mapping())
+    if value.kind is EvidenceSensitiveValueKind.SOURCE_LOCATOR:
+        if value.blind_index is None:
+            raise ValueError("source locator requires a blind index")
+    elif value.blind_index is not None:
+        raise ValueError("this sensitive value kind does not permit a blind index")
+
+
+def build_evidence_derivation(
+    *,
+    case_id: UUID,
+    parent_evidence_id: UUID,
+    child_evidence_id: UUID,
+    transformation: str,
+    transformer_version: str,
+    parameters: dict[str, Any],
+) -> EvidenceDerivation:
+    from darknetra_api.services.provenance import derivation_parameters_digest
+
+    return EvidenceDerivation(
+        case_id=case_id,
+        parent_evidence_id=parent_evidence_id,
+        child_evidence_id=child_evidence_id,
+        transformation=transformation,
+        transformer_version=transformer_version,
+        parameters_json=dict(parameters),
+        parameters_digest=derivation_parameters_digest(parameters),
+    )
+
+
 __all__ = [
     "EVIDENCE_RESOURCE_TYPE",
     "EvidenceDigestImmutableError",
     "EvidenceSensitiveRevealPolicy",
     "EvidenceSensitiveValueProvider",
+    "build_evidence_derivation",
     "build_sensitive_value",
+    "canonical_sensitive_field_name",
+    "normalize_source_locator_for_dedup",
+    "persist_sensitive_value",
     "preserve_evidence_manifest",
     "rotate_evidence_sensitive_value",
     "sensitive_field_name",
     "update_artifact_metadata",
+    "validate_sensitive_value_storage",
 ]

@@ -24,8 +24,13 @@ from darknetra_api.security.purposes import compose_sensitive_field_purpose
 from darknetra_api.services.evidence import (
     EvidenceDigestImmutableError,
     build_sensitive_value,
+    normalize_source_locator_for_dedup,
     rotate_evidence_sensitive_value,
     update_artifact_metadata,
+)
+from darknetra_api.services.provenance import (
+    canonical_derivation_parameters_json,
+    derivation_parameters_digest,
 )
 
 
@@ -40,6 +45,61 @@ def crypto() -> SensitiveFieldCrypto:
 def test_public_purpose_composer_preserves_component_boundaries() -> None:
     assert compose_sensitive_field_purpose("evidence.source", "locator") != (
         compose_sensitive_field_purpose("evidence", "source.locator")
+    )
+
+
+def test_locator_dedup_is_trimmed_exact_unicode_equality() -> None:
+    assert normalize_source_locator_for_dedup("  HTTPS://Example.test/Path  ") == (
+        "HTTPS://Example.test/Path"
+    )
+    assert normalize_source_locator_for_dedup("HTTPS://Example.test/Path") != (
+        normalize_source_locator_for_dedup("https://example.test/Path")
+    )
+    assert normalize_source_locator_for_dedup("https://example.test/Path") != (
+        normalize_source_locator_for_dedup("https://example.test/path")
+    )
+    with pytest.raises(ValueError, match="empty"):
+        normalize_source_locator_for_dedup(" \t\n ")
+
+
+def test_derivation_parameters_use_versioned_canonical_json() -> None:
+    first = {"z": [1, True], "a": {"é": "value"}}
+    reordered = {"a": {"é": "value"}, "z": [1, True]}
+    assert canonical_derivation_parameters_json(first) == (
+        canonical_derivation_parameters_json(reordered)
+    )
+    assert derivation_parameters_digest(first) == derivation_parameters_digest(reordered)
+    assert derivation_parameters_digest(first) != derivation_parameters_digest({"z": [1]})
+    with pytest.raises(ValueError, match="finite"):
+        canonical_derivation_parameters_json({"bad": float("nan")})
+
+
+def test_repeated_values_use_independent_row_identity_for_aad() -> None:
+    evidence_id = uuid4()
+    crypto_service = crypto()
+    first = build_sensitive_value(
+        case_id=uuid4(),
+        evidence_id=evidence_id,
+        kind=EvidenceSensitiveValueKind.CUSTODY_NOTE,
+        plaintext="first custody note",
+        crypto=crypto_service,
+    )
+    second = build_sensitive_value(
+        case_id=first.case_id,
+        evidence_id=evidence_id,
+        kind=EvidenceSensitiveValueKind.CUSTODY_NOTE,
+        plaintext="second custody note",
+        crypto=crypto_service,
+    )
+    purpose = compose_sensitive_field_purpose("evidence", "custody_note")
+    first_envelope = unpack_envelope(first.envelope_mapping())
+    second_envelope = unpack_envelope(second.envelope_mapping())
+    assert first.id != second.id
+    assert crypto_service.decrypt(first_envelope, purpose=purpose, resource_id=str(first.id)) == (
+        "first custody note"
+    )
+    assert crypto_service.decrypt(second_envelope, purpose=purpose, resource_id=str(second.id)) == (
+        "second custody note"
     )
 
 
@@ -94,7 +154,7 @@ def test_sensitive_value_writer_persists_complete_envelope_and_only_documented_i
         }
     )
     purpose = compose_sensitive_field_purpose("evidence", kind.value.lower())
-    assert crypto_service.decrypt(envelope, purpose=purpose, resource_id=str(evidence_id)) == plaintext
+    assert crypto_service.decrypt(envelope, purpose=purpose, resource_id=str(value.id)) == plaintext
     assert composer_calls == [("evidence", kind.value.lower())]
     assert len(pack_calls) == 1
     assert (value.blind_index is not None) is expects_index
@@ -131,7 +191,7 @@ def test_artifact_digest_fields_become_immutable_after_preservation() -> None:
         update_artifact_metadata(artifact, sha256="c" * 64)
 
 
-def test_evidence_rotation_reuses_canonical_purpose_and_artifact_id() -> None:
+def test_evidence_rotation_reuses_canonical_purpose_and_value_id() -> None:
     case_id = uuid4()
     evidence_id = uuid4()
     old_key = secrets.token_bytes(32)
@@ -159,7 +219,7 @@ def test_evidence_rotation_reuses_canonical_purpose_and_artifact_id() -> None:
     assert keyring.crypto().decrypt(
         rotated.value,
         purpose=purpose,
-        resource_id=str(evidence_id),
+        resource_id=str(value.id),
     ) == "rotation stays in the owning context"
 
 

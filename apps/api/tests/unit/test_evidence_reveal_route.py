@@ -46,9 +46,11 @@ async def test_reveal_http_boundary_sets_no_store(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(evidence_route, "reveal_sensitive_value", fake_reveal)
     case_id = uuid4()
     evidence_id = uuid4()
+    value_id = uuid4()
     result = await evidence_route.reveal_evidence_sensitive_value_route(
         case_id=case_id,
         evidence_id=evidence_id,
+        value_id=value_id,
         field_name="source_locator",
         payload=SensitiveValueRevealRequest(reason="Validate source provenance"),
         request=request,
@@ -68,4 +70,4 @@ async def test_reveal_http_boundary_sets_no_store(monkeypatch: pytest.MonkeyPatc
         "reason",
         "session",
     }
-    assert captured["resource_id"] == str(evidence_id)
+    assert captured["resource_id"] == str(value_id)

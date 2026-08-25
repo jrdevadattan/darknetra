@@ -4,38 +4,40 @@ import secrets
 from datetime import UTC, datetime
 from uuid import uuid4
 
+import httpx
 import pytest
 import sqlalchemy as sa
 from darknetra_api.authz.policy import AuthorizationDenied, CaseNotFound
-from darknetra_api.db.session import async_session_factory
+from darknetra_api.db.session import async_session_factory, get_db_session
+from darknetra_api.main import app
 from darknetra_api.models.audit import AuditEvent
-from darknetra_api.models.auth_session import AuthSession
 from darknetra_api.models.case import Case
 from darknetra_api.models.case_membership import CaseMembership, CaseMembershipRole
 from darknetra_api.models.custody import CustodyEvent
 from darknetra_api.models.enums import CaseSensitivity, CaseStatus, GlobalRole
 from darknetra_api.models.evidence import (
     EvidenceArtifact,
-    EvidenceDerivation,
     EvidenceSensitiveValue,
     EvidenceSensitiveValueKind,
     EvidenceSourceClass,
     EvidenceState,
 )
-from darknetra_api.models.job import AnalysisJob
 from darknetra_api.models.user import User
 from darknetra_api.security.encryption import SensitiveFieldCrypto
+from darknetra_api.security.passwords import hash_password
 from darknetra_api.services.evidence import (
     EvidenceSensitiveRevealPolicy,
     EvidenceSensitiveValueProvider,
+    build_evidence_derivation,
     build_sensitive_value,
+    persist_sensitive_value,
 )
 from darknetra_api.services.sensitive_values import (
     bind_sensitive_reveal_context,
     reveal_sensitive_value,
 )
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 
 def crypto() -> SensitiveFieldCrypto:
@@ -60,20 +62,13 @@ def user(username: str, role: GlobalRole) -> User:
 
 async def clear_state() -> None:
     async with async_session_factory() as session:
-        for model in (
-            CustodyEvent,
-            EvidenceDerivation,
-            EvidenceSensitiveValue,
-            EvidenceArtifact,
-            AnalysisJob,
-            AuditEvent,
-            CaseMembershipRole,
-            CaseMembership,
-            Case,
-            AuthSession,
-            User,
-        ):
-            await session.execute(sa.delete(model))
+        await session.execute(
+            sa.text(
+                "TRUNCATE custody_events, evidence_derivations, evidence_sensitive_values, "
+                "evidence_artifacts, jobs, audit_events, case_membership_roles, "
+                "case_memberships, cases, auth_sessions, users CASCADE"
+            )
+        )
         await session.commit()
 
 
@@ -129,21 +124,61 @@ async def test_write_pack_persist_load_unpack_and_audited_reveal_share_context()
             owner_user_id=owner.id,
             source_authority_summary="Synthetic authorized fixture",
         )
-        session.add(case)
+        other_case = Case(
+            case_code="EVIDENCE-OTHER-CASE",
+            title="Other existing case",
+            status=CaseStatus.OPEN,
+            sensitivity=CaseSensitivity.RESTRICTED,
+            owner_user_id=owner.id,
+            source_authority_summary="Synthetic authorized fixture",
+        )
+        session.add_all([case, other_case])
         await session.flush()
         await add_membership(session, case, owner, GlobalRole.CASE_OWNER)
         await add_membership(session, case, viewer, GlobalRole.VIEWER)
+        await add_membership(session, other_case, owner, GlobalRole.CASE_OWNER)
         stored_artifact = artifact(case, owner)
-        session.add(stored_artifact)
+        other_artifact = artifact(other_case, owner)
+        session.add_all([stored_artifact, other_artifact])
         await session.flush()
-        protected = build_sensitive_value(
+        protected = await persist_sensitive_value(
+            session,
             case_id=case.id,
             evidence_id=stored_artifact.id,
             kind=EvidenceSensitiveValueKind.SOURCE_LOCATOR,
             plaintext=plaintext,
             crypto=crypto_service,
         )
-        session.add(protected)
+        other_value = await persist_sensitive_value(
+            session,
+            case_id=other_case.id,
+            evidence_id=other_artifact.id,
+            kind=EvidenceSensitiveValueKind.SOURCE_LOCATOR,
+            plaintext="https://other-case.example/path",
+            crypto=crypto_service,
+        )
+        repeated_values = []
+        for kind in (
+            EvidenceSensitiveValueKind.CUSTODY_NOTE,
+            EvidenceSensitiveValueKind.CONTACT,
+            EvidenceSensitiveValueKind.POLICY_RESTRICTED_WALLET,
+            EvidenceSensitiveValueKind.PROTECTED_NOTE,
+        ):
+            for number in (1, 2):
+                repeated_plaintext = f"{kind.value.lower()} value {number}"
+                repeated_values.append(
+                    (
+                        await persist_sensitive_value(
+                            session,
+                            case_id=case.id,
+                            evidence_id=stored_artifact.id,
+                            kind=kind,
+                            plaintext=repeated_plaintext,
+                            crypto=crypto_service,
+                        ),
+                        repeated_plaintext,
+                    )
+                )
         await session.commit()
 
         loaded = await session.scalar(
@@ -155,7 +190,7 @@ async def test_write_pack_persist_load_unpack_and_audited_reveal_share_context()
 
         bind_sensitive_reveal_context(
             session,
-            provider=EvidenceSensitiveValueProvider(),
+            provider=EvidenceSensitiveValueProvider(expected_evidence_id=stored_artifact.id),
             permission_predicate=EvidenceSensitiveRevealPolicy(),
             crypto=crypto_service,
             request_id="evidence-roundtrip-request",
@@ -165,7 +200,7 @@ async def test_write_pack_persist_load_unpack_and_audited_reveal_share_context()
                 actor=viewer,
                 case_id=case.id,
                 resource_type="evidence",
-                resource_id=str(stored_artifact.id),
+                resource_id=str(protected.id),
                 field_name="source_locator",
                 reason="Viewer may not reveal protected values",
                 session=session,
@@ -175,12 +210,23 @@ async def test_write_pack_persist_load_unpack_and_audited_reveal_share_context()
             actor=owner,
             case_id=case.id,
             resource_type="evidence",
-            resource_id=str(stored_artifact.id),
+            resource_id=str(protected.id),
             field_name="source_locator",
             reason="Validate the original source location",
             session=session,
         )
         assert revealed == plaintext
+        for value, expected in repeated_values:
+            revealed_repeated = await reveal_sensitive_value(
+                actor=owner,
+                case_id=case.id,
+                resource_type="evidence",
+                resource_id=str(value.id),
+                field_name=value.kind.value.lower(),
+                reason="Prove repeated protected values remain isolated",
+                session=session,
+            )
+            assert revealed_repeated == expected
         event = await session.scalar(
             select(AuditEvent).where(AuditEvent.event_type == "SENSITIVE_VALUE_REVEALED")
         )
@@ -200,14 +246,124 @@ async def test_write_pack_persist_load_unpack_and_audited_reveal_share_context()
         with pytest.raises(CaseNotFound) as cross_case:
             await reveal_sensitive_value(
                 actor=owner,
-                case_id=uuid4(),
+                case_id=case.id,
                 resource_type="evidence",
-                resource_id=str(stored_artifact.id),
+                resource_id=str(other_value.id),
                 field_name="source_locator",
                 reason="Cross case values must remain indistinguishable",
                 session=session,
             )
         assert unknown.value.args == cross_case.value.args == ("resource not found",)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_real_asgi_reveal_enforces_auth_csrf_canonical_field_and_no_store() -> None:
+    crypto_service = crypto()
+    password = "Evidence route password 42"
+    async with async_session_factory() as session:
+        owner = user("evidence-route-owner", GlobalRole.CASE_OWNER)
+        owner.password_hash = hash_password(password)
+        session.add(owner)
+        await session.flush()
+        case = Case(
+            case_code="EVIDENCE-ASGI",
+            title="ASGI reveal boundary",
+            status=CaseStatus.OPEN,
+            sensitivity=CaseSensitivity.RESTRICTED,
+            owner_user_id=owner.id,
+            source_authority_summary="Synthetic authorized fixture",
+        )
+        session.add(case)
+        await session.flush()
+        await add_membership(session, case, owner, GlobalRole.CASE_OWNER)
+        stored_artifact = artifact(case, owner)
+        session.add(stored_artifact)
+        await session.flush()
+        protected = await persist_sensitive_value(
+            session,
+            case_id=case.id,
+            evidence_id=stored_artifact.id,
+            kind=EvidenceSensitiveValueKind.SOURCE_LOCATOR,
+            plaintext="https://asgi-private.example/path",
+            crypto=crypto_service,
+        )
+        await session.commit()
+        case_id = case.id
+        evidence_id = stored_artifact.id
+        value_id = protected.id
+
+    app.state.sensitive_field_crypto = crypto_service
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+            login = await client.post(
+                "/api/v1/auth/login",
+                headers={"Origin": "http://localhost:3000"},
+                json={"username": "evidence-route-owner", "password": password},
+            )
+            assert login.status_code == 200
+            csrf = client.cookies.get("darknetra_csrf")
+            assert csrf
+            path = (
+                f"/api/v1/cases/{case_id}/evidence/{evidence_id}/sensitive/"
+                f"{value_id}/source_locator/reveal"
+            )
+
+            missing_csrf = await client.post(
+                path,
+                json={"reason": "Missing CSRF must fail safely"},
+            )
+            assert missing_csrf.status_code == 403
+            assert missing_csrf.headers["cache-control"] == "no-store"
+
+            for alias_name in ("SOURCE_LOCATOR", "Source_Locator", "%20source_locator%20"):
+                alias = await client.post(
+                    path.replace("source_locator", alias_name),
+                    headers={"X-CSRF-Token": csrf},
+                    json={"reason": "Aliases must fail before cryptography"},
+                )
+                assert alias.status_code == 422
+                assert alias.headers["cache-control"] == "no-store"
+
+            revealed = await client.post(
+                path,
+                headers={"X-CSRF-Token": csrf},
+                json={"reason": "Authorized provenance verification"},
+            )
+            assert revealed.status_code == 200
+            assert revealed.headers["cache-control"] == "no-store"
+            assert revealed.json() == {"value": "https://asgi-private.example/path"}
+
+            async def failing_commit_session():
+                async with async_session_factory() as failing_session:
+                    async def fail_commit() -> None:
+                        raise RuntimeError("synthetic reveal audit commit failure")
+
+                    failing_session.commit = fail_commit  # type: ignore[method-assign]
+                    yield failing_session
+
+            app.dependency_overrides[get_db_session] = failing_commit_session
+            with pytest.raises(RuntimeError, match="synthetic reveal audit commit failure") as caught:
+                await client.post(
+                    path,
+                    headers={"X-CSRF-Token": csrf},
+                    json={"reason": "Audit durability is mandatory"},
+                )
+            assert "asgi-private" not in str(caught.value)
+            app.dependency_overrides.pop(get_db_session, None)
+
+            missing = await client.post(
+                path.replace(str(value_id), str(uuid4())),
+                headers={"X-CSRF-Token": csrf},
+                json={"reason": "Unknown value should be hidden"},
+            )
+            assert missing.status_code == 404
+            assert missing.headers["cache-control"] == "no-store"
+            assert "asgi-private" not in missing.text
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
+        del app.state.sensitive_field_crypto
 
 
 @pytest.mark.integration
@@ -232,7 +388,8 @@ async def test_evidence_ids_lineage_case_scope_and_custody_are_enforced() -> Non
         await session.flush()
         artifacts = [artifact(case, owner) for case in cases]
         child = artifact(cases[0], owner)
-        session.add_all([*artifacts, child])
+        retry_child = artifact(cases[0], owner)
+        session.add_all([*artifacts, child, retry_child])
         await session.commit()
 
         with pytest.raises(IntegrityError):
@@ -262,28 +419,83 @@ async def test_evidence_ids_lineage_case_scope_and_custody_are_enforced() -> Non
                 session.add(wrong_case_value)
                 await session.flush()
 
-        lineage = EvidenceDerivation(
+        lineage = build_evidence_derivation(
             case_id=cases[0].id,
             parent_evidence_id=artifacts[0].id,
             child_evidence_id=child.id,
             transformation="extract",
             transformer_version="1",
-            parameters_json={"member": "safe.txt"},
+            parameters={"member": "safe.txt"},
         )
         session.add(lineage)
         await session.commit()
 
-        cross_case_lineage = EvidenceDerivation(
+        duplicate_work = build_evidence_derivation(
+            case_id=cases[0].id,
+            parent_evidence_id=artifacts[0].id,
+            child_evidence_id=retry_child.id,
+            transformation="extract",
+            transformer_version="1",
+            parameters={"member": "safe.txt"},
+        )
+        with pytest.raises(IntegrityError):
+            async with session.begin_nested():
+                session.add(duplicate_work)
+                await session.flush()
+
+        different_parameters = build_evidence_derivation(
+            case_id=cases[0].id,
+            parent_evidence_id=artifacts[0].id,
+            child_evidence_id=child.id,
+            transformation="extract",
+            transformer_version="1",
+            parameters={"member": "different.txt"},
+        )
+        session.add(different_parameters)
+        await session.commit()
+
+        cross_case_lineage = build_evidence_derivation(
             case_id=cases[0].id,
             parent_evidence_id=artifacts[0].id,
             child_evidence_id=artifacts[1].id,
             transformation="invalid-cross-case",
             transformer_version="1",
-            parameters_json={},
+            parameters={},
         )
         with pytest.raises(IntegrityError):
             async with session.begin_nested():
                 session.add(cross_case_lineage)
+                await session.flush()
+
+        custody_note = build_sensitive_value(
+            case_id=cases[0].id,
+            evidence_id=artifacts[0].id,
+            kind=EvidenceSensitiveValueKind.CUSTODY_NOTE,
+            plaintext="valid custody note",
+            crypto=crypto(),
+        )
+        wrong_note = build_sensitive_value(
+            case_id=cases[0].id,
+            evidence_id=artifacts[0].id,
+            kind=EvidenceSensitiveValueKind.CONTACT,
+            plaintext="not-a-custody-note@example.test",
+            crypto=crypto(),
+        )
+        session.add_all([custody_note, wrong_note])
+        await session.commit()
+
+        invalid_custody = CustodyEvent(
+            case_id=cases[0].id,
+            evidence_id=artifacts[0].id,
+            actor_user_id=owner.id,
+            action="INVALID_NOTE_KIND",
+            request_id="custody-wrong-kind",
+            sensitive_note_id=wrong_note.id,
+            sensitive_note_kind=EvidenceSensitiveValueKind.CUSTODY_NOTE,
+        )
+        with pytest.raises(IntegrityError):
+            async with session.begin_nested():
+                session.add(invalid_custody)
                 await session.flush()
 
         custody = CustodyEvent(
@@ -293,6 +505,8 @@ async def test_evidence_ids_lineage_case_scope_and_custody_are_enforced() -> Non
             action="PRESERVED",
             request_id="custody-append-only",
             integrity_sha256="a" * 64,
+            sensitive_note_id=custody_note.id,
+            sensitive_note_kind=EvidenceSensitiveValueKind.CUSTODY_NOTE,
             metadata_json={"location": "vault"},
         )
         session.add(custody)
@@ -300,3 +514,213 @@ async def test_evidence_ids_lineage_case_scope_and_custody_are_enforced() -> Non
         custody.action = "MUTATED"
         with pytest.raises(RuntimeError, match="append-only"):
             await session.commit()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_database_blocks_bulk_manifest_and_custody_mutation() -> None:
+    async with async_session_factory() as session:
+        owner = user("database-invariant-owner", GlobalRole.CASE_OWNER)
+        session.add(owner)
+        await session.flush()
+        case = Case(
+            case_code="EVIDENCE-DB-INVARIANTS",
+            title="Database invariants",
+            status=CaseStatus.OPEN,
+            sensitivity=CaseSensitivity.STANDARD,
+            owner_user_id=owner.id,
+            source_authority_summary="Synthetic authorized fixture",
+        )
+        session.add(case)
+        await session.flush()
+        staging = EvidenceArtifact(
+            case_id=case.id,
+            source_class=EvidenceSourceClass.SYNTHETIC,
+            source_type="provisional",
+            acquisition_method="fixture",
+            collector_user_id=owner.id,
+            captured_at=datetime.now(UTC),
+            state=EvidenceState.STAGING,
+            size_bytes=1,
+            sha256="1" * 64,
+        )
+        session.add(staging)
+        await session.commit()
+
+        await session.execute(
+            sa.update(EvidenceArtifact)
+            .where(EvidenceArtifact.id == staging.id)
+            .values(size_bytes=2, sha256="2" * 64)
+        )
+        await session.commit()
+        await session.execute(
+            sa.update(EvidenceArtifact)
+            .where(EvidenceArtifact.id == staging.id)
+            .values(
+                state=EvidenceState.PRESERVED,
+                size_bytes=3,
+                sha256="3" * 64,
+                sha512="4" * 128,
+                object_key="sha256/33/" + "3" * 64,
+            )
+        )
+        await session.commit()
+
+        for statement in (
+            sa.update(EvidenceArtifact)
+            .where(EvidenceArtifact.id == staging.id)
+            .values(sha256="5" * 64),
+            sa.text("UPDATE evidence_artifacts SET object_key = 'changed' WHERE id = :id").bindparams(
+                id=staging.id
+            ),
+        ):
+            with pytest.raises(DBAPIError, match="preserved evidence manifest"):
+                async with session.begin_nested():
+                    await session.execute(statement)
+
+        incomplete = EvidenceArtifact(
+            case_id=case.id,
+            source_class=EvidenceSourceClass.SYNTHETIC,
+            source_type="invalid-incomplete",
+            acquisition_method="fixture",
+            collector_user_id=owner.id,
+            captured_at=datetime.now(UTC),
+            state=EvidenceState.PRESERVED,
+        )
+        with pytest.raises(IntegrityError):
+            async with session.begin_nested():
+                session.add(incomplete)
+                await session.flush()
+
+        custody = CustodyEvent(
+            case_id=case.id,
+            evidence_id=staging.id,
+            actor_user_id=owner.id,
+            action="PRESERVED",
+            request_id="database-custody-invariant",
+            integrity_sha256="3" * 64,
+            metadata_json={},
+        )
+        session.add(custody)
+        await session.commit()
+        for statement in (
+            sa.update(CustodyEvent)
+            .where(CustodyEvent.id == custody.id)
+            .values(action="MUTATED"),
+            sa.delete(CustodyEvent).where(CustodyEvent.id == custody.id),
+            sa.text("UPDATE custody_events SET action = 'DIRECT' WHERE id = :id").bindparams(
+                id=custody.id
+            ),
+            sa.text("DELETE FROM custody_events WHERE id = :id").bindparams(id=custody.id),
+        ):
+            with pytest.raises(DBAPIError, match="append-only"):
+                async with session.begin_nested():
+                    await session.execute(statement)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_database_enforces_envelopes_blind_policy_and_locator_exact_dedup() -> None:
+    crypto_service = crypto()
+    async with async_session_factory() as session:
+        owner = user("envelope-invariant-owner", GlobalRole.CASE_OWNER)
+        session.add(owner)
+        await session.flush()
+        case = Case(
+            case_code="EVIDENCE-ENVELOPE-INVARIANTS",
+            title="Envelope invariants",
+            status=CaseStatus.OPEN,
+            sensitivity=CaseSensitivity.STANDARD,
+            owner_user_id=owner.id,
+            source_authority_summary="Synthetic authorized fixture",
+        )
+        session.add(case)
+        await session.flush()
+        artifacts = [artifact(case, owner) for _ in range(4)]
+        session.add_all(artifacts)
+        await session.flush()
+        first = build_sensitive_value(
+            case_id=case.id,
+            evidence_id=artifacts[0].id,
+            kind=EvidenceSensitiveValueKind.SOURCE_LOCATOR,
+            plaintext="  HTTPS://Example.test/Path  ",
+            crypto=crypto_service,
+        )
+        session.add(first)
+        await session.commit()
+
+        same_trimmed = build_sensitive_value(
+            case_id=case.id,
+            evidence_id=artifacts[1].id,
+            kind=EvidenceSensitiveValueKind.SOURCE_LOCATOR,
+            plaintext="HTTPS://Example.test/Path",
+            crypto=crypto_service,
+        )
+        with pytest.raises(IntegrityError):
+            async with session.begin_nested():
+                session.add(same_trimmed)
+                await session.flush()
+
+        case_distinct = build_sensitive_value(
+            case_id=case.id,
+            evidence_id=artifacts[2].id,
+            kind=EvidenceSensitiveValueKind.SOURCE_LOCATOR,
+            plaintext="https://example.test/Path",
+            crypto=crypto_service,
+        )
+        path_distinct = build_sensitive_value(
+            case_id=case.id,
+            evidence_id=artifacts[3].id,
+            kind=EvidenceSensitiveValueKind.SOURCE_LOCATOR,
+            plaintext="https://example.test/path",
+            crypto=crypto_service,
+        )
+        session.add_all([case_distinct, path_distinct])
+        await session.commit()
+
+        malformed = build_sensitive_value(
+            case_id=case.id,
+            evidence_id=artifacts[0].id,
+            kind=EvidenceSensitiveValueKind.CONTACT,
+            plaintext="contact@example.test",
+            crypto=crypto_service,
+        )
+        malformed.nonce_b64 = "AAAA"
+        with pytest.raises(ValueError, match="invalid encrypted field envelope"):
+            async with session.begin_nested():
+                session.add(malformed)
+                await session.flush()
+
+        valid_contact = build_sensitive_value(
+            case_id=case.id,
+            evidence_id=artifacts[0].id,
+            kind=EvidenceSensitiveValueKind.CONTACT,
+            plaintext="second-contact@example.test",
+            crypto=crypto_service,
+        )
+        invalid_values = {
+            "id": uuid4(),
+            "case_id": case.id,
+            "evidence_id": artifacts[0].id,
+            "kind": EvidenceSensitiveValueKind.CONTACT,
+            "key_version": valid_contact.key_version,
+            "nonce_b64": "AAAA",
+            "ciphertext_b64": valid_contact.ciphertext_b64,
+            "blind_index": None,
+            "policy_sensitive": True,
+        }
+        with pytest.raises(DBAPIError):
+            async with session.begin_nested():
+                await session.execute(sa.insert(EvidenceSensitiveValue).values(**invalid_values))
+
+        invalid_locator = dict(invalid_values)
+        invalid_locator.update(
+            id=uuid4(),
+            kind=EvidenceSensitiveValueKind.SOURCE_LOCATOR,
+            nonce_b64=first.nonce_b64,
+            ciphertext_b64=first.ciphertext_b64,
+            blind_index=None,
+        )
+        with pytest.raises(IntegrityError):
+            async with session.begin_nested():
+                await session.execute(sa.insert(EvidenceSensitiveValue).values(**invalid_locator))

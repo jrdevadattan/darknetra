@@ -61,6 +61,7 @@ class EvidenceDerivationResponse(BaseModel):
     transformation: str
     transformer_version: str
     parameters_json: dict[str, object]
+    parameters_digest: str
     created_at: datetime
 
 

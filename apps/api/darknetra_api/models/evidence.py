@@ -65,6 +65,11 @@ class EvidenceArtifact(Base):
             "sha512 IS NULL OR sha512 ~ '^[0-9a-f]{128}$'",
             name="ck_evidence_sha512_hex",
         ),
+        sa.CheckConstraint(
+            "state = 'STAGING' OR (size_bytes IS NOT NULL AND sha256 IS NOT NULL "
+            "AND sha512 IS NOT NULL AND object_key IS NOT NULL)",
+            name="ck_evidence_manifest_complete_after_staging",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -138,12 +143,8 @@ class EvidenceSensitiveValue(Base):
             "id",
             "evidence_id",
             "case_id",
-            name="uq_evidence_sensitive_value_artifact_case",
-        ),
-        sa.UniqueConstraint(
-            "evidence_id",
             "kind",
-            name="uq_evidence_sensitive_value_artifact_kind",
+            name="uq_evidence_sensitive_value_identity_scope",
         ),
         sa.ForeignKeyConstraint(
             ["evidence_id", "case_id"],
@@ -154,6 +155,26 @@ class EvidenceSensitiveValue(Base):
         sa.CheckConstraint(
             "blind_index IS NULL OR blind_index ~ '^[0-9a-f]{64}$'",
             name="ck_evidence_sensitive_blind_index_hex",
+        ),
+        sa.CheckConstraint(
+            "key_version ~ '^v[1-9][0-9]{0,62}$'",
+            name="ck_evidence_sensitive_key_version",
+        ),
+        sa.CheckConstraint(
+            "nonce_b64 ~ '^[A-Za-z0-9+/]{16}$' "
+            "AND octet_length(decode(nonce_b64, 'base64')) = 12",
+            name="ck_evidence_sensitive_nonce_b64",
+        ),
+        sa.CheckConstraint(
+            "ciphertext_b64 ~ '^([A-Za-z0-9+/]{4})*"
+            "([A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$' "
+            "AND octet_length(decode(ciphertext_b64, 'base64')) >= 16",
+            name="ck_evidence_sensitive_ciphertext_b64",
+        ),
+        sa.CheckConstraint(
+            "(kind = 'SOURCE_LOCATOR' AND blind_index IS NOT NULL) OR "
+            "(kind <> 'SOURCE_LOCATOR' AND blind_index IS NULL)",
+            name="ck_evidence_sensitive_blind_index_policy",
         ),
         sa.Index(
             "uq_evidence_source_locator_blind_index",
@@ -202,6 +223,13 @@ class EvidenceSensitiveValue(Base):
         server_default=sa.func.now(),
     )
 
+    def envelope_mapping(self) -> dict[str, str]:
+        return {
+            "key_version": self.key_version,
+            "nonce_b64": self.nonce_b64,
+            "ciphertext_b64": self.ciphertext_b64,
+        }
+
 
 class EvidenceDerivation(Base):
     __tablename__ = "evidence_derivations"
@@ -210,12 +238,16 @@ class EvidenceDerivation(Base):
             "parent_evidence_id <> child_evidence_id",
             name="ck_evidence_derivation_not_self",
         ),
+        sa.CheckConstraint(
+            "parameters_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_evidence_derivation_parameters_digest",
+        ),
         sa.UniqueConstraint(
             "parent_evidence_id",
-            "child_evidence_id",
             "transformation",
             "transformer_version",
-            name="uq_evidence_derivation_identity",
+            "parameters_digest",
+            name="uq_evidence_derivation_work_identity",
         ),
         sa.ForeignKeyConstraint(
             ["parent_evidence_id", "case_id"],
@@ -256,6 +288,7 @@ class EvidenceDerivation(Base):
         default=dict,
         server_default=sa.text("'{}'::jsonb"),
     )
+    parameters_digest: Mapped[str] = mapped_column(sa.String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True),
         nullable=False,
@@ -270,9 +303,55 @@ def _prevent_preserved_manifest_rewrite(
 ) -> None:
     del mapper, connection
     inspection = sa.inspect(target)
+    state_history = inspection.attrs.state.history
+    old_state = state_history.deleted[0] if state_history.deleted else target.state
+    if old_state is EvidenceState.STAGING:
+        return
     for attribute_name in ("size_bytes", "sha256", "sha512", "object_key"):
         history = inspection.attrs[attribute_name].history
-        if history.has_changes() and any(value is not None for value in history.deleted):
+        if history.has_changes():
             from darknetra_api.services.evidence import EvidenceDigestImmutableError
 
             raise EvidenceDigestImmutableError("preserved evidence manifest cannot be rewritten")
+
+
+@event.listens_for(EvidenceSensitiveValue, "before_insert")
+@event.listens_for(EvidenceSensitiveValue, "before_update")
+def _validate_sensitive_value_storage(
+    mapper: Mapper[Any], connection: Any, target: EvidenceSensitiveValue
+) -> None:
+    del mapper, connection
+    from darknetra_api.services.evidence import validate_sensitive_value_storage
+
+    validate_sensitive_value_storage(target)
+
+
+@event.listens_for(EvidenceSensitiveValue, "load")
+def _validate_loaded_sensitive_value(target: EvidenceSensitiveValue, context: Any) -> None:
+    del context
+    from darknetra_api.services.evidence import validate_sensitive_value_storage
+
+    validate_sensitive_value_storage(target)
+
+
+@event.listens_for(EvidenceSensitiveValue, "refresh")
+def _validate_refreshed_sensitive_value(
+    target: EvidenceSensitiveValue, context: Any, attrs: Any
+) -> None:
+    del context, attrs
+    from darknetra_api.services.evidence import validate_sensitive_value_storage
+
+    validate_sensitive_value_storage(target)
+
+
+@event.listens_for(EvidenceDerivation, "before_insert")
+@event.listens_for(EvidenceDerivation, "before_update")
+def _validate_derivation_parameters(
+    mapper: Mapper[Any], connection: Any, target: EvidenceDerivation
+) -> None:
+    del mapper, connection
+    from darknetra_api.services.provenance import derivation_parameters_digest
+
+    expected = derivation_parameters_digest(target.parameters_json)
+    if target.parameters_digest != expected:
+        raise ValueError("derivation parameters digest does not match canonical parameters")

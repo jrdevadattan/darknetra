@@ -11,6 +11,10 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, Mapper, mapped_column
 
 from darknetra_api.db.base import Base
+from darknetra_api.models.evidence import (
+    EVIDENCE_SENSITIVE_VALUE_KIND_ENUM,
+    EvidenceSensitiveValueKind,
+)
 from darknetra_api.models.user import utc_now
 
 
@@ -28,14 +32,20 @@ class CustodyEvent(Base):
             name="ck_custody_integrity_sha256_hex",
         ),
         sa.ForeignKeyConstraint(
-            ["sensitive_note_id", "evidence_id", "case_id"],
+            ["sensitive_note_id", "evidence_id", "case_id", "sensitive_note_kind"],
             [
                 "evidence_sensitive_values.id",
                 "evidence_sensitive_values.evidence_id",
                 "evidence_sensitive_values.case_id",
+                "evidence_sensitive_values.kind",
             ],
             ondelete="RESTRICT",
             name="fk_custody_event_sensitive_note_scope",
+        ),
+        sa.CheckConstraint(
+            "(sensitive_note_id IS NULL AND sensitive_note_kind IS NULL) OR "
+            "(sensitive_note_id IS NOT NULL AND sensitive_note_kind = 'CUSTODY_NOTE')",
+            name="ck_custody_event_sensitive_note_kind",
         ),
     )
     __repr__ = object.__repr__
@@ -63,6 +73,10 @@ class CustodyEvent(Base):
     integrity_sha256: Mapped[str | None] = mapped_column(sa.String(64), nullable=True)
     sensitive_note_id: Mapped[UUID | None] = mapped_column(
         PGUUID(as_uuid=True),
+        nullable=True,
+    )
+    sensitive_note_kind: Mapped[EvidenceSensitiveValueKind | None] = mapped_column(
+        EVIDENCE_SENSITIVE_VALUE_KIND_ENUM,
         nullable=True,
     )
     metadata_json: Mapped[dict[str, Any]] = mapped_column(

@@ -21,6 +21,15 @@ The following fields require this boundary when a Plan 03 or later model stores 
 The owning feature may apply this boundary to more fields. It may not remove a field from this list
 without an approved policy and architecture change.
 
+### Source-locator deduplication semantics
+
+`normalize_source_locator_for_dedup` trims outer Unicode whitespace and otherwise preserves the
+locator as exact Unicode code points. Equality is deliberately conservative: it does not case-fold
+schemes or hosts, remove default ports, normalize paths, or rewrite URLs. DARKNETRA locators may be
+opaque, onion, or archival identifiers, so semantic URL normalization could incorrectly merge
+distinct evidence. Empty values after trimming are rejected. Encryption always retains the original
+untrimmed plaintext; only the HMAC blind-index input uses this normalization.
+
 ## Write path
 
 1. Normalize plaintext only when the owning feature has a documented normalization rule. The
