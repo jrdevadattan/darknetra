@@ -32,10 +32,54 @@ The shell built `DARKNETRA_FIELD_KEYRING_B64_JSON` from the generated `v1` and `
 `DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v2`. It generated the isolated PostgreSQL password with
 `secrets.token_hex(24)`. No command printed a key or wrote one to the repository.
 
+Run this script to construct the runtime values:
+
+```bash
+runtime_key() {
+  python3 -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode("ascii"))'
+}
+
+export DARKNETRA_POSTGRES_PASSWORD
+export DARKNETRA_JWT_SIGNING_KEY_B64
+export DARKNETRA_FIELD_KEY_V1_B64
+export DARKNETRA_FIELD_KEYRING_B64_JSON
+export DARKNETRA_FIELD_BLIND_INDEX_KEY_B64
+DARKNETRA_POSTGRES_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_hex(24))')"
+DARKNETRA_JWT_SIGNING_KEY_B64="$(runtime_key)"
+DARKNETRA_FIELD_KEY_V1_B64="$(runtime_key)"
+field_key_v2_b64="$(runtime_key)"
+DARKNETRA_FIELD_BLIND_INDEX_KEY_B64="$(runtime_key)"
+DARKNETRA_FIELD_KEYRING_B64_JSON="$(python3 -c 'import json,os,sys; print(json.dumps({"v1":os.environ["DARKNETRA_FIELD_KEY_V1_B64"],"v2":sys.argv[1]},separators=(",",":")))' "$field_key_v2_b64")"
+unset field_key_v2_b64
+```
+
 The run used temporary directory `/tmp/plan03a-task5-20260825-0415-a91f7c2d` and Compose project
 `plan03at5a91f7c2d`. The temporary Compose override only mapped the runtime field-key variables into
 the API container. It declared no ports. The base Compose file ran without the development or E2E
 port overlays.
+
+Create the override without key values:
+
+```bash
+work_dir=/tmp/plan03a-task5-20260825-0415-a91f7c2d
+override="$work_dir/compose.plan03a.yml"
+python3 - "$override" <<'PY'
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text(
+    """services:
+  api:
+    environment:
+      DARKNETRA_FIELD_KEY_V1_B64: ${DARKNETRA_FIELD_KEY_V1_B64:?runtime v1 field key required}
+      DARKNETRA_FIELD_KEYRING_B64_JSON: ${DARKNETRA_FIELD_KEYRING_B64_JSON:?runtime field keyring required}
+      DARKNETRA_FIELD_BLIND_INDEX_KEY_B64: ${DARKNETRA_FIELD_BLIND_INDEX_KEY_B64:?runtime blind-index key required}
+      DARKNETRA_FIELD_ACTIVE_KEY_VERSION: v2
+""",
+    encoding="utf-8",
+)
+PY
+```
 
 Before the run, `/opt/unique-operations` owned one Compose project with nine healthy containers.
 Its published ports were 80, 443, 5432, and 9000. After verification, the temporary containers,
@@ -80,22 +124,42 @@ the isolated repository at `/work`. The main and E2E PostgreSQL databases had se
 same temporary PostgreSQL container.
 
 ```bash
-uv sync --frozen --all-packages --dev
-uv run alembic -c apps/api/alembic.ini upgrade head
-DARKNETRA_DATABASE_URL="$DARKNETRA_E2E_DATABASE_URL" uv run alembic -c apps/api/alembic.ini upgrade head
-uv run ruff check .
-uv run pytest -q apps/api/tests/integration/test_sensitive_value_reveal_integration.py
-uv run pytest -q \
-  apps/api/tests/unit/test_passwords.py \
-  apps/api/tests/unit/test_tokens.py \
-  apps/api/tests/unit/test_policy.py \
-  apps/api/tests/integration/test_bootstrap_admin.py \
-  apps/api/tests/integration/test_auth_flow.py \
-  apps/api/tests/integration/test_auth_cors.py \
-  apps/api/tests/integration/test_case_lifecycle.py \
-  apps/api/tests/integration/test_cross_case_authorization.py \
-  apps/api/tests/integration/test_case_memberships.py
-uv run pytest -q
+"${compose[@]}" exec -T postgres createdb -U darknetra darknetra_e2e_test
+network_name="$(sudo -n docker network ls --filter "label=com.docker.compose.project=plan03at5a91f7c2d" --format '{{.Name}}' | head -n 1)"
+api_image="$("${compose[@]}" images -q api)"
+test -n "$network_name"
+test -n "$api_image"
+repo="$work_dir/repo"
+database_url="postgresql+psycopg://darknetra:${DARKNETRA_POSTGRES_PASSWORD}@postgres:5432/darknetra"
+e2e_database_url="postgresql+psycopg://darknetra:${DARKNETRA_POSTGRES_PASSWORD}@postgres:5432/darknetra_e2e_test"
+
+sudo -n docker run --rm --user 0:0 \
+  --network "$network_name" \
+  --volume "$repo:/work" \
+  --workdir /work \
+  --env DARKNETRA_DATABASE_URL="$database_url" \
+  --env DARKNETRA_E2E_DATABASE_URL="$e2e_database_url" \
+  --env DARKNETRA_JWT_SIGNING_KEY_B64="$DARKNETRA_JWT_SIGNING_KEY_B64" \
+  "$api_image" \
+  sh -lc '
+    set -eu
+    uv sync --frozen --all-packages --dev
+    uv run alembic -c apps/api/alembic.ini upgrade head
+    DARKNETRA_DATABASE_URL="$DARKNETRA_E2E_DATABASE_URL" uv run alembic -c apps/api/alembic.ini upgrade head
+    uv run ruff check .
+    uv run pytest -q apps/api/tests/integration/test_sensitive_value_reveal_integration.py
+    uv run pytest -q \
+      apps/api/tests/unit/test_passwords.py \
+      apps/api/tests/unit/test_tokens.py \
+      apps/api/tests/unit/test_policy.py \
+      apps/api/tests/integration/test_bootstrap_admin.py \
+      apps/api/tests/integration/test_auth_flow.py \
+      apps/api/tests/integration/test_auth_cors.py \
+      apps/api/tests/integration/test_case_lifecycle.py \
+      apps/api/tests/integration/test_cross_case_authorization.py \
+      apps/api/tests/integration/test_case_memberships.py
+    uv run pytest -q
+  '
 ```
 
 Observed results:
@@ -118,18 +182,71 @@ docker run --rm -v "$PWD:/repo:ro" zricethezav/gitleaks:latest \
 git diff --check
 ```
 
-The custom Python check enumerated `git ls-files '.env*' '*.env' 'docs/**'`, added the new
-architecture document, skipped binary suffixes, and applied
-`(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{43}=(?![A-Za-z0-9+/=])`. It also rejected non-empty assignments
-for `DARKNETRA_JWT_SIGNING_KEY_B64`, `DARKNETRA_FIELD_KEY_V1_B64`,
-`DARKNETRA_FIELD_KEYRING_B64_JSON`, and `DARKNETRA_FIELD_BLIND_INDEX_KEY_B64`.
+Run the custom scan with this script:
+
+```bash
+python3 - <<'PY'
+import re
+import subprocess
+from pathlib import Path
+
+paths = subprocess.check_output(
+    ["git", "ls-files", ".env*", "*.env", "docs/**"],
+    text=True,
+).splitlines()
+architecture = Path("docs/architecture/sensitive-field-encryption.md")
+if architecture.exists() and architecture.as_posix() not in paths:
+    paths.append(architecture.as_posix())
+
+candidate = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{43}=(?![A-Za-z0-9+/=])")
+assignment = re.compile(
+    r"^\s*(DARKNETRA_(?:JWT_SIGNING_KEY_B64|FIELD_KEY_V1_B64|FIELD_KEYRING_B64_JSON|FIELD_BLIND_INDEX_KEY_B64))\s*[:=]\s*(.*?)\s*$"
+)
+runtime_expression = re.compile(r'''^["']?\$(?:\(|\{)''')
+hits = []
+literal_assignments = []
+for name in paths:
+    path = Path(name)
+    if not path.is_file():
+        continue
+    if path.suffix.lower() not in {".md", ".txt", ".env", ".example"} and ".env" not in path.name:
+        continue
+    text = path.read_text(encoding="utf-8")
+    for number, line in enumerate(text.splitlines(), 1):
+        if candidate.search(line):
+            hits.append(f"{name}:{number}")
+        match = assignment.match(line)
+        if match and match.group(2) and not runtime_expression.match(match.group(2)):
+            literal_assignments.append(f"{name}:{number}")
+assert not hits, f"32-byte Base64-looking values in env/docs: {hits}"
+assert not literal_assignments, f"literal secret assignments in env/docs: {literal_assignments}"
+print(f"ENV_DOC_KEY_SCAN={len(paths)} files, zero Base64 key candidates, zero literal secret assignments")
+PY
+```
 
 Observed results:
 
 - Gitleaks scanned about 1.69 MB and reported `no leaks found`.
 - The tracked env/document scan checked 33 paths and found zero 32-byte Base64 candidates and zero
-  non-empty assignments for the JWT, field-key, keyring, or blind-index variables.
+  literal assignments for the JWT, field-key, keyring, or blind-index variables.
 - `git diff --check` exited 0.
+
+I ran these VM cleanup commands:
+
+```bash
+cd /tmp/plan03a-task5-20260825-0415-a91f7c2d/repo
+sudo -n docker compose -p plan03at5a91f7c2d -f docker-compose.yml down --volumes --remove-orphans
+sudo -n docker image rm plan03at5a91f7c2d-api:latest
+cd /tmp
+test "$(realpath /tmp/plan03a-task5-20260825-0415-a91f7c2d)" = /tmp/plan03a-task5-20260825-0415-a91f7c2d
+sudo -n rm -rf -- /tmp/plan03a-task5-20260825-0415-a91f7c2d
+test ! -e /tmp/plan03a-task5-20260825-0415-a91f7c2d
+test -z "$(sudo -n docker ps -aq --filter label=com.docker.compose.project=plan03at5a91f7c2d)"
+test -z "$(sudo -n docker volume ls -q --filter label=com.docker.compose.project=plan03at5a91f7c2d)"
+test -z "$(sudo -n docker network ls -q --filter label=com.docker.compose.project=plan03at5a91f7c2d)"
+sudo -n docker ps --format '{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}' | sort
+sudo -n docker compose ls
+```
 
 After writing the final documents, the Windows host ran these checks at
 `2026-08-25T04:41:00Z`:

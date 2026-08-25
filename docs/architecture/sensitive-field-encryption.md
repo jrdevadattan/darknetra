@@ -112,12 +112,18 @@ and retirement checks.
 
 A consuming model passes this gate only when tests show that it:
 
-- calls `SensitiveFieldCrypto.encrypt` before persistence for every covered field;
-- stores and validates a complete envelope rather than accepting caller-supplied text in a
-  ciphertext-named column;
-- creates a purpose-scoped HMAC blind index only when equality lookup is required;
+- sends every covered write through `SensitiveFieldCrypto.encrypt` and passes its result to
+  `pack_envelope` before the repository persists the envelope;
+- sends every stored envelope through `unpack_envelope` before an authorized service uses it;
+- calls `SensitiveFieldCrypto.blind_index` with the field purpose and normalized plaintext when
+  the owning feature requires equality lookup or deduplication;
 - omits plaintext and envelope internals from ORM representations and ordinary API responses;
-- binds a case-scoped provider and feature-specific permission predicate for full reveal;
-- audits a justified full reveal and commits that audit before returning plaintext; and
+- binds a case-scoped provider and feature-specific permission predicate, then sends the full-value
+  API path through `reveal_sensitive_value` so the service authorizes, decrypts, audits, commits,
+  and returns the plaintext;
+- exercises those owning service, repository, and API call paths in tests that invoke
+  `SensitiveFieldCrypto.encrypt`, `pack_envelope`, `unpack_envelope`, `reveal_sensitive_value`, and
+  `SensitiveFieldCrypto.blind_index` where equality lookup or deduplication applies; test code
+  paths or parallel custom envelope, decryption, and reveal logic do not satisfy this gate; and
 - supports explicit re-encryption while retaining old decryption versions required by live data
   and backups.
