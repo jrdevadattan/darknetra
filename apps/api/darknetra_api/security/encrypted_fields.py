@@ -123,7 +123,10 @@ def _redact_wallet(plaintext: str) -> str:
 
 
 def _redact_onion(plaintext: str) -> str:
-    host = urlsplit(plaintext if "://" in plaintext else f"//{plaintext}").hostname
+    try:
+        host = urlsplit(plaintext if "://" in plaintext else f"//{plaintext}").hostname
+    except ValueError:
+        return "[REDACTED]"
     if host is None or not _ONION_HOST_PATTERN.fullmatch(host):
         return "[REDACTED]"
     return f"{host[:6]}….onion"

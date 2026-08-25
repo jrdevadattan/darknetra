@@ -211,3 +211,8 @@ def test_redact_for_display_rejects_short_or_malformed_sensitive_values(
 ) -> None:
     """Catches type-specific redactors leaking full or near-full malformed plaintext."""
     assert redact_for_display(plaintext, kind=kind) == "[REDACTED]"
+
+
+def test_redact_for_display_fails_closed_on_parser_invalid_onion_locator() -> None:
+    """Catches malformed URL parsing escaping the redaction boundary as an exception."""
+    assert redact_for_display("http://[::1", kind=SensitiveFieldKind.ONION) == "[REDACTED]"
