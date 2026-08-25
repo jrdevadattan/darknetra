@@ -1,1 +1,5 @@
-import { PlannedSurface } from '@/components/darknetra/planned-surface'; export default function Page(){return <PlannedSurface eyebrow="Administration" title="Taxonomies" description="Substance, shipping, location, and normalization taxonomies will be versioned and auditable." ownerPlan="Plan 04 · Extraction" />;}
+import { GlobalOperationalSurface } from "@/components/darknetra/operational-surfaces";
+
+export default function Page() {
+  return <GlobalOperationalSurface surface="taxonomies" />;
+}
