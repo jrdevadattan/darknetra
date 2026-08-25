@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
+from darknetra_api.models.enums import JobStatus
 from darknetra_api.models.evidence import (
     EvidenceSensitiveValueKind,
     EvidenceSourceClass,
@@ -87,11 +88,34 @@ class SensitiveValueRevealResponse(BaseModel):
     value: str
 
 
+class PreservedEvidenceRead(BaseModel):
+    id: UUID
+    case_id: UUID
+    media_type: str
+    size_bytes: int
+    sha256: str
+    state: EvidenceState
+
+
+class EvidenceJobRead(BaseModel):
+    id: UUID
+    status: JobStatus
+    dispatch_state: str
+
+
+class EvidenceIngestResponse(BaseModel):
+    evidence: PreservedEvidenceRead
+    job: EvidenceJobRead
+
+
 __all__ = [
     "CustodyEventResponse",
     "EvidenceArtifactResponse",
     "EvidenceDerivationResponse",
+    "EvidenceIngestResponse",
+    "EvidenceJobRead",
     "EvidenceSensitiveValueSummary",
+    "PreservedEvidenceRead",
     "SensitiveValueRevealRequest",
     "SensitiveValueRevealResponse",
 ]

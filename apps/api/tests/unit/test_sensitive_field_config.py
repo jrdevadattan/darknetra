@@ -109,6 +109,17 @@ def test_evidence_store_path_is_redacted_and_trusted_fallback_defaults_off() -> 
     assert settings.evidence_store_allow_trusted_volume_fallback is False
 
 
+def test_evidence_upload_limit_defaults_to_100_mib_and_has_a_500_mib_ceiling() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.evidence_upload_max_bytes == 100 * 1024 * 1024
+    assert Settings(evidence_upload_max_bytes=500 * 1024 * 1024, _env_file=None)
+    with pytest.raises(ValueError):
+        Settings(evidence_upload_max_bytes=0, _env_file=None)
+    with pytest.raises(ValueError):
+        Settings(evidence_upload_max_bytes=500 * 1024 * 1024 + 1, _env_file=None)
+
+
 @pytest.mark.parametrize(
     "field_name",
     ["field_key_v1_b64", "field_blind_index_key_b64"],

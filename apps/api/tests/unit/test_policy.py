@@ -18,13 +18,14 @@ EXPECTED_ROLE_PERMISSIONS = {
             Permission.CASE_UPDATE,
             Permission.CASE_CLOSE,
             Permission.CASE_REOPEN,
+            Permission.EVIDENCE_CREATE,
             Permission.CASE_MEMBERSHIP_MANAGE,
             Permission.USER_READ,
             Permission.ROLE_READ,
             Permission.AUDIT_READ,
         }
     ),
-    GlobalRole.COLLECTOR: frozenset({Permission.CASE_READ}),
+    GlobalRole.COLLECTOR: frozenset({Permission.CASE_READ, Permission.EVIDENCE_CREATE}),
     GlobalRole.ANALYST: frozenset({Permission.CASE_READ}),
     GlobalRole.REVIEWER: frozenset({Permission.CASE_READ, Permission.AUDIT_READ}),
     GlobalRole.AUDITOR: frozenset(
@@ -66,6 +67,18 @@ def test_global_authorization_uses_current_role_state() -> None:
     authorize_global(admin, Permission.USER_MANAGE)
     with pytest.raises(AuthorizationDenied):
         authorize_global(analyst, Permission.CASE_CREATE)
+
+
+def test_only_case_owners_and_collectors_receive_evidence_create_permission() -> None:
+    assert Permission.EVIDENCE_CREATE in ROLE_PERMISSIONS[GlobalRole.CASE_OWNER]
+    assert Permission.EVIDENCE_CREATE in ROLE_PERMISSIONS[GlobalRole.COLLECTOR]
+    for role in (
+        GlobalRole.ANALYST,
+        GlobalRole.REVIEWER,
+        GlobalRole.AUDITOR,
+        GlobalRole.VIEWER,
+    ):
+        assert Permission.EVIDENCE_CREATE not in ROLE_PERMISSIONS[role]
 
 
 def test_forced_password_change_blocks_normal_mutations_not_safe_reads() -> None:

@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from darknetra_api.config import Settings, get_settings
+from darknetra_api.middleware.upload_limit import UploadBodyLimitMiddleware
 from darknetra_api.routers.health import router as health_router
 from darknetra_api.routes.admin import router as admin_router
 from darknetra_api.routes.audit import router as audit_router
@@ -38,11 +39,13 @@ def create_app(
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         runtime_settings = await resolve_startup_settings(startup_settings_provider)
+        application.state.runtime_settings = runtime_settings
         application.state.sensitive_field_crypto = runtime_settings.require_sensitive_field_crypto()
         try:
             yield
         finally:
             del application.state.sensitive_field_crypto
+            del application.state.runtime_settings
 
     application = FastAPI(title="DARKNETRA API", version="0.1.0", lifespan=lifespan)
     application.add_middleware(
@@ -52,6 +55,7 @@ def create_app(
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "X-CSRF-Token", "X-Request-ID"],
     )
+    application.add_middleware(UploadBodyLimitMiddleware)
 
     @application.middleware("http")
     async def protect_sensitive_reveal_responses(request: Request, call_next):

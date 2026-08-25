@@ -33,13 +33,14 @@ ROLE_PERMISSIONS = MappingProxyType(
                 Permission.CASE_UPDATE,
                 Permission.CASE_CLOSE,
                 Permission.CASE_REOPEN,
+                Permission.EVIDENCE_CREATE,
                 Permission.CASE_MEMBERSHIP_MANAGE,
                 Permission.USER_READ,
                 Permission.ROLE_READ,
                 Permission.AUDIT_READ,
             }
         ),
-        GlobalRole.COLLECTOR: frozenset({Permission.CASE_READ}),
+        GlobalRole.COLLECTOR: frozenset({Permission.CASE_READ, Permission.EVIDENCE_CREATE}),
         GlobalRole.ANALYST: frozenset({Permission.CASE_READ}),
         GlobalRole.REVIEWER: frozenset({Permission.CASE_READ, Permission.AUDIT_READ}),
         GlobalRole.AUDITOR: frozenset(
@@ -61,6 +62,7 @@ _MUTATION_PERMISSIONS = frozenset(
         Permission.CASE_CLOSE,
         Permission.CASE_REOPEN,
         Permission.CASE_MEMBERSHIP_MANAGE,
+        Permission.EVIDENCE_CREATE,
         Permission.USER_MANAGE,
     }
 )

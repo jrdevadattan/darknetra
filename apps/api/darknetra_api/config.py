@@ -13,6 +13,7 @@ from darknetra_api.security.keyring import SensitiveFieldKeyring, validate_keyri
 
 _FIELD_KEY_V1_VARIABLE = "DARKNETRA_FIELD_KEY_V1_B64"
 _BLIND_INDEX_KEY_VARIABLE = "DARKNETRA_FIELD_BLIND_INDEX_KEY_B64"
+_HARD_EVIDENCE_UPLOAD_MAX_BYTES = 500 * 1024 * 1024
 
 
 class Settings(BaseSettings):
@@ -28,6 +29,8 @@ class Settings(BaseSettings):
     database_owner_url: str = Field(default="", repr=False)
     evidence_store_root: Path = Field(default=Path("evidence-store"), repr=False)
     evidence_store_allow_trusted_volume_fallback: bool = False
+    evidence_upload_max_bytes: int = 100 * 1024 * 1024
+    evidence_ingest_pipeline_version: str = "v1"
     web_origin: str = "http://localhost:3000"
     jwt_signing_key_b64: str = ""
     field_key_v1_b64: str = Field(default="", repr=False)
@@ -79,6 +82,13 @@ class Settings(BaseSettings):
     @classmethod
     def validate_field_active_key_version(cls, value: str) -> str:
         return validate_key_version(value)
+
+    @field_validator("evidence_upload_max_bytes")
+    @classmethod
+    def validate_evidence_upload_max_bytes(cls, value: int) -> int:
+        if not 1 <= value <= _HARD_EVIDENCE_UPLOAD_MAX_BYTES:
+            raise ValueError("evidence upload limit must be between 1 byte and 500 MiB")
+        return value
 
 
 @lru_cache
