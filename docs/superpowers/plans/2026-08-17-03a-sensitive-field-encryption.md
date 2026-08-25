@@ -13,6 +13,7 @@
 - Execute after Plan 02 and before Plan 03 evidence ingestion.
 - Use established cryptographic libraries only; no custom cipher/mode/KDF.
 - Master encryption key and blind-index key are distinct 256-bit secrets provided through runtime environment/secret mount, never committed.
+- Tracked workflows and Compose files contain no static Base64 keys, including synthetic or test-only keys. Verification generates them at runtime or requires a runtime secret source.
 - Key IDs/versions are non-secret and stored with envelopes.
 - AES-GCM nonce is random 96-bit and never intentionally reused with the same key.
 - Associated authenticated data binds ciphertext to field purpose and resource ID/type so ciphertext cannot be silently moved between fields/resources.
@@ -45,10 +46,25 @@ class SensitiveFieldCrypto:
     def blind_index(self, plaintext: str, *, purpose: str) -> str: ...
 ```
 
-- [ ] **Step 1: Write failing round-trip/tamper tests** for UTF-8 values, same plaintext producing different ciphertext, wrong purpose/resource failing authentication, one-byte ciphertext/nonce modification failing, and logs/repr not including plaintext.
-- [ ] **Step 2: Add `cryptography` dependency** and explicit settings `DARKNETRA_FIELD_KEY_V1_B64`, `DARKNETRA_FIELD_BLIND_INDEX_KEY_B64`, `DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1`; validate decoded key length exactly 32 bytes.
-- [ ] **Step 3: Implement AESGCM encryption/decryption** with `os.urandom(12)` nonce and AAD bytes `darknetra:{purpose}:{resource_id}:v1`.
-- [ ] **Step 4: Implement blind index** `HMAC-SHA256(key, purpose + NUL + normalized_plaintext)`; purpose-specific caller defines normalization before passing value.
+Context framing is exact and replaces all delimiter concatenation before Plan 03 persists data:
+
+```text
+HEADER = ASCII "DARKNETRA-SENSITIVE-FIELD"
+VERSION = 0x01
+COUNT = one unsigned byte containing the number of components, excluding DOMAIN
+LP(value) = eight-byte unsigned big-endian byte length || value
+FRAME(domain, components...) = HEADER || VERSION || COUNT || LP(domain) || LP(component_1) || ...
+
+AAD = FRAME(ASCII "aes-256-gcm-aad", UTF8(purpose), UTF8(resource_id), UTF8(key_version))
+BLIND_INDEX_MESSAGE = FRAME(ASCII "hmac-sha256-blind-index", UTF8(purpose), UTF8(normalized_plaintext))
+```
+
+Key versions use the single grammar `v[1-9][0-9]{0,62}`. The complete identifier is 2 through 64 ASCII characters with no leading zero. Settings, keyring input, crypto construction, and envelope packing/unpacking use one shared validator.
+
+- [ ] **Step 1: Write failing round-trip/tamper and collision tests** for UTF-8 values, same plaintext producing different ciphertext, wrong purpose/resource failing authentication, one-byte ciphertext/nonce modification failing, logs/repr not including plaintext, colon-shifted AAD tuples, and NUL-shifted blind-index tuples. Include property tests over delimiter-bearing values and observe RED before changing framing.
+- [ ] **Step 2: Add `cryptography` dependency** and explicit settings `DARKNETRA_FIELD_KEY_V1_B64`, `DARKNETRA_FIELD_BLIND_INDEX_KEY_B64`, `DARKNETRA_FIELD_ACTIVE_KEY_VERSION=v1`; validate decoded key length exactly 32 bytes and the shared key-version grammar at every boundary.
+- [ ] **Step 3: Implement AESGCM encryption/decryption** with `os.urandom(12)` nonce and the exact domain-separated, versioned, length-prefixed AAD frame above.
+- [ ] **Step 4: Implement blind index** as HMAC-SHA-256 over the exact domain-separated, versioned, length-prefixed message above; the purpose-specific caller defines normalization before passing the value.
 - [ ] **Step 5: Run unit/Hypothesis tests** and commit `feat: add sensitive field envelope encryption`.
 
 ---
@@ -84,6 +100,10 @@ async def reveal_sensitive_value(
 ) -> str
 ```
 
+The public function keeps exactly these seven keyword-only arguments. The owning HTTP dependency binds the provider, permission predicate, crypto service, and request ID once to the request session with `bind_sensitive_reveal_context`. That binding is immutable for the request lifetime and may not be replaced. Provider and policy adapters are read-only because `reveal_sensitive_value` commits the session to make its audit event durable; adapters must not stage unrelated writes.
+
+The reveal purpose is the literal prefix `darknetra-sensitive-reveal:v1:` followed by a compact JSON array `[resource_type,field_name]`, serialized with no spaces and with UTF-8 non-ASCII characters unescaped. This composition is injective for accepted UTF-8 strings and does not confuse dotted resource types with dotted field names.
+
 - [ ] **Step 1: Write authorization tests** VIEWER denied; role/permission configured by owning feature; cross-case inaccessible returns repository-standard 404.
 - [ ] **Step 2: Require non-empty reveal reason** bounded 10..500 characters for full-value reveal.
 - [ ] **Step 3: Append audit event** containing resource/field/reason, never revealed plaintext.
@@ -103,9 +123,9 @@ async def reveal_sensitive_value(
 - Rotation command/service always decrypts with old key and encrypts with active key inside authorized offline/admin maintenance context.
 
 - [ ] **Step 1: Test v1 decrypt after v2 becomes active**.
-- [ ] **Step 2: Test re-encryption produces v2 envelope and preserves blind index unless blind-index key also intentionally rotates.
+- [ ] **Step 2: Test re-encryption produces v2 envelope and preserves blind index unless blind-index key also intentionally rotates.** Because the stored blind index is not versioned, a blind-index-key rotation requires either a complete offline rebuild before reads resume or a separately designed versioned dual-write, backfill, dual-read, and cutover migration.
 - [ ] **Step 3: Unknown key version fails closed with typed error**, not fallback to active key.
-- [ ] **Step 4: Document operational rotation and backup requirement**; keys themselves are not backed up into repository archive.
+- [ ] **Step 4: Document operational rotation and backup requirement**; keys themselves are not backed up into repository archive. Backups retain the encryption and blind-index key versions and migration state needed to restore, decrypt, rebuild indexes, and perform equality lookups until retention expires.
 - [ ] **Step 5: Commit** `feat: support versioned sensitive field keys`.
 
 ---
@@ -118,7 +138,7 @@ async def reveal_sensitive_value(
 
 - [ ] **Step 1: Document exact fields required to use this boundary** initially: source locators, authority references, analyst notes/rationales where policy marks sensitive, custody notes, contacts, and policy-restricted wallets.
 - [ ] **Step 2: Run fresh `ruff`, pytest, authentication/case regression and Docker API smoke tests** with runtime test keys.
-- [ ] **Step 3: Run repository secret scan** and verify no real/base64 test key is in tracked `.env` or docs; tests generate keys at runtime.
+- [ ] **Step 3: Run repository secret scan** and verify no real key or static synthetic/test Base64 key is in tracked `.env`, docs, `.github/workflows/**`, or `docker-compose*.yml`; tests and verification commands generate keys at runtime.
 - [ ] **Step 4: Record observed verification output/commit SHA** and commit `docs: verify sensitive field encryption`.
 
 ---
@@ -131,4 +151,4 @@ async def reveal_sensitive_value(
 - Ordinary ORM/API serialization cannot auto-decrypt.
 - Full reveal is permission-gated, reasoned and audited without logging plaintext.
 - Key rotation can retain old decryption versions and re-encrypt explicitly.
-- Plan 03 evidence models use these helpers for source locator/authority/notes rather than merely naming columns `ciphertext`.
+- Plan 03a is complete without not-yet-created Plan 03 models. Plan 03 is blocked from completion until its source locators, authority references, protected analyst and custody notes, contacts, and policy-restricted wallets store complete validated envelopes plus purpose-specific HMAC blind indexes, use `pack_envelope` and `unpack_envelope`, and route full-value access through the exact audited reveal boundary.

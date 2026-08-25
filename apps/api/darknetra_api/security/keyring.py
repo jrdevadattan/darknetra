@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -13,6 +14,7 @@ from darknetra_api.security.encryption import (
     UnknownKeyVersionError,
     decode_key_b64,
 )
+from darknetra_api.security.key_versions import validate_key_version
 
 if TYPE_CHECKING:
     from darknetra_api.config import Settings
@@ -40,14 +42,13 @@ class SensitiveFieldKeyring:
         active_version: str,
         blind_index_key: bytes,
     ) -> None:
+        source_keys = dict(keys)
         validated = SensitiveFieldCrypto(
-            field_keys=keys,
+            field_keys=source_keys,
             active_key_version=active_version,
             blind_index_key=blind_index_key,
         )
-        self._keys = MappingProxyType(
-            {version: bytes(key) for version, key in keys.items()}
-        )
+        self._keys = MappingProxyType(source_keys)
         self._active_version = validated.active_key_version
         self._blind_index_key = bytes(blind_index_key)
 
@@ -128,27 +129,44 @@ class SensitiveFieldKeyring:
                 f"{_BLIND_INDEX_VARIABLE} must be configured"
             )
 
-        keys_b64: dict[str, str]
+        decoded_keys: dict[str, bytes]
         if settings.field_keyring_b64_json:
-            keys_b64 = _parse_json_mapping(settings.field_keyring_b64_json)
+            decoded_keys = _decode_base64_mapping(
+                _parse_json_mapping(settings.field_keyring_b64_json)
+            )
             if settings.field_key_v1_b64:
-                configured_v1 = keys_b64.get("v1")
-                if configured_v1 is not None and configured_v1 != settings.field_key_v1_b64:
+                legacy_v1 = decode_key_b64(
+                    settings.field_key_v1_b64,
+                    variable=_LEGACY_V1_VARIABLE,
+                )
+                configured_v1 = decoded_keys.get("v1")
+                if configured_v1 is not None and not hmac.compare_digest(
+                    configured_v1,
+                    legacy_v1,
+                ):
                     raise SensitiveFieldConfigurationError(
                         "conflicting v1 sensitive field keys are configured"
                     )
-                keys_b64.setdefault("v1", settings.field_key_v1_b64)
+                decoded_keys.setdefault("v1", legacy_v1)
         elif settings.field_key_v1_b64:
-            keys_b64 = {"v1": settings.field_key_v1_b64}
+            decoded_keys = {
+                "v1": decode_key_b64(
+                    settings.field_key_v1_b64,
+                    variable=_LEGACY_V1_VARIABLE,
+                )
+            }
         else:
             raise SensitiveFieldConfigurationError(
-                f"{_LEGACY_V1_VARIABLE} must be configured"
+                f"{_KEYRING_VARIABLE} or {_LEGACY_V1_VARIABLE} must be configured"
             )
 
-        return cls.from_base64_mapping(
-            keys_b64=keys_b64,
+        return cls(
+            keys=decoded_keys,
             active_version=settings.field_active_key_version,
-            blind_index_key_b64=settings.field_blind_index_key_b64,
+            blind_index_key=decode_key_b64(
+                settings.field_blind_index_key_b64,
+                variable=_BLIND_INDEX_VARIABLE,
+            ),
         )
 
 
@@ -204,6 +222,8 @@ def _parse_json_mapping(value: str) -> dict[str, str]:
         raise SensitiveFieldConfigurationError(
             f"{_KEYRING_VARIABLE} must map key versions to base64 strings"
         )
+    for version in payload:
+        _validate_configured_key_version(version)
     return payload
 
 
@@ -223,13 +243,21 @@ def _decode_base64_mapping(keys_b64: Mapping[str, str]) -> dict[str, bytes]:
         raise SensitiveFieldConfigurationError(
             "at least one sensitive field key version must be configured"
         )
-    return {
-        version: decode_key_b64(
+    decoded: dict[str, bytes] = {}
+    for version, encoded in keys_b64.items():
+        validated_version = _validate_configured_key_version(version)
+        decoded[validated_version] = decode_key_b64(
             encoded,
-            variable=f"{_KEYRING_VARIABLE}[{version}]",
+            variable=f"{_KEYRING_VARIABLE}[{validated_version}]",
         )
-        for version, encoded in keys_b64.items()
-    }
+    return decoded
+
+
+def _validate_configured_key_version(version: object) -> str:
+    try:
+        return validate_key_version(version)
+    except ValueError as exc:
+        raise SensitiveFieldConfigurationError(str(exc)) from exc
 
 
 __all__ = [

@@ -7,6 +7,7 @@ from darknetra_api.security.encryption import (
     SensitiveFieldCrypto,
     decode_key_b64,
 )
+from darknetra_api.security.key_versions import validate_key_version
 from darknetra_api.security.keyring import SensitiveFieldKeyring, validate_keyring_b64_json
 
 _FIELD_KEY_V1_VARIABLE = "DARKNETRA_FIELD_KEY_V1_B64"
@@ -65,6 +66,11 @@ class Settings(BaseSettings):
         if value:
             decode_key_b64(value, variable=_BLIND_INDEX_KEY_VARIABLE)
         return value
+
+    @field_validator("field_active_key_version")
+    @classmethod
+    def validate_field_active_key_version(cls, value: str) -> str:
+        return validate_key_version(value)
 
 
 @lru_cache

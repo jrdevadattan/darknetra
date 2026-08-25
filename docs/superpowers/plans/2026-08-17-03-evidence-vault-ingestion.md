@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Begin only after Plans 01 and 02 verification pass.
+- Begin only after Plans 01, 02, and 03a verification pass. Reproduce the Plan 03a tested-tree identity recorded in `docs/verification/plan-03a-sensitive-field-encryption.md` before creating Plan 03 persistence.
 - Original evidence bytes are immutable after successful ingestion.
 - Every derivative references its parent evidence ID and transformation method/version.
 - Compute SHA-256 for every original and derivative; SHA-512 is optional but supported by manifest model.
@@ -23,6 +23,7 @@
 - Browser never receives unrestricted filesystem paths or object-store credentials.
 - API authorization reuses Plan 02 case-scoped policy.
 - Evidence mutations and audit events are committed transactionally where metadata is involved; byte writes use staging + verified atomic promotion.
+- API and worker startup construct and validate `Settings.require_sensitive_field_crypto()`. Startup and readiness fail closed when the required keyring, active version, or blind-index key is absent or invalid.
 - Do not implement OCR in this plan; image-only PDFs are marked `TEXT_NOT_AVAILABLE` rather than misrepresented as parsed.
 
 ---
@@ -58,11 +59,12 @@ INTEGRITY_MISMATCH
 - Authoritative `jobs` row records `PENDING|RUNNING|SUCCEEDED|FAILED|RETRYING` with case/resource references; Redis is transient only.
 
 - [ ] **Step 1: Write failing job-state persistence test** verifying a queued job row survives Redis flush because state is stored in PostgreSQL.
-- [ ] **Step 2: Add Redis/Celery dependencies and Compose services** with health checks, no host port in base Compose, and worker command pinned to `darknetra_api.jobs.celery_app:celery_app`.
+- [ ] **Step 2: Add Redis/Celery dependencies and Compose services** with health checks, no host port in base Compose, worker command pinned to `darknetra_api.jobs.celery_app:celery_app`, and runtime-only sensitive-field crypto variables supplied to API and worker without static synthetic/test keys.
 - [ ] **Step 3: Implement job model and migration** with unique idempotency key, attempt count, error code/message, created/started/finished timestamps.
 - [ ] **Step 4: Implement Celery app with JSON-only serializer**; disable pickle; set bounded task time limits and explicit retry policy.
-- [ ] **Step 5: Run Postgres/Redis/worker integration test** and prove Redis restart does not delete authoritative job history.
-- [ ] **Step 6: Commit** with `feat: add durable analysis job boundary`.
+- [ ] **Step 5: Construct sensitive-field crypto during API and worker startup** and include the result in readiness. Add tests that both processes start with a valid runtime keyring and fail closed on a missing key source, missing blind-index key, invalid version, duplicate key material, or unconfigured active version.
+- [ ] **Step 6: Run Postgres/Redis/worker integration test** and prove Redis restart does not delete authoritative job history.
+- [ ] **Step 7: Commit** with `feat: add durable analysis job boundary`.
 
 ---
 
@@ -76,14 +78,17 @@ INTEGRITY_MISMATCH
 - Create integration tests.
 
 **Interfaces:**
-- Tables: `evidence_artifacts`, `evidence_derivations`, `custody_events`.
+- Tables: `evidence_artifacts`, `evidence_sensitive_values`, `evidence_derivations`, `custody_events`.
 - `EvidenceArtifact` contains immutable expected digest fields after preservation.
+- `EvidenceSensitiveValue` is case and evidence scoped. It identifies one of `SOURCE_LOCATOR`, `AUTHORITY_REFERENCE`, `PROTECTED_NOTE`, `CUSTODY_NOTE`, `CONTACT`, or `POLICY_RESTRICTED_WALLET` and stores `key_version`, `nonce_b64`, `ciphertext_b64`, and `blind_index`. Contacts may also store a non-sensitive contact kind. Policy-restricted wallets may also store non-sensitive network/asset metadata. It never stores plaintext or a ciphertext-only shortcut.
 
-- [ ] **Step 1: Write schema tests** for unique evidence ID, case foreign key, valid source class/state, immutable digest service behavior, parent-child lineage, append-only custody rows.
-- [ ] **Step 2: Implement model fields**: `id`, `case_id`, `source_class`, `source_type`, `source_locator_ciphertext` nullable, `source_locator_hash` nullable, `authority_reference_ciphertext` nullable, `acquisition_method`, `collector_user_id`, `captured_at`, `ingested_at`, `original_timezone`, `media_type`, `size_bytes`, `sha256`, `sha512`, `object_key`, `state`, `quarantine_reason`, `tool_name`, `tool_version`, `notes_ciphertext`, timestamps.
-- [ ] **Step 3: Implement derivation rows** with `parent_evidence_id`, `child_evidence_id`, `transformation`, `transformer_version`, parameters JSON, timestamp.
-- [ ] **Step 4: Generate/apply migration** and run downgrade/upgrade on disposable DB.
-- [ ] **Step 5: Commit** `feat: define evidence provenance schema`.
+- [ ] **Step 1: Write schema and service tests** for unique evidence ID, case foreign key, valid source class/state, immutable digest service behavior, parent-child lineage, append-only custody rows, and all six protected value kinds. For each protected kind, the test must prove the owning write path calls `SensitiveFieldCrypto.encrypt`, persists all three fields returned by `pack_envelope`, and persists a purpose-specific HMAC blind index. A column named `ciphertext`, a partial envelope, raw SHA-256, or a test-only helper path does not satisfy the test.
+- [ ] **Step 2: Implement non-sensitive artifact fields**: `id`, `case_id`, `source_class`, `source_type`, `acquisition_method`, `collector_user_id`, `captured_at`, `ingested_at`, `original_timezone`, `media_type`, `size_bytes`, `sha256`, `sha512`, `object_key`, `state`, `quarantine_reason`, `tool_name`, `tool_version`, policy flags, and timestamps. Do not add `source_locator_ciphertext`, `authority_reference_ciphertext`, `notes_ciphertext`, or any other ciphertext-only scalar.
+- [ ] **Step 3: Implement protected-value persistence** through the Plan 03a boundary. The repository accepts `pack_envelope` output plus the HMAC blind index, validates every load with `unpack_envelope`, and omits plaintext, envelope internals, and blind indexes from ORM repr and ordinary schemas. Source locators, authority references, protected analyst notes/rationales, custody notes, contacts, and policy-restricted wallets all use this path.
+- [ ] **Step 4: Implement the owning reveal adapters and tests**. Bind the case-scoped provider, field-specific policy, crypto service, and request ID once to the request session, keep provider and policy adapters read-only, and call the exact seven-argument `reveal_sensitive_value`. Tests must cover permitted audited reveal, viewer denial, cross-case not-found equivalence, `Cache-Control: no-store` at the HTTP boundary, and failure to return plaintext when the audit commit fails.
+- [ ] **Step 5: Implement derivation rows** with `parent_evidence_id`, `child_evidence_id`, `transformation`, `transformer_version`, parameters JSON, timestamp.
+- [ ] **Step 6: Generate/apply migration** and run downgrade/upgrade on disposable DB. Inspect the migration to confirm every protected row has the complete envelope and blind-index columns and no plaintext or ciphertext-only legacy columns.
+- [ ] **Step 7: Commit** `feat: define evidence provenance schema`.
 
 ---
 
@@ -123,7 +128,7 @@ INTEGRITY_MISMATCH
 - Default single-artifact max upload: 100 MiB in MVP; configurable downward/upward by admin policy, hard ceiling 500 MiB in this plan.
 
 - [ ] **Step 1: Write negative tests** for unauthorized case, missing metadata, oversize Content-Length, streamed body exceeding declared/max size, MIME mismatch, empty file, unsupported type.
-- [ ] **Step 2: Implement source metadata schema** requiring source class/type/acquisition method; `PUBLIC_OBSERVATION` and `AUTHORIZED_IMPORT` require non-empty authority reference input.
+- [ ] **Step 2: Implement source metadata schema** requiring source class/type/acquisition method; `PUBLIC_OBSERVATION` and `AUTHORIZED_IMPORT` require non-empty authority reference input. Pass source locators, authority references, and protected notes to the Task 2 protected-value write service so complete envelopes and HMAC blind indexes are persisted.
 - [ ] **Step 3: Implement MIME detection from bytes**; filename extension is advisory only. Supported MIME allowlist maps to parser family.
 - [ ] **Step 4: Stream upload directly to object-store staging** without reading entire artifact into memory.
 - [ ] **Step 5: Persist evidence row only after verified object promotion**; if DB commit fails, retained unreferenced object is safe and later garbage-collection tooling may reconcile; do not delete a content-addressed object that might be shared by another evidence row.
@@ -312,8 +317,9 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml config >/dev/null
 bash scripts/smoke.sh
 ```
 
-- [ ] **Step 3: Run explicit forensic integrity experiment** on test store: ingest -> verify pass -> mutate one byte -> verify mismatch -> confirm expected digest unchanged -> restore isolated environment.
-- [ ] **Step 4: Record observed results/limits/commit SHA** and commit `docs: verify evidence vault milestone`.
+- [ ] **Step 3: Run startup/readiness tests and Compose probes** with runtime-generated crypto keys. Prove API and worker readiness succeeds with valid configuration and fails closed for missing or invalid crypto configuration. Scan tracked workflows and Compose files for static Base64 keys, including synthetic/test values.
+- [ ] **Step 4: Run explicit forensic integrity experiment** on test store: ingest -> verify pass -> mutate one byte -> verify mismatch -> confirm expected digest unchanged -> restore isolated environment.
+- [ ] **Step 5: Record observed results/limits/commit SHA** and commit `docs: verify evidence vault milestone`.
 
 ---
 
@@ -329,8 +335,10 @@ bash scripts/smoke.sh
 - Browser receives only authorized streamed content, never storage credentials/paths.
 - Hash mismatch is detected and never silently rewritten.
 - Evidence UI exposes provenance, integrity, lineage, quarantine and explicit restricted reveal.
+- Source locators, authority references, protected analyst and custody notes, contacts, and policy-restricted wallets persist complete Plan 03a envelopes plus purpose-specific HMAC blind indexes, load through `unpack_envelope`, and reveal only through the audited seven-argument service.
+- API and worker startup/readiness validate the Plan 03a crypto configuration and fail closed when it is absent or invalid.
 - Full fresh verification is recorded.
 
 ## Plan 04 handoff contract
 
-Plan 04 may consume `READY/PARTIAL` normalized text derivatives and safe image derivatives by evidence ID, and may create structured extraction records linked to exact evidence/derivative spans. It must never parse from uncontrolled original bytes when an approved derivative exists.
+Plan 04 may consume `READY/PARTIAL` normalized text derivatives and safe image derivatives by evidence ID, and may create structured extraction records linked to exact evidence/derivative spans. It must never parse from uncontrolled original bytes when an approved derivative exists. Any extracted contact or policy-restricted wallet value that is persisted must use the Plan 03 protected-value repository, complete envelope, HMAC blind index, `pack_envelope`/`unpack_envelope`, and audited reveal path. Plan 04 must not introduce parallel plaintext, raw-hash, ciphertext-only, decryption, or reveal logic.

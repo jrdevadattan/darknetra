@@ -100,7 +100,7 @@ def encrypted_value(
     *,
     plaintext: str,
     resource_id: str,
-    purpose: str = "evidence.source_locator",
+    purpose: str = 'darknetra-sensitive-reveal:v1:["evidence","source_locator"]',
 ) -> tuple[object, SensitiveFieldCrypto]:
     module = reveal_module()
     crypto_service = crypto()
@@ -344,7 +344,7 @@ async def test_requested_field_derives_purpose_independently_of_provider(
     stored, crypto_service = encrypted_value(
         plaintext="custody-secret",
         resource_id=resource_id,
-        purpose="evidence.custody_notes",
+        purpose='darknetra-sensitive-reveal:v1:["evidence","custody_notes"]',
     )
     provider = ScopedProvider({(case_id, "evidence", resource_id, "source_locator"): stored})
     session = FakeSession()
@@ -357,6 +357,41 @@ async def test_requested_field_derives_purpose_independently_of_provider(
             resource_type="evidence",
             resource_id=resource_id,
             field_name="source_locator",
+            reason="Investigating source provenance",
+            session=session,
+        )
+
+    assert session.added == []
+    assert session.committed is False
+
+
+@pytest.mark.asyncio
+async def test_reveal_rejects_dot_ambiguous_resource_and_field_tuple(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches dotted purpose composition authenticating a different resource/field tuple."""
+    module = reveal_module()
+    patch_case_authorization(monkeypatch, effective_roles={GlobalRole.ANALYST})
+    case_id = uuid4()
+    resource_id = "evidence-dot-purpose-confusion"
+    stored, crypto_service = encrypted_value(
+        plaintext="dot-ambiguous-secret",
+        resource_id=resource_id,
+        purpose='darknetra-sensitive-reveal:v1:["evidence.source","locator"]',
+    )
+    provider = ScopedProvider(
+        {(case_id, "evidence", resource_id, "source.locator"): stored}
+    )
+    session = FakeSession()
+    bind_context(session, provider=provider, crypto_service=crypto_service)
+
+    with pytest.raises(SensitiveFieldDecryptionError, match="decryption failed"):
+        await module.reveal_sensitive_value(
+            actor=make_user(GlobalRole.ANALYST),
+            case_id=case_id,
+            resource_type="evidence",
+            resource_id=resource_id,
+            field_name="source.locator",
             reason="Investigating source provenance",
             session=session,
         )

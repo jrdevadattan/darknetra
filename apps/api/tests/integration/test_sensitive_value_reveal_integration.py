@@ -150,14 +150,14 @@ async def test_real_effective_roles_scoped_not_found_and_audit_transaction() -> 
         visible_stored = module.SensitiveValue(
             envelope=crypto_service.encrypt(
                 plaintext,
-                purpose="evidence.source_locator",
+                purpose='darknetra-sensitive-reveal:v1:["evidence","source_locator"]',
                 resource_id=visible_resource_id,
             )
         )
         cross_case_stored = module.SensitiveValue(
             envelope=crypto_service.encrypt(
                 "other-case-secret",
-                purpose="evidence.source_locator",
+                purpose='darknetra-sensitive-reveal:v1:["evidence","source_locator"]',
                 resource_id=cross_case_resource_id,
             )
         )

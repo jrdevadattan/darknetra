@@ -35,8 +35,11 @@ jobs:
         with:
           version: '0.12.4'
 
-      - name: Generate runtime-only signing key
+      - id: runtime_secrets
+        name: Create scoped runtime secret file
+        shell: bash
         run: |
+          set -euo pipefail
           KEY="$(python - <<'PY'
           import base64
           import secrets
@@ -44,7 +47,13 @@ jobs:
           PY
           )"
           echo "::add-mask::$KEY"
-          echo "DARKNETRA_JWT_SIGNING_KEY_B64=$KEY" >> "$GITHUB_ENV"
+          runtime_env="$RUNNER_TEMP/darknetra-plan02-task13.env"
+          umask 077
+          printf 'DARKNETRA_JWT_SIGNING_KEY_B64=%s\n' "$KEY" > "$runtime_env"
+          chmod 600 "$runtime_env"
+          test "$(stat -c '%a' "$runtime_env")" = 600
+          echo "env_file=$runtime_env" >> "$GITHUB_OUTPUT"
+          unset KEY
 
       - id: prepare
         name: Prepare workspaces
@@ -74,19 +83,29 @@ jobs:
       - id: compose_config
         name: Validate isolated Compose profile
         continue-on-error: true
+        shell: bash
         run: |
-          docker compose -p darknetra-plan02-task13 \
+          runtime_env='${{ steps.runtime_secrets.outputs.env_file }}'
+          test -n "$runtime_env"
+          test -f "$runtime_env"
+          test "$(stat -c '%a' "$runtime_env")" = 600
+          docker compose --env-file "$runtime_env" -p darknetra-plan02-task13 \
             -f docker-compose.yml -f docker-compose.e2e.yml config >/dev/null
 
       - id: database
         name: Start disposable PostgreSQL volume
         if: steps.compose_config.outcome == 'success'
         continue-on-error: true
+        shell: bash
         run: |
-          docker compose -p darknetra-plan02-task13 \
+          runtime_env='${{ steps.runtime_secrets.outputs.env_file }}'
+          test -n "$runtime_env"
+          test -f "$runtime_env"
+          test "$(stat -c '%a' "$runtime_env")" = 600
+          docker compose --env-file "$runtime_env" -p darknetra-plan02-task13 \
             -f docker-compose.yml -f docker-compose.e2e.yml up -d postgres
           for attempt in $(seq 1 30); do
-            if docker compose -p darknetra-plan02-task13 \
+            if docker compose --env-file "$runtime_env" -p darknetra-plan02-task13 \
               -f docker-compose.yml -f docker-compose.e2e.yml \
               exec -T postgres pg_isready -U darknetra -d darknetra_e2e_test; then
               exit 0
@@ -119,8 +138,13 @@ jobs:
         name: Build and start real API and web containers
         if: steps.fixture.outcome == 'success'
         continue-on-error: true
+        shell: bash
         run: |
-          docker compose -p darknetra-plan02-task13 \
+          runtime_env='${{ steps.runtime_secrets.outputs.env_file }}'
+          test -n "$runtime_env"
+          test -f "$runtime_env"
+          test "$(stat -c '%a' "$runtime_env")" = 600
+          docker compose --env-file "$runtime_env" -p darknetra-plan02-task13 \
             -f docker-compose.yml -f docker-compose.e2e.yml up -d --build api web
           curl --fail --retry 40 --retry-all-errors --retry-delay 2 \
             http://127.0.0.1:8000/api/v1/health/live
@@ -144,9 +168,27 @@ jobs:
 
       - name: Tear down isolated stack and volume
         if: always()
+        shell: bash
         run: |
-          docker compose -p darknetra-plan02-task13 \
-            -f docker-compose.yml -f docker-compose.e2e.yml down -v --remove-orphans || true
+          set +e
+          runtime_env='${{ steps.runtime_secrets.outputs.env_file }}'
+          cleanup_status=0
+          if [[ -n "$runtime_env" && -f "$runtime_env" ]]; then
+            if [[ "$(stat -c '%a' "$runtime_env")" != 600 ]]; then
+              echo "::error::runtime secret file mode is not 600"
+              cleanup_status=1
+            fi
+            docker compose --env-file "$runtime_env" -p darknetra-plan02-task13 \
+              -f docker-compose.yml -f docker-compose.e2e.yml down -v --remove-orphans || \
+              cleanup_status=1
+            rm -f -- "$runtime_env" || cleanup_status=1
+          else
+            echo "::error::runtime secret file is absent"
+            cleanup_status=1
+            docker compose -p darknetra-plan02-task13 -f docker-compose.yml \
+              down -v --remove-orphans || true
+          fi
+          exit "$cleanup_status"
 
       - name: Record Task 13 real E2E outcome
         if: always()

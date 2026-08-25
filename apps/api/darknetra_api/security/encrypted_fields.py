@@ -16,10 +16,10 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from darknetra_api.security.encryption import NONCE_BYTES, EncryptedValue
+from darknetra_api.security.key_versions import validate_key_version
 
 _ENVELOPE_FIELDS = ("key_version", "nonce_b64", "ciphertext_b64")
 _AUTHENTICATION_TAG_BYTES = 16
-_KEY_VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _EMAIL_PATTERN = re.compile(r"^[^@\s]{2,64}@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$")
 _PHONE_PATTERN = re.compile(r"^\+?[0-9][0-9(). -]*$")
 _WALLET_PATTERN = re.compile(
@@ -81,7 +81,9 @@ def redact_for_display(plaintext: str, *, kind: SensitiveFieldKind) -> str:
 
 
 def _validate_envelope(key_version: Any, nonce_b64: Any, ciphertext_b64: Any) -> None:
-    if not isinstance(key_version, str) or not _KEY_VERSION_PATTERN.fullmatch(key_version):
+    try:
+        validate_key_version(key_version)
+    except ValueError:
         raise EncryptedFieldValidationError("invalid encrypted field envelope")
     nonce = _decode_b64(nonce_b64)
     ciphertext = _decode_b64(ciphertext_b64)

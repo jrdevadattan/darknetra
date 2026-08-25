@@ -13,7 +13,8 @@ encryption key.
 
 During migration from the original single-key configuration,
 `DARKNETRA_FIELD_KEY_V1_B64` may remain configured. If the JSON keyring also contains `v1`, both
-values must match or sensitive-field crypto construction fails closed. Do not put real values in
+values must decode to the same 32 bytes or sensitive-field crypto construction fails closed.
+Equivalent non-canonical Base64 spellings are compared by decoded bytes. Do not put real values in
 `.env.example`, documentation, shell history, tickets, or the repository.
 
 ## Rotation procedure
@@ -34,9 +35,11 @@ values must match or sensitive-field crypto construction fails closed. Do not pu
    each current mutable record, decrypt using the envelope's recorded version and write the fresh
    active-version envelope transactionally. Use bounded, restartable batches and record counts and
    key versions, never plaintext, ciphertext, nonces, blind indexes, or key material.
-6. Preserve the stored blind index when only the encryption key changes. Recompute it only during a
-   separately approved blind-index-key rotation, and rebuild every affected equality index in the
-   same controlled maintenance window.
+6. Preserve the stored blind index when only the encryption key changes. The current blind index
+   is not versioned. A blind-index-key rotation must either rebuild every affected index in one
+   complete offline maintenance window before reads resume, or use an approved versioned migration
+   with parallel old/new index columns, dual writes, complete backfill, dual reads, a cutover, and
+   verified old-version retirement. Never partially replace an unversioned blind index.
 7. Never update or re-encrypt immutable audit/history payloads in place. If a historical payload
    requires a new representation, append a new auditable maintenance event or use the owning
    subsystem's explicit versioned migration design.
@@ -54,6 +57,10 @@ Do not remove an old key merely because current rows were re-encrypted. Retain i
 that no live envelope references it and every backup that may reference it has either expired or
 been restored and re-encrypted under an approved recovery procedure. Perform a restore drill before
 destruction and follow the organization's cryptographic key-destruction approval process.
+
+Retain each old blind-index key with any backup that contains indexes produced by it. A restored
+backup needs that key to compute matching lookup values until its indexes are rebuilt. Record which
+blind-index migration phase each backup represents, and include equality lookup in restore drills.
 
 Rollback means restoring the prior active-version selection while keeping both versions loaded.
 Already rotated envelopes require the new key; never roll back by deleting it or by rewriting audit

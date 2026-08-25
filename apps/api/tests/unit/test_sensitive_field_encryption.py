@@ -64,6 +64,37 @@ def test_aad_binds_purpose_and_resource() -> None:
         service.decrypt(encrypted, purpose="custody.notes", resource_id="record-b")
 
 
+def test_aad_rejects_colon_ambiguous_context_tuple() -> None:
+    """Catches delimiter framing that authenticates two distinct purpose/resource tuples."""
+    service = crypto()
+    encrypted = service.encrypt("secret", purpose="a:b", resource_id="c")
+
+    with pytest.raises(SensitiveFieldDecryptionError):
+        service.decrypt(encrypted, purpose="a", resource_id="b:c")
+
+
+@given(left=st.text(max_size=24), middle=st.text(max_size=24), right=st.text(max_size=24))
+def test_aad_framing_is_injective_across_colon_boundaries(
+    left: str,
+    middle: str,
+    right: str,
+) -> None:
+    """Catches any colon-boundary shift that preserves the old concatenated AAD bytes."""
+    service = crypto()
+    encrypted = service.encrypt(
+        "secret",
+        purpose=f"{left}:{middle}",
+        resource_id=right,
+    )
+
+    with pytest.raises(SensitiveFieldDecryptionError):
+        service.decrypt(
+            encrypted,
+            purpose=left,
+            resource_id=f"{middle}:{right}",
+        )
+
+
 def test_tampered_nonce_or_ciphertext_fails_closed() -> None:
     service = crypto()
     encrypted = service.encrypt("secret", purpose="wallet.value", resource_id="wallet-1")
@@ -99,6 +130,31 @@ def test_blind_index_is_stable_and_purpose_scoped() -> None:
     assert one == two
     assert one != other
     assert len(one) == 64
+
+
+def test_blind_index_rejects_nul_ambiguous_context_tuple() -> None:
+    """Catches delimiter framing that hashes two distinct purpose/plaintext tuples alike."""
+    service = crypto()
+
+    assert service.blind_index("c", purpose="a\0b") != service.blind_index(
+        "b\0c",
+        purpose="a",
+    )
+
+
+@given(left=st.text(max_size=24), middle=st.text(max_size=24), right=st.text(max_size=24))
+def test_blind_index_framing_is_injective_across_nul_boundaries(
+    left: str,
+    middle: str,
+    right: str,
+) -> None:
+    """Catches any NUL-boundary shift that preserves the old concatenated HMAC input."""
+    service = crypto()
+
+    assert service.blind_index(right, purpose=f"{left}\0{middle}") != service.blind_index(
+        f"{middle}\0{right}",
+        purpose=left,
+    )
 
 
 def test_runtime_keys_must_decode_to_exactly_32_bytes() -> None:

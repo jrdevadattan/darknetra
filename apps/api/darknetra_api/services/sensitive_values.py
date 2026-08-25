@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
@@ -32,7 +33,7 @@ class SensitiveValue:
 
 
 class SensitiveValueProvider(Protocol):
-    """Load one encrypted field while preserving case/resource ownership boundaries."""
+    """Load one encrypted field without staging writes on the reveal session."""
 
     async def __call__(
         self,
@@ -46,7 +47,7 @@ class SensitiveValueProvider(Protocol):
 
 
 class SensitiveRevealPermissionPredicate(Protocol):
-    """Apply the owning feature's resource-specific full-value reveal policy."""
+    """Apply the owning feature's read-only resource-specific reveal policy."""
 
     async def __call__(
         self,
@@ -71,6 +72,7 @@ class SensitiveRevealContext:
 
 
 _SESSION_CONTEXT_KEY = "darknetra.sensitive_reveal_context"
+_REVEAL_PURPOSE_PREFIX = "darknetra-sensitive-reveal:v1:"
 
 
 def bind_sensitive_reveal_context(
@@ -81,7 +83,11 @@ def bind_sensitive_reveal_context(
     crypto: SensitiveFieldCrypto,
     request_id: str,
 ) -> None:
-    """Install one immutable owning-feature reveal binding on this request's session."""
+    """Install one immutable owning-feature reveal binding on this request's session.
+
+    The provider and predicate must be read-only because a successful reveal commits
+    this session to make its audit event durable.
+    """
 
     if _SESSION_CONTEXT_KEY in session.info:
         raise SensitiveRevealConfigurationError(
@@ -111,6 +117,15 @@ def _validate_reason(reason: str) -> str:
     if not 10 <= len(normalized) <= 500:
         raise SensitiveRevealReasonError("reveal reason must be between 10 and 500 characters")
     return normalized
+
+
+def _compose_reveal_purpose(*, resource_type: str, field_name: str) -> str:
+    components = json.dumps(
+        [resource_type, field_name],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return f"{_REVEAL_PURPOSE_PREFIX}{components}"
 
 
 async def _get_effective_case_roles(
@@ -184,7 +199,10 @@ async def reveal_sensitive_value(
 
     plaintext = context.crypto.decrypt(
         stored.envelope,
-        purpose=f"{resource_type}.{field_name}",
+        purpose=_compose_reveal_purpose(
+            resource_type=resource_type,
+            field_name=field_name,
+        ),
         resource_id=resource_id,
     )
     append_audit_event(

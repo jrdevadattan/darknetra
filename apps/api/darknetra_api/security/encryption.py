@@ -3,16 +3,20 @@ import binascii
 import hashlib
 import hmac
 import os
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from darknetra_api.security.key_versions import validate_key_version
+
 KEY_BYTES = 32
 NONCE_BYTES = 12
-_KEY_VERSION_PATTERN = re.compile(r"^v[1-9][0-9]*$")
+_CONTEXT_HEADER = b"DARKNETRA-SENSITIVE-FIELD"
+_CONTEXT_FORMAT_VERSION = 1
+_AAD_DOMAIN = b"aes-256-gcm-aad"
+_BLIND_INDEX_DOMAIN = b"hmac-sha256-blind-index"
 
 
 class SensitiveFieldConfigurationError(ValueError):
@@ -56,9 +60,9 @@ class SensitiveFieldCrypto:
         if not keys:
             raise SensitiveFieldConfigurationError("at least one field key must be configured")
         for version, key in keys.items():
-            if not isinstance(version, str) or not _KEY_VERSION_PATTERN.fullmatch(version):
-                raise SensitiveFieldConfigurationError("invalid sensitive field key version")
+            self._validate_key_version(version)
             self._validate_key(key, label=f"field key {version!r}")
+        self._validate_key_version(active_key_version)
         self._validate_key(blind_index_key, label="blind index key")
         if len(set(keys.values())) != len(keys):
             raise SensitiveFieldConfigurationError(
@@ -105,6 +109,10 @@ class SensitiveFieldCrypto:
 
     def decrypt(self, value: EncryptedValue, *, purpose: str, resource_id: str) -> str:
         try:
+            validate_key_version(value.key_version)
+        except ValueError:
+            raise SensitiveFieldDecryptionError("sensitive field decryption failed") from None
+        try:
             key = self._field_keys[value.key_version]
         except KeyError:
             raise UnknownKeyVersionError(
@@ -127,12 +135,34 @@ class SensitiveFieldCrypto:
             raise SensitiveFieldDecryptionError("sensitive field decryption failed") from None
 
     def blind_index(self, plaintext: str, *, purpose: str) -> str:
-        message = purpose.encode("utf-8") + b"\0" + plaintext.encode("utf-8")
+        message = self._frame_context(
+            domain=_BLIND_INDEX_DOMAIN,
+            components=(purpose, plaintext),
+        )
         return hmac.new(self._blind_index_key, message, hashlib.sha256).hexdigest()
 
     @staticmethod
     def _aad(*, purpose: str, resource_id: str, key_version: str) -> bytes:
-        return f"darknetra:{purpose}:{resource_id}:{key_version}".encode()
+        return SensitiveFieldCrypto._frame_context(
+            domain=_AAD_DOMAIN,
+            components=(purpose, resource_id, key_version),
+        )
+
+    @staticmethod
+    def _frame_context(*, domain: bytes, components: tuple[str, ...]) -> bytes:
+        framed = bytearray(_CONTEXT_HEADER)
+        framed.extend((_CONTEXT_FORMAT_VERSION, len(components)))
+        for value in (domain, *(component.encode("utf-8") for component in components)):
+            framed.extend(len(value).to_bytes(8, byteorder="big"))
+            framed.extend(value)
+        return bytes(framed)
+
+    @staticmethod
+    def _validate_key_version(version: object) -> None:
+        try:
+            validate_key_version(version)
+        except ValueError as exc:
+            raise SensitiveFieldConfigurationError(str(exc)) from exc
 
     @staticmethod
     def _validate_key(key: bytes, *, label: str) -> None:

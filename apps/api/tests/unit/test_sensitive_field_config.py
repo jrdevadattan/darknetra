@@ -14,6 +14,18 @@ def encoded_key(byte: int) -> str:
     return base64.b64encode(bytes([byte]) * 32).decode("ascii")
 
 
+def equivalent_noncanonical_encoding(encoded: str) -> str:
+    base64_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    final_character = base64_alphabet.index(encoded[-2])
+    alternate = encoded[:-2] + base64_alphabet[final_character ^ 0x01] + encoded[-1]
+    assert alternate != encoded
+    assert base64.b64decode(alternate, validate=True) == base64.b64decode(
+        encoded,
+        validate=True,
+    )
+    return alternate
+
+
 def test_sensitive_field_settings_load_from_explicit_environment_variables(
     monkeypatch,
 ) -> None:
@@ -171,15 +183,7 @@ def test_sensitive_field_settings_reject_invalid_versioned_key_material() -> Non
 
 def test_sensitive_field_factory_rejects_duplicate_decoded_key_material() -> None:
     reused_key = encoded_key(0x71)
-    base64_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-    final_character = base64_alphabet.index(reused_key[-2])
-    alternate_encoding = (
-        reused_key[:-2] + base64_alphabet[final_character ^ 0x01] + reused_key[-1]
-    )
-    assert alternate_encoding != reused_key
-    assert base64.b64decode(alternate_encoding, validate=True) == base64.b64decode(
-        reused_key, validate=True
-    )
+    alternate_encoding = equivalent_noncanonical_encoding(reused_key)
     settings = Settings(
         field_keyring_b64_json=json.dumps(
             {"v1": reused_key, "v2": alternate_encoding}
@@ -201,6 +205,22 @@ def test_sensitive_field_factory_rejects_duplicate_decoded_key_material() -> Non
     assert alternate_encoding not in repr(caught.value)
 
 
+def test_legacy_and_json_v1_compare_decoded_key_bytes() -> None:
+    """Catches equivalent Base64 spellings being rejected as conflicting v1 key sources."""
+    legacy_v1 = encoded_key(0x73)
+    json_v1 = equivalent_noncanonical_encoding(legacy_v1)
+    settings = Settings(
+        field_key_v1_b64=legacy_v1,
+        field_keyring_b64_json=json.dumps({"v1": json_v1}),
+        field_blind_index_key_b64=encoded_key(0x74),
+        _env_file=None,
+    )
+
+    service = settings.require_sensitive_field_crypto()
+
+    assert service.key_versions == frozenset({"v1"})
+
+
 def test_sensitive_field_settings_reject_duplicate_json_version_members() -> None:
     first_key = encoded_key(0x81)
     second_key = encoded_key(0x82)
@@ -214,23 +234,23 @@ def test_sensitive_field_settings_reject_duplicate_json_version_members() -> Non
 
 
 @pytest.mark.parametrize(
-    ("configured_key", "missing_variable"),
+    ("configured_key", "missing_configuration"),
     [
         ({"field_key_v1_b64": encoded_key(0x11)}, "DARKNETRA_FIELD_BLIND_INDEX_KEY_B64"),
         (
             {"field_blind_index_key_b64": encoded_key(0x22)},
-            "DARKNETRA_FIELD_KEY_V1_B64",
+            "DARKNETRA_FIELD_KEYRING_B64_JSON or DARKNETRA_FIELD_KEY_V1_B64",
         ),
     ],
 )
 def test_sensitive_field_crypto_factory_requires_both_runtime_keys(
     configured_key: dict[str, str],
-    missing_variable: str,
+    missing_configuration: str,
 ) -> None:
     settings = Settings(**configured_key, _env_file=None)
 
     with pytest.raises(
         SensitiveFieldConfigurationError,
-        match=rf"{missing_variable} must be configured",
+        match=rf"{missing_configuration} must be configured",
     ):
         settings.require_sensitive_field_crypto()
