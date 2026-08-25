@@ -85,7 +85,7 @@ jobs:
         shell: bash
         env:
           DARKNETRA_BUILD_VERSION: ${{ github.sha }}
-          DARKNETRA_PUBLIC_ORIGIN: https://darknetra.8.231.123.247.sslip.io
+          DARKNETRA_PUBLIC_ORIGIN: https://darknetra.duckdns.org
         run: docker compose -f docker-compose.yml -f docker-compose.prod.yml config --quiet
 
   deploy:

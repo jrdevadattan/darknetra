@@ -92,7 +92,7 @@ worker_uid="$("${compose[@]}" exec -T worker id -u)"
 
 ready="$(curl --fail --silent --show-error --retry 12 --retry-delay 5 \
   "http://10.160.0.3:38001/api/v1/health/ready")"
-python - "$ready" "$short_sha" <<'PY'
+python3 - "$ready" "$short_sha" <<'PY'
 import json
 import sys
 
