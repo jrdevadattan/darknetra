@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,6 +12,9 @@ class Settings(BaseSettings):
     )
     web_origin: str = "http://localhost:3000"
     jwt_signing_key_b64: str = ""
+    field_key_v1_b64: str = Field(default="", repr=False)
+    field_blind_index_key_b64: str = Field(default="", repr=False)
+    field_active_key_version: str = "v1"
 
     model_config = SettingsConfigDict(env_prefix="DARKNETRA_", extra="ignore")
 

@@ -1,7 +1,6 @@
 import base64
 
 import pytest
-
 from darknetra_api.security.encryption import (
     EncryptedValue,
     SensitiveFieldConfigurationError,
@@ -108,3 +107,43 @@ def test_runtime_keys_must_decode_to_exactly_32_bytes() -> None:
 
     with pytest.raises(SensitiveFieldConfigurationError, match="valid base64"):
         decode_key_b64("not base64!", variable="KEY")
+
+
+def test_constructor_rejects_non_32_byte_keys() -> None:
+    with pytest.raises(SensitiveFieldConfigurationError, match="exactly 32 bytes"):
+        SensitiveFieldCrypto(
+            field_keys={"v1": b"short"},
+            active_key_version="v1",
+            blind_index_key=key(0x22),
+        )
+
+    with pytest.raises(SensitiveFieldConfigurationError, match="exactly 32 bytes"):
+        SensitiveFieldCrypto(
+            field_keys={"v1": key(0x11)},
+            active_key_version="v1",
+            blind_index_key=b"short",
+        )
+
+
+def test_service_repr_errors_and_logs_do_not_expose_secrets(caplog: pytest.LogCaptureFixture) -> None:
+    service = crypto()
+    plaintext = "never-emit-this-plaintext"
+    encrypted = service.encrypt(
+        plaintext,
+        purpose="custody.notes",
+        resource_id="record-a",
+    )
+
+    with pytest.raises(SensitiveFieldDecryptionError) as caught:
+        service.decrypt(
+            encrypted,
+            purpose="custody.notes",
+            resource_id="wrong-record",
+        )
+
+    assert plaintext not in repr(service)
+    assert repr(key(0x11)) not in repr(service)
+    assert repr(key(0x22)) not in repr(service)
+    assert plaintext not in str(caught.value)
+    assert plaintext not in repr(caught.value)
+    assert plaintext not in caplog.text

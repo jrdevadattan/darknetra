@@ -183,6 +183,7 @@ source = { virtual = "apps/api" }
 dependencies = [
     { name = "alembic" },
     { name = "argon2-cffi" },
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "psycopg", extra = ["binary", "pool"] },
     { name = "pydantic-settings" },
@@ -202,6 +203,7 @@ dev = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.16,<2" },
     { name = "argon2-cffi", specifier = ">=23.1,<26" },
+    { name = "cryptography", specifier = ">=45,<51" },
     { name = "fastapi", specifier = ">=0.135,<0.136" },
     { name = "psycopg", extras = ["binary", "pool"], specifier = ">=3.2,<4" },
     { name = "pydantic-settings", specifier = ">=2.10,<3" },
