@@ -193,6 +193,15 @@ describe("CaseShell", () => {
 
     expect(await screen.findByText("Process flow")).toBeInTheDocument();
     expect(screen.getByText("Evidence collection")).toBeInTheDocument();
+    expect(screen.getByText("Evidence ledger")).toBeInTheDocument();
+    expect(screen.getByText("Correlation graph")).toBeInTheDocument();
+    expect(screen.getByText("Entity extraction")).toBeInTheDocument();
+    expect(screen.getByText("Alert queue")).toBeInTheDocument();
+    expect(screen.getByText("Report package")).toBeInTheDocument();
+    expect(screen.getByText("2–5 minute selection script")).toBeInTheDocument();
+    expect(screen.getByText("34,982 observations indexed")).toBeInTheDocument();
+    expect(screen.getByText("12 linked entities")).toBeInTheDocument();
+    expect(screen.getByText("9 evidence artifacts")).toBeInTheDocument();
     expect(screen.getByText("Video walkthrough script")).toBeInTheDocument();
     expect(screen.getAllByText(API_CASE.case_code).length).toBeGreaterThan(0);
     expect(screen.getByText(API_CASE.source_authority_summary)).toBeInTheDocument();
