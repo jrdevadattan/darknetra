@@ -17,6 +17,7 @@ _BLIND_INDEX_KEY_VARIABLE = "DARKNETRA_FIELD_BLIND_INDEX_KEY_B64"
 class Settings(BaseSettings):
     environment: str = "development"
     build_version: str = "dev"
+    redis_url: str = "redis://127.0.0.1:6379/0"
     database_url: str = (
         "postgresql+psycopg://darknetra:darknetra-dev-only@127.0.0.1:5432/darknetra"
     )

@@ -1,6 +1,6 @@
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
 from darknetra_api.config import Settings, get_settings
@@ -14,7 +14,7 @@ class LiveHealthResponse(BaseModel):
 
 
 class ComponentHealth(BaseModel):
-    name: Literal["api"] = "api"
+    name: Literal["api", "sensitive-field-crypto"]
     status: Literal["ready"] = "ready"
 
 
@@ -30,8 +30,19 @@ def live(settings: Annotated[Settings, Depends(get_settings)]) -> LiveHealthResp
 
 
 @router.get("/ready", response_model=ReadyHealthResponse)
-def ready(settings: Annotated[Settings, Depends(get_settings)]) -> ReadyHealthResponse:
+def ready(
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ReadyHealthResponse:
+    if getattr(request.app.state, "sensitive_field_crypto", None) is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="sensitive field cryptography is not ready",
+        )
     return ReadyHealthResponse(
         version=settings.build_version,
-        components=[ComponentHealth()],
+        components=[
+            ComponentHealth(name="api"),
+            ComponentHealth(name="sensitive-field-crypto"),
+        ],
     )

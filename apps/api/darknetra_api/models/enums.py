@@ -20,3 +20,11 @@ class CaseStatus(StrEnum):
 class CaseSensitivity(StrEnum):
     STANDARD = "STANDARD"
     RESTRICTED = "RESTRICTED"
+
+
+class JobStatus(StrEnum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    RETRYING = "RETRYING"

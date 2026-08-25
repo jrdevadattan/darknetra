@@ -1,3 +1,5 @@
+import base64
+import secrets
 from collections.abc import Iterator
 
 import pytest
@@ -9,7 +11,12 @@ TEST_BUILD_VERSION = "health-contract-test"
 
 
 def _test_settings() -> Settings:
-    return Settings(build_version=TEST_BUILD_VERSION)
+    return Settings(
+        build_version=TEST_BUILD_VERSION,
+        field_key_v1_b64=base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
+        field_blind_index_key_b64=base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
+        _env_file=None,
+    )
 
 
 @pytest.fixture
@@ -34,7 +41,10 @@ def test_ready_health_contract(client: TestClient) -> None:
     assert response.json() == {
         "status": "ready",
         "version": TEST_BUILD_VERSION,
-        "components": [{"name": "api", "status": "ready"}],
+        "components": [
+            {"name": "api", "status": "ready"},
+            {"name": "sensitive-field-crypto", "status": "ready"},
+        ],
     }
 
 

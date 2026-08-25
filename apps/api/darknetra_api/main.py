@@ -1,3 +1,6 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -11,7 +14,20 @@ from darknetra_api.routes.memberships import router as memberships_router
 from darknetra_api.routes.users import router as users_router
 
 settings = get_settings()
-app = FastAPI(title="DARKNETRA API", version="0.1.0")
+
+
+@asynccontextmanager
+async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+    settings_provider = application.dependency_overrides.get(get_settings, get_settings)
+    runtime_settings = settings_provider()
+    application.state.sensitive_field_crypto = runtime_settings.require_sensitive_field_crypto()
+    try:
+        yield
+    finally:
+        del application.state.sensitive_field_crypto
+
+
+app = FastAPI(title="DARKNETRA API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[settings.web_origin],
