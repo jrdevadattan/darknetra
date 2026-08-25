@@ -1,19 +1,19 @@
 export const users = [
   {
-    id: 'demo-admin',
-    name: 'Demo Administrator',
-    username: 'demo-admin',
-    email: 'admin@darknetra.local',
-    avatar: '',
-    role: 'ADMIN',
+    id: "darknetra-admin",
+    name: "DARKNETRA Administrator",
+    username: "administrator",
+    email: "admin@darknetra.local",
+    avatar: "",
+    role: "ADMIN",
   },
   {
-    id: 'demo-analyst',
-    name: 'Demo Analyst',
-    username: 'demo-analyst',
-    email: 'analyst@darknetra.local',
-    avatar: '',
-    role: 'ANALYST',
+    id: "darknetra-analyst",
+    name: "DARKNETRA Analyst",
+    username: "analyst",
+    email: "analyst@darknetra.local",
+    avatar: "",
+    role: "ANALYST",
   },
 ] as const;
 

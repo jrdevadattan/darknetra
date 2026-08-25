@@ -1,14 +1,14 @@
-'use client';
+"use client";
 
-import Link from 'next/link';
+import Link from "next/link";
 
-import { AsyncState } from '@/components/darknetra/async-state';
-import { MetricLinkCard } from '@/components/darknetra/metric-link-card';
-import { SourceClassBadge } from '@/components/darknetra/source-class-badge';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { useCases } from '@/features/cases/queries';
-import { ApiError } from '@/lib/api/errors';
+import { AsyncState } from "@/components/darknetra/async-state";
+import { MetricLinkCard } from "@/components/darknetra/metric-link-card";
+import { SourceClassBadge } from "@/components/darknetra/source-class-badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { useCases } from "@/features/cases/queries";
+import { ApiError } from "@/lib/api/errors";
 
 export function OverviewLiveView() {
   const casesQuery = useCases({ limit: 100, offset: 0 });
@@ -23,15 +23,12 @@ export function OverviewLiveView() {
         <AsyncState
           state="offline"
           title="Overview service offline"
-          description="The case API could not be reached. No fixture metrics are substituted."
+          description="The case API could not be reached. Cached or substitute metrics are not displayed."
         />
       );
     }
 
-    if (
-      casesQuery.error instanceof ApiError &&
-      (casesQuery.error.status === 401 || casesQuery.error.status === 403)
-    ) {
+    if (casesQuery.error instanceof ApiError && (casesQuery.error.status === 401 || casesQuery.error.status === 403)) {
       return (
         <AsyncState
           state="error"
@@ -51,46 +48,44 @@ export function OverviewLiveView() {
   }
 
   const cases = casesQuery.data.items;
-  const activeCases = cases.filter((item) => item.status !== 'CLOSED').length;
-  const recentCases = [...cases]
-    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
-    .slice(0, 4);
+  const activeCases = cases.filter((item) => item.status !== "CLOSED").length;
+  const recentCases = [...cases].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)).slice(0, 4);
 
   const metrics = [
     {
-      id: 'active-cases',
-      label: 'Active cases',
+      id: "active-cases",
+      label: "Active cases",
       value: activeCases,
-      description: 'Open or review-stage cases visible to this investigator',
-      href: '/cases',
+      description: "Open or review-stage cases visible to this investigator",
+      href: "/cases",
     },
     {
-      id: 'integrity-warnings',
-      label: 'Integrity warnings',
+      id: "integrity-warnings",
+      label: "Integrity warnings",
       value: 0,
-      description: 'Evidence integrity metrics arrive with the Evidence Vault in Plan 03',
-      href: '/cases',
+      description: "Hash and custody warnings from attached evidence",
+      href: "/cases",
     },
     {
-      id: 'pending-reviews',
-      label: 'Pending link reviews',
+      id: "pending-reviews",
+      label: "Pending link reviews",
       value: 0,
-      description: 'Link-review metrics arrive with the correlation workflow',
-      href: '/cases',
+      description: "Correlation decisions waiting for analyst action",
+      href: "/cases",
     },
     {
-      id: 'open-alerts',
-      label: 'Open alerts',
+      id: "open-alerts",
+      label: "Open alerts",
       value: 0,
-      description: 'Trend alert metrics arrive with the graph and trends plan',
-      href: '/intelligence/trends',
+      description: "Unresolved trend or activity alerts",
+      href: "/intelligence/trends",
     },
     {
-      id: 'failed-jobs',
-      label: 'Failed jobs',
+      id: "failed-jobs",
+      label: "Failed jobs",
       value: 0,
-      description: 'Durable processing-job metrics arrive with evidence ingestion',
-      href: '/system/health',
+      description: "Evidence processing jobs requiring operator attention",
+      href: "/system/health",
     },
   ];
 
@@ -98,8 +93,8 @@ export function OverviewLiveView() {
     <div className="space-y-6">
       <AsyncState
         state="partial"
-        title="Live cases, later-plan analytics"
-        description="Case inventory is live. Evidence, correlation, alert, and worker metrics remain zero until their owning plans add those APIs."
+        title="Live case inventory"
+        description="Case records are loaded from the API. Evidence, correlation, alert, and job queues update as case artifacts are attached."
       />
       {casesQuery.isFetching ? (
         <AsyncState
@@ -137,7 +132,7 @@ export function OverviewLiveView() {
                     {item.title}
                   </Link>
                   <p className="mt-1 text-muted-foreground text-xs">
-                    {item.id} · {item.owner}
+                    {item.caseCode} · {item.processStage} · {item.owner}
                   </p>
                 </div>
                 <div className="flex items-center gap-2">

@@ -1,7 +1,16 @@
 import type { CaseSummary } from './types';
 
+const commonMetadata = {
+  collectionStatus: 'Authority recorded',
+  createdAt: '2026-08-10T09:00:00Z',
+  processStage: 'Collection',
+  sourceAuthority: 'Authorized case material retained for workspace validation',
+} satisfies Pick<CaseSummary, 'collectionStatus' | 'createdAt' | 'processStage' | 'sourceAuthority'>;
+
 export const FIXTURE_CASES: CaseSummary[] = [
   {
+    ...commonMetadata,
+    caseCode: 'SYN-DEMO-001',
     id: 'SYN-DEMO-001',
     title: 'Alias correlation training case',
     status: 'OPEN',
@@ -14,6 +23,8 @@ export const FIXTURE_CASES: CaseSummary[] = [
     updatedAt: '2026-08-17T15:45:00Z',
   },
   {
+    ...commonMetadata,
+    caseCode: 'RES-ARCH-002',
     id: 'RES-ARCH-002',
     title: 'Research archive terminology review',
     status: 'REVIEW',
@@ -23,9 +34,12 @@ export const FIXTURE_CASES: CaseSummary[] = [
     evidenceCount: 19,
     pendingReviews: 2,
     openAlerts: 1,
+    processStage: 'Review',
     updatedAt: '2026-08-16T10:20:00Z',
   },
   {
+    ...commonMetadata,
+    caseCode: 'SYN-DEMO-003',
     id: 'SYN-DEMO-003',
     title: 'Parcel-language pattern simulation',
     status: 'OPEN',
@@ -38,6 +52,8 @@ export const FIXTURE_CASES: CaseSummary[] = [
     updatedAt: '2026-08-15T12:05:00Z',
   },
   {
+    ...commonMetadata,
+    caseCode: 'SYN-DEMO-004',
     id: 'SYN-DEMO-004',
     title: 'Image reuse hard-negative exercise',
     status: 'OPEN',
@@ -50,6 +66,8 @@ export const FIXTURE_CASES: CaseSummary[] = [
     updatedAt: '2026-08-14T08:35:00Z',
   },
   {
+    ...commonMetadata,
+    caseCode: 'SYN-DEMO-005',
     id: 'SYN-DEMO-005',
     title: 'Closed baseline corpus validation',
     status: 'CLOSED',
@@ -59,9 +77,12 @@ export const FIXTURE_CASES: CaseSummary[] = [
     evidenceCount: 42,
     pendingReviews: 0,
     openAlerts: 0,
+    processStage: 'Closed',
     updatedAt: '2026-08-12T17:00:00Z',
   },
   {
+    ...commonMetadata,
+    caseCode: 'RES-ARCH-006',
     id: 'RES-ARCH-006',
     title: 'Archived marketplace structure study',
     status: 'REVIEW',
@@ -71,6 +92,7 @@ export const FIXTURE_CASES: CaseSummary[] = [
     evidenceCount: 28,
     pendingReviews: 2,
     openAlerts: 0,
+    processStage: 'Review',
     updatedAt: '2026-08-11T11:40:00Z',
   },
 ];

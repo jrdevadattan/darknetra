@@ -1,42 +1,41 @@
-'use client';
+"use client";
 
-import { useMemo, useState } from 'react';
-import Link from 'next/link';
+import { useMemo, useState } from "react";
+import Link from "next/link";
 
-import { SourceClassBadge } from '@/components/darknetra/source-class-badge';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import type { CaseStatus, CaseSummary } from './types';
+import { SourceClassBadge } from "@/components/darknetra/source-class-badge";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import type { CaseStatus, CaseSummary } from "./types";
 
 const PAGE_SIZE = 4;
 
 function CaseStatusBadge({ status }: { status: CaseStatus }) {
-  return <Badge variant={status === 'CLOSED' ? 'outline' : 'secondary'}>{status}</Badge>;
+  return <Badge variant={status === "CLOSED" ? "outline" : "secondary"}>{status}</Badge>;
 }
 
 export function CasesTable({ cases }: { cases: CaseSummary[] }) {
-  const [query, setQuery] = useState('');
-  const [status, setStatus] = useState('ALL');
-  const [sensitivity, setSensitivity] = useState('ALL');
-  const [sort, setSort] = useState('updated-desc');
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState("ALL");
+  const [sensitivity, setSensitivity] = useState("ALL");
+  const [sort, setSort] = useState("updated-desc");
   const [page, setPage] = useState(1);
 
   const filtered = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     const result = cases.filter((item) => {
       const matchesQuery =
-        !normalized ||
-        [item.id, item.title, item.owner].some((value) => value.toLowerCase().includes(normalized));
-      const matchesStatus = status === 'ALL' || item.status === status;
-      const matchesSensitivity = sensitivity === 'ALL' || item.sensitivity === sensitivity;
+        !normalized || [item.id, item.title, item.owner].some((value) => value.toLowerCase().includes(normalized));
+      const matchesStatus = status === "ALL" || item.status === status;
+      const matchesSensitivity = sensitivity === "ALL" || item.sensitivity === sensitivity;
       return matchesQuery && matchesStatus && matchesSensitivity;
     });
 
     return [...result].sort((a, b) => {
-      if (sort === 'title-asc') return a.title.localeCompare(b.title);
-      if (sort === 'alerts-desc') return b.openAlerts - a.openAlerts;
+      if (sort === "title-asc") return a.title.localeCompare(b.title);
+      if (sort === "alerts-desc") return b.openAlerts - a.openAlerts;
       return Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
     });
   }, [cases, query, sensitivity, sort, status]);
@@ -104,6 +103,7 @@ export function CasesTable({ cases }: { cases: CaseSummary[] }) {
             <TableRow>
               <TableHead>Case</TableHead>
               <TableHead>Status</TableHead>
+              <TableHead>Stage</TableHead>
               <TableHead>Source class</TableHead>
               <TableHead>Owner</TableHead>
               <TableHead className="text-right">Evidence</TableHead>
@@ -119,10 +119,19 @@ export function CasesTable({ cases }: { cases: CaseSummary[] }) {
                     <Link href={`/cases/${item.id}`} className="font-medium hover:underline">
                       {item.title}
                     </Link>
-                    <div className="mt-1 text-muted-foreground text-xs">{item.id}</div>
+                    <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-muted-foreground text-xs">
+                      <span>{item.caseCode}</span>
+                      <span aria-hidden="true">·</span>
+                      <span>{item.id}</span>
+                    </div>
                   </TableCell>
-                  <TableCell><CaseStatusBadge status={item.status} /></TableCell>
-                  <TableCell><SourceClassBadge sourceClass={item.sourceClass} /></TableCell>
+                  <TableCell>
+                    <CaseStatusBadge status={item.status} />
+                  </TableCell>
+                  <TableCell>{item.processStage}</TableCell>
+                  <TableCell>
+                    <SourceClassBadge sourceClass={item.sourceClass} />
+                  </TableCell>
                   <TableCell>{item.owner}</TableCell>
                   <TableCell className="text-right tabular-nums">{item.evidenceCount}</TableCell>
                   <TableCell className="text-right tabular-nums">{item.pendingReviews}</TableCell>
@@ -131,7 +140,7 @@ export function CasesTable({ cases }: { cases: CaseSummary[] }) {
               ))
             ) : (
               <TableRow>
-                <TableCell colSpan={7} className="h-24 text-center text-muted-foreground">
+                <TableCell colSpan={8} className="h-24 text-center text-muted-foreground">
                   No cases match the current filters.
                 </TableCell>
               </TableRow>
@@ -142,7 +151,7 @@ export function CasesTable({ cases }: { cases: CaseSummary[] }) {
 
       <div className="flex items-center justify-between gap-3 text-sm">
         <span className="text-muted-foreground">
-          {filtered.length} case{filtered.length === 1 ? '' : 's'} · Page {safePage} of {pageCount}
+          {filtered.length} case{filtered.length === 1 ? "" : "s"} · Page {safePage} of {pageCount}
         </span>
         <div className="flex gap-2">
           <Button

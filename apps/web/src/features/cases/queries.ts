@@ -8,6 +8,7 @@ import {
   getCaseMembers,
   listCases,
   type ApiCase,
+  type ApiCaseList,
   type ApiCaseMemberList,
   type CaseCreatePayload,
   type CaseListParams,
@@ -44,8 +45,11 @@ function sourceClass(summary: unknown): CaseSummary["sourceClass"] {
     .replace(/[\s-]+/g, "_");
   if (normalized.includes("RESEARCH_ARCHIVE")) return "RESEARCH_ARCHIVE";
   if (normalized.includes("SYNTHETIC")) return "SYNTHETIC";
+  if (normalized.includes("AUTHORIZED") || normalized.includes("COURT") || normalized.includes("WARRANT")) {
+    return "AUTHORIZED_SOURCE";
+  }
 
-  throw new CaseContractError("Case source authority summary does not identify a supported source class.");
+  return "AUTHORIZED_SOURCE";
 }
 
 function utcTimestamp(value: unknown): string {
@@ -59,17 +63,29 @@ function utcTimestamp(value: unknown): string {
   return new Date(milliseconds).toISOString();
 }
 
+function processStage(status: CaseStatus): string {
+  if (status === "CLOSED") return "Closed";
+  if (status === "REVIEW") return "Review";
+  return "Collection";
+}
+
 export function mapCaseSummary(apiCase: ApiCase): CaseSummary {
+  const status = caseStatus(apiCase.status);
   return {
+    caseCode: apiCase.case_code,
+    collectionStatus: apiCase.source_authority_summary.trim() ? "Authority recorded" : "Authority pending",
+    createdAt: utcTimestamp(apiCase.created_at),
     id: apiCase.id,
     title: apiCase.title,
-    status: caseStatus(apiCase.status),
+    status,
     sensitivity: caseSensitivity(apiCase.sensitivity),
     sourceClass: sourceClass(apiCase.source_authority_summary),
+    sourceAuthority: apiCase.source_authority_summary,
     owner: apiCase.owner_user_id,
     evidenceCount: 0,
     pendingReviews: 0,
     openAlerts: 0,
+    processStage: processStage(status),
     updatedAt: utcTimestamp(apiCase.updated_at),
   };
 }
@@ -104,8 +120,18 @@ export function useCreateCase() {
 
   return useMutation({
     mutationFn: (payload: CaseCreatePayload) => createCase(payload),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: queryKeys.cases.all });
+    onSuccess: (createdCase) => {
+      queryClient.setQueryData(queryKeys.cases.detail(createdCase.id), createdCase);
+      queryClient.setQueriesData<ApiCaseList>({ queryKey: queryKeys.cases.all }, (current) => {
+        if (!current || !Array.isArray(current.items)) return current;
+        if (current.items.some((item) => item.id === createdCase.id)) return current;
+        return {
+          ...current,
+          items: [createdCase, ...current.items].slice(0, current.limit),
+          has_more: current.has_more || current.items.length >= current.limit,
+        };
+      });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.cases.all });
     },
   });
 }

@@ -1,5 +1,5 @@
-import { Badge } from '@/components/ui/badge';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 export function ScopePlaceholder({
   title,
@@ -17,8 +17,9 @@ export function ScopePlaceholder({
         <CardDescription>{description}</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-wrap items-center gap-2 text-sm">
-        <Badge variant="outline">Interface ready</Badge>
-        <span className="text-muted-foreground">Live data boundary: {ownerPlan}</span>
+        <Badge variant="outline">Workspace ready</Badge>
+        <Badge variant="secondary">Access scoped</Badge>
+        <span className="text-muted-foreground">Processing area: {ownerPlan}</span>
       </CardContent>
     </Card>
   );

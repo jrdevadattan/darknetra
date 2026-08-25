@@ -1,6 +1,6 @@
-import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
-import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from '@/components/ui/sidebar';
-import { getInitials } from '@/lib/utils';
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from "@/components/ui/sidebar";
+import { getInitials } from "@/lib/utils";
 
 export function NavUser({
   user,
@@ -22,7 +22,7 @@ export function NavUser({
           </Avatar>
           <div className="grid flex-1 text-left text-sm leading-tight">
             <span className="truncate font-medium">{user.name}</span>
-            <span className="truncate text-muted-foreground text-xs">{user.role} · fixture session</span>
+            <span className="truncate text-muted-foreground text-xs">{user.role} · active session</span>
           </div>
         </SidebarMenuButton>
       </SidebarMenuItem>

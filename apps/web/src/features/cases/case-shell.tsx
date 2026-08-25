@@ -1,15 +1,15 @@
-'use client';
+"use client";
 
-import type { ReactNode } from 'react';
+import type { ReactNode } from "react";
 
-import { AsyncState } from '@/components/darknetra/async-state';
-import { CaseTabs } from '@/components/darknetra/case-tabs';
-import { PageHeader } from '@/components/darknetra/page-header';
-import { SourceClassBadge } from '@/components/darknetra/source-class-badge';
-import { Badge } from '@/components/ui/badge';
-import { ApiError } from '@/lib/api/errors';
+import { AsyncState } from "@/components/darknetra/async-state";
+import { CaseTabs } from "@/components/darknetra/case-tabs";
+import { PageHeader } from "@/components/darknetra/page-header";
+import { SourceClassBadge } from "@/components/darknetra/source-class-badge";
+import { Badge } from "@/components/ui/badge";
+import { ApiError } from "@/lib/api/errors";
 
-import { useCase } from './queries';
+import { useCase } from "./queries";
 
 export function CaseShell({ caseId, children }: { caseId: string; children: ReactNode }) {
   const caseQuery = useCase(caseId);
@@ -24,15 +24,12 @@ export function CaseShell({ caseId, children }: { caseId: string; children: Reac
         <AsyncState
           state="offline"
           title="Case service offline"
-          description="The case API could not be reached. No fixture case is substituted."
+          description="The case API could not be reached. Substitute case records are not displayed."
         />
       );
     }
 
-    if (
-      caseQuery.error instanceof ApiError &&
-      (caseQuery.error.status === 403 || caseQuery.error.status === 404)
-    ) {
+    if (caseQuery.error instanceof ApiError && (caseQuery.error.status === 403 || caseQuery.error.status === 404)) {
       return (
         <AsyncState
           state="error"
@@ -43,11 +40,7 @@ export function CaseShell({ caseId, children }: { caseId: string; children: Reac
     }
 
     return (
-      <AsyncState
-        state="error"
-        title="Unable to load case"
-        description="The case could not be loaded from the API."
-      />
+      <AsyncState state="error" title="Unable to load case" description="The case could not be loaded from the API." />
     );
   }
 
@@ -63,9 +56,9 @@ export function CaseShell({ caseId, children }: { caseId: string; children: Reac
         />
       ) : null}
       <PageHeader
-        eyebrow={currentCase.id}
+        eyebrow={currentCase.caseCode}
         title={currentCase.title}
-        description={`Owner: ${currentCase.owner} · Sensitivity: ${currentCase.sensitivity}`}
+        description={`Owner: ${currentCase.owner} · Sensitivity: ${currentCase.sensitivity} · Stage: ${currentCase.processStage}`}
         actions={
           <>
             <Badge variant="secondary">{currentCase.status}</Badge>

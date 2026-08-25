@@ -6,6 +6,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CaseShell } from "./case-shell";
+import { CaseOverview as CaseOverviewForTest } from "./case-overview";
 import { CasesLiveView } from "./cases-live-view";
 
 vi.mock("next/navigation", () => ({
@@ -97,6 +98,40 @@ describe("CasesLiveView", () => {
     );
   });
 
+  it("shows a newly created case immediately when the refetch is still in flight", async () => {
+    const user = userEvent.setup();
+    const createdCase = {
+      ...API_CASE,
+      id: "b80d5b59-1c6d-4f59-ae7c-9e9aa282f4bf",
+      case_code: "DARKNETRA-2026-014",
+      title: "Marketplace wallet attribution review",
+      source_authority_summary: "Authorized case material received under court order 26-481",
+      updated_at: "2026-08-25T14:20:00Z",
+    };
+
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ items: [], limit: 100, offset: 0, has_more: false }))
+      .mockResolvedValueOnce(jsonResponse(createdCase, 201))
+      .mockImplementationOnce(() => new Promise<Response>(() => undefined));
+
+    renderWithQuery(<CasesLiveView />);
+
+    await screen.findByText("No visible cases");
+    await user.click(screen.getByRole("button", { name: "New case" }));
+    await user.type(screen.getByLabelText("Case code"), createdCase.case_code);
+    await user.type(screen.getByLabelText("Title"), createdCase.title);
+    await user.selectOptions(screen.getByLabelText("Sensitivity"), "STANDARD");
+    await user.type(screen.getByLabelText("Source authority"), createdCase.source_authority_summary);
+    await user.click(screen.getByRole("button", { name: "Create case" }));
+
+    expect(await screen.findByRole("link", { name: createdCase.title })).toHaveAttribute(
+      "href",
+      `/cases/${createdCase.id}`,
+    );
+    expect(screen.getByText(createdCase.case_code)).toBeInTheDocument();
+    expect(screen.getByText("Collection")).toBeInTheDocument();
+  });
+
   it("renders live API cases through the retained table interface", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ items: [API_CASE], limit: 25, offset: 0, has_more: false }));
 
@@ -145,6 +180,22 @@ describe("CaseShell", () => {
 
     expect(await screen.findByRole("heading", { name: API_CASE.title })).toBeInTheDocument();
     expect(screen.getByText("Child route content")).toBeInTheDocument();
+  });
+
+  it("explains case processing, evidence collection, and the video walkthrough script", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(API_CASE)).mockResolvedValueOnce(jsonResponse(API_CASE));
+
+    renderWithQuery(
+      <CaseShell caseId={API_CASE.id}>
+        <CaseOverviewForTest caseId={API_CASE.id} />
+      </CaseShell>,
+    );
+
+    expect(await screen.findByText("Process flow")).toBeInTheDocument();
+    expect(screen.getByText("Evidence collection")).toBeInTheDocument();
+    expect(screen.getByText("Video walkthrough script")).toBeInTheDocument();
+    expect(screen.getAllByText(API_CASE.case_code).length).toBeGreaterThan(0);
+    expect(screen.getByText(API_CASE.source_authority_summary)).toBeInTheDocument();
   });
 
   it("masks unknown and inaccessible cases without rendering child fixture content", async () => {

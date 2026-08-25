@@ -1,6 +1,6 @@
-import { Badge } from '@/components/ui/badge';
+import { Badge } from "@/components/ui/badge";
 
-export type SourceClass = 'SYNTHETIC' | 'RESEARCH_ARCHIVE';
+export type SourceClass = "SYNTHETIC" | "RESEARCH_ARCHIVE" | "AUTHORIZED_SOURCE";
 
 export function SourceClassBadge({ sourceClass }: { sourceClass: SourceClass }) {
   return (

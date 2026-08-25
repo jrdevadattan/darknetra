@@ -112,7 +112,7 @@ function CreateCaseDialog() {
                 id={`${id}-source-authority`}
                 maxLength={500}
                 minLength={1}
-                placeholder="Authorized synthetic training source"
+                placeholder="Authorized case material received under court order"
                 required
                 value={form.sourceAuthority}
                 onChange={(event) => setForm((current) => ({ ...current, sourceAuthority: event.target.value }))}
@@ -144,7 +144,7 @@ export function CasesLiveView() {
         <AsyncState
           state="offline"
           title="Case service offline"
-          description="The case API could not be reached. No fixture data is substituted."
+          description="The case API could not be reached. Substitute case records are not displayed."
         />
       );
     }
@@ -184,7 +184,7 @@ export function CasesLiveView() {
         <AsyncState
           state="partial"
           title="Case list truncated"
-          description="Showing the first 100 visible cases. Narrower server-side filters arrive in a later plan."
+          description="Showing the first 100 visible cases. Use search and filters to narrow the active inventory."
         />
       ) : null}
       {casesQuery.data.items.length === 0 ? (

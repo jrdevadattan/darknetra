@@ -1,5 +1,5 @@
-import { PageHeader } from './page-header';
-import { ScopePlaceholder } from './scope-placeholder';
+import { PageHeader } from "./page-header";
+import { ScopePlaceholder } from "./scope-placeholder";
 
 export function PlannedSurface({
   eyebrow,
@@ -15,7 +15,11 @@ export function PlannedSurface({
   return (
     <div className="space-y-6">
       <PageHeader eyebrow={eyebrow} title={title} description={description} />
-      <ScopePlaceholder title={`${title} interface`} description="No live or fabricated records are shown in this Plan 01 shell." ownerPlan={ownerPlan} />
+      <ScopePlaceholder
+        title={`${title} workspace`}
+        description="Operational controls, metadata, and review states are shown only inside the authenticated workspace."
+        ownerPlan={ownerPlan}
+      />
     </div>
   );
 }
