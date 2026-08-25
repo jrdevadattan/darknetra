@@ -13,7 +13,7 @@ services:
       DARKNETRA_BUILD_VERSION: plan02-real-e2e
       DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-e2e@postgres:5432/darknetra_e2e_test
       DARKNETRA_WEB_ORIGIN: http://127.0.0.1:3000
-      DARKNETRA_JWT_SIGNING_KEY_B64: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      DARKNETRA_JWT_SIGNING_KEY_B64: ${DARKNETRA_JWT_SIGNING_KEY_B64:?runtime JWT signing key required}
     ports:
       - "127.0.0.1:8000:8000"
 

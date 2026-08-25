@@ -35,6 +35,17 @@ jobs:
         with:
           version: '0.12.4'
 
+      - name: Generate runtime-only signing key
+        run: |
+          KEY="$(python - <<'PY'
+          import base64
+          import secrets
+          print(base64.b64encode(secrets.token_bytes(32)).decode("ascii"))
+          PY
+          )"
+          echo "::add-mask::$KEY"
+          echo "DARKNETRA_JWT_SIGNING_KEY_B64=$KEY" >> "$GITHUB_ENV"
+
       - id: prepare
         name: Prepare workspaces
         continue-on-error: true
