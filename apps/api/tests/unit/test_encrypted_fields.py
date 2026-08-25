@@ -1,6 +1,6 @@
-from dataclasses import dataclass
-
 import pytest
+import sqlalchemy as sa
+from darknetra_api.db.base import Base
 from darknetra_api.security.encrypted_fields import (
     EncryptedFieldValidationError,
     SensitiveFieldKind,
@@ -10,6 +10,7 @@ from darknetra_api.security.encrypted_fields import (
 )
 from darknetra_api.security.encryption import EncryptedValue, SensitiveFieldCrypto
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy.orm import Mapped, mapped_column
 
 
 def key(byte: int) -> bytes:
@@ -108,13 +109,16 @@ def test_unpack_envelope_never_auto_decrypts(monkeypatch: pytest.MonkeyPatch) ->
     assert unpack_envelope(pack_envelope(envelope)) == envelope
 
 
-@dataclass
-class PersistedContact:
-    id: str
-    contact_email_key_version: str
-    contact_email_nonce_b64: str
-    contact_email_ciphertext_b64: str
-    contact_email_display: str
+class PersistedEncryptedContact(Base):
+    """Focused mapped persistence record used to protect response serialization."""
+
+    __tablename__ = "test_encrypted_contacts"
+
+    id: Mapped[str] = mapped_column(sa.String(64), primary_key=True)
+    contact_email_key_version: Mapped[str] = mapped_column(sa.String(64), nullable=False)
+    contact_email_nonce_b64: Mapped[str] = mapped_column(sa.String(64), nullable=False)
+    contact_email_ciphertext_b64: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    contact_email_display: Mapped[str] = mapped_column(sa.String(320), nullable=False)
 
 
 class ContactResponse(BaseModel):
@@ -124,9 +128,9 @@ class ContactResponse(BaseModel):
     contact_email_display: str
 
 
-def test_response_schema_omits_persisted_ciphertext_internals() -> None:
-    """Catches an ordinary API response schema that exposes stored envelope values."""
-    stored = PersistedContact(
+def test_mapped_orm_response_omits_persisted_ciphertext_internals() -> None:
+    """Catches a response schema exposing ciphertext fields from a mapped ORM record."""
+    stored = PersistedEncryptedContact(
         id="contact-1",
         contact_email_key_version="v1",
         contact_email_nonce_b64="AAECAwQFBgcICQoL",
@@ -139,13 +143,38 @@ def test_response_schema_omits_persisted_ciphertext_internals() -> None:
     assert response == {"id": "contact-1", "contact_email_display": "a***@example.test"}
 
 
+def test_mapped_orm_response_never_auto_decrypts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catches model validation or serialization that invokes sensitive-field decryption."""
+    stored = PersistedEncryptedContact(
+        id="contact-1",
+        contact_email_key_version="v1",
+        contact_email_nonce_b64="AAECAwQFBgcICQoL",
+        contact_email_ciphertext_b64="AAECAwQFBgcICQoLDA0ODw==",
+        contact_email_display="a***@example.test",
+    )
+
+    def unexpected_decrypt(*args: object, **kwargs: object) -> str:
+        raise AssertionError("ordinary ORM response serialization must not decrypt")
+
+    monkeypatch.setattr(SensitiveFieldCrypto, "decrypt", unexpected_decrypt)
+
+    assert ContactResponse.model_validate(stored).model_dump(mode="json") == {
+        "id": "contact-1",
+        "contact_email_display": "a***@example.test",
+    }
+
+
 @pytest.mark.parametrize(
     ("plaintext", "kind", "expected"),
     [
         ("alice@example.test", SensitiveFieldKind.EMAIL, "a***@example.test"),
         ("+1 (555) 123-4567", SensitiveFieldKind.PHONE, "***-***-4567"),
         ("bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh", SensitiveFieldKind.WALLET, "bc1qxy...x0wlh"),
-        ("https://exampleonionaddress.onion/path", SensitiveFieldKind.ONION, "exampl….onion"),
+        (
+            "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion/path",
+            SensitiveFieldKind.ONION,
+            "aaaaaa….onion",
+        ),
         ("custody-note", SensitiveFieldKind.SECRET, "[REDACTED]"),
     ],
 )
@@ -162,3 +191,23 @@ def test_redact_for_display_rejects_unknown_sensitive_field_kind() -> None:
     """Catches callers silently receiving an unsafe default for an unsupported field category."""
     with pytest.raises(ValueError, match="unsupported sensitive field kind"):
         redact_for_display("private@example.test", kind="passport")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("plaintext", "kind"),
+    [
+        ("a@b", SensitiveFieldKind.EMAIL),
+        ("1234", SensitiveFieldKind.PHONE),
+        ("12345abc", SensitiveFieldKind.PHONE),
+        ("abcdefghijkl", SensitiveFieldKind.WALLET),
+        ("abcdefghijklmnopqrstuvwxyz", SensitiveFieldKind.WALLET),
+        ("abcdef.onion", SensitiveFieldKind.ONION),
+        ("https://not-an-onion.test/path", SensitiveFieldKind.ONION),
+    ],
+)
+def test_redact_for_display_rejects_short_or_malformed_sensitive_values(
+    plaintext: str,
+    kind: SensitiveFieldKind,
+) -> None:
+    """Catches type-specific redactors leaking full or near-full malformed plaintext."""
+    assert redact_for_display(plaintext, kind=kind) == "[REDACTED]"
