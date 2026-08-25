@@ -577,9 +577,17 @@ class LocalObjectStore(ObjectStore):
         if result.st_nlink != 1:
             os.close(descriptor)
             raise ObjectIntegrityError("object-store final file has an unexpected hard link count")
-        if os.name == "posix" and stat.S_IMODE(result.st_mode) != _FINAL_FILE_MODE:
+        final_mode = stat.S_IMODE(result.st_mode)
+        has_invalid_mode = (
+            final_mode != _FINAL_FILE_MODE
+            if os.name == "posix"
+            else bool(final_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+        )
+        if has_invalid_mode:
             os.close(descriptor)
-            raise ObjectIntegrityError("object-store final file does not have read-only mode 0444")
+            raise ObjectIntegrityError(
+                "object-store final file does not have the required read-only mode"
+            )
         return os.fdopen(descriptor, "rb", buffering=0)
 
     def _verify_entry(

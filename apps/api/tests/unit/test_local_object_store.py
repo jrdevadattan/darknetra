@@ -404,29 +404,37 @@ def test_hard_linked_final_entry_is_rejected(tmp_path: Path) -> None:
         store.open(stored.object_key)
 
 
-def test_writable_posix_final_entry_is_rejected(tmp_path: Path) -> None:
-    if os.name != "posix":
-        pytest.skip("POSIX mode contract")
+def test_writable_final_entry_is_rejected_by_every_read_path(tmp_path: Path) -> None:
     store = _store(tmp_path)
     stored = store.put_verified(io.BytesIO(CONTENT))
     final_path = tmp_path / Path(stored.object_key)
-    final_path.chmod(0o644)
+    final_path.chmod(0o666)
+
+    assert stat.S_IMODE(final_path.stat().st_mode) & 0o222
 
     with pytest.raises(ObjectIntegrityError, match="read-only mode"):
         store.open(stored.object_key)
     with pytest.raises(ObjectIntegrityError, match="read-only mode"):
+        store.verify(stored.object_key, stored.sha256)
+    with pytest.raises(ObjectIntegrityError, match="read-only mode"):
         store.put_verified(io.BytesIO(CONTENT))
+    assert _staging_entries(tmp_path) == []
 
 
-def test_final_file_is_read_only_on_posix(tmp_path: Path) -> None:
+def test_make_read_only_produces_a_final_accepted_by_every_read_path(tmp_path: Path) -> None:
     store = _store(tmp_path)
     stored = store.put_verified(io.BytesIO(CONTENT))
+    final_path = tmp_path / Path(stored.object_key)
 
-    mode = stat.S_IMODE((tmp_path / Path(stored.object_key)).stat().st_mode)
+    mode = stat.S_IMODE(final_path.stat().st_mode)
     if os.name == "posix":
         assert mode == 0o444
     else:
-        assert not os.access(tmp_path / Path(stored.object_key), os.W_OK)
+        assert mode & 0o222 == 0
+    with store.open(stored.object_key) as handle:
+        assert handle.read() == CONTENT
+    assert store.verify(stored.object_key, stored.sha256)
+    assert store.put_verified(io.BytesIO(CONTENT)) == stored
 
 
 def test_root_must_be_a_real_writable_directory(tmp_path: Path) -> None:
