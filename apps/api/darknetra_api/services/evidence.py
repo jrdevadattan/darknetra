@@ -31,6 +31,7 @@ EVIDENCE_RESOURCE_TYPE = "evidence"
 _IMMUTABLE_MANIFEST_FIELDS = frozenset({"size_bytes", "sha256", "sha512", "object_key"})
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _SHA512_PATTERN = re.compile(r"^[0-9a-f]{128}$")
+_OBJECT_KEY_PATTERN = re.compile(r"^[!-~]+$")
 _FIELD_REVEAL_ROLES = {
     EvidenceSensitiveValueKind.SOURCE_LOCATOR: frozenset(
         {GlobalRole.CASE_OWNER, GlobalRole.COLLECTOR, GlobalRole.ANALYST, GlobalRole.REVIEWER}
@@ -179,8 +180,8 @@ def preserve_evidence_manifest(
         not isinstance(sha512, str) or not _SHA512_PATTERN.fullmatch(sha512)
     ):
         raise ValueError("sha512 must be canonical lowercase hexadecimal when provided")
-    if not isinstance(object_key, str) or not object_key.strip():
-        raise ValueError("object_key must be nonblank")
+    if not isinstance(object_key, str) or not _OBJECT_KEY_PATTERN.fullmatch(object_key):
+        raise ValueError("object_key must contain printable non-space ASCII only")
     artifact.media_type = media_type
     artifact.size_bytes = size_bytes
     artifact.sha256 = sha256

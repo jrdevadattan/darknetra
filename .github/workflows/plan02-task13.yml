@@ -46,14 +46,39 @@ jobs:
           print(base64.b64encode(secrets.token_bytes(32)).decode("ascii"))
           PY
           )"
+          FIELD_KEY="$(python - <<'PY'
+          import base64
+          import secrets
+          print(base64.b64encode(secrets.token_bytes(32)).decode("ascii"))
+          PY
+          )"
+          BLIND_INDEX_KEY="$(python - <<'PY'
+          import base64
+          import secrets
+          print(base64.b64encode(secrets.token_bytes(32)).decode("ascii"))
+          PY
+          )"
+          RUNTIME_DB_PASSWORD="$(python - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(32))
+          PY
+          )"
           echo "::add-mask::$KEY"
+          echo "::add-mask::$FIELD_KEY"
+          echo "::add-mask::$BLIND_INDEX_KEY"
+          echo "::add-mask::$RUNTIME_DB_PASSWORD"
           runtime_env="$RUNNER_TEMP/darknetra-plan02-task13.env"
           umask 077
-          printf 'DARKNETRA_JWT_SIGNING_KEY_B64=%s\n' "$KEY" > "$runtime_env"
+          printf '%s\n' \
+            "DARKNETRA_JWT_SIGNING_KEY_B64=$KEY" \
+            "DARKNETRA_FIELD_KEY_V1_B64=$FIELD_KEY" \
+            "DARKNETRA_FIELD_BLIND_INDEX_KEY_B64=$BLIND_INDEX_KEY" \
+            "DARKNETRA_POSTGRES_RUNTIME_PASSWORD=$RUNTIME_DB_PASSWORD" \
+            > "$runtime_env"
           chmod 600 "$runtime_env"
           test "$(stat -c '%a' "$runtime_env")" = 600
           echo "env_file=$runtime_env" >> "$GITHUB_OUTPUT"
-          unset KEY
+          unset KEY FIELD_KEY BLIND_INDEX_KEY RUNTIME_DB_PASSWORD
 
       - id: prepare
         name: Prepare workspaces
@@ -185,7 +210,8 @@ jobs:
           else
             echo "::error::runtime secret file is absent"
             cleanup_status=1
-            docker compose -p darknetra-plan02-task13 -f docker-compose.yml \
+            DARKNETRA_POSTGRES_RUNTIME_PASSWORD=cleanup-only-placeholder \
+              docker compose -p darknetra-plan02-task13 -f docker-compose.yml \
               down -v --remove-orphans || true
           fi
           exit "$cleanup_status"

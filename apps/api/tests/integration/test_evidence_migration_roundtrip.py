@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 REPO_ROOT = Path(__file__).resolve().parents[4]
+FINAL_EVIDENCE_REVISION = "c3f80a92d614"
 
 
 def _migration_tests_enabled() -> bool:
@@ -71,6 +72,7 @@ def _artifact(case: Case, owner: User, suffix: str) -> EvidenceArtifact:
         captured_at=datetime.now(UTC),
         size_bytes=1,
         sha256=(suffix[0] * 64),
+        sha512=(suffix[0] * 128),
         object_key=f"sha256/{suffix[0] * 2}/{suffix[0] * 64}",
         state=EvidenceState.PRESERVED,
     )
@@ -139,7 +141,26 @@ async def test_populated_compatible_downgrade_and_upgrade_preserve_data() -> Non
         derivation_id = derivation.id
     await engine.dispose()
 
-    _run_alembic("downgrade 8a7f2d91c402")
+    _run_alembic("downgrade b7c19a4e5d20")
+
+    engine, sessions = await _owner_session_factory()
+    async with sessions() as session:
+        assert await session.scalar(sa.text("SELECT version_num FROM alembic_version")) == (
+            "b7c19a4e5d20"
+        )
+        assert await session.scalar(
+            sa.text(
+                "SELECT count(*) FROM pg_proc "
+                "WHERE proname = 'darknetra_derivation_parameters_digest'"
+            )
+        ) == 0
+        assert await session.scalar(
+            sa.text("SELECT count(*) FROM evidence_sensitive_values WHERE id = :id").bindparams(
+                id=value_id
+            )
+        ) == 1
+    await engine.dispose()
+
     _run_alembic("upgrade head")
 
     engine, sessions = await _owner_session_factory()
@@ -217,7 +238,7 @@ async def test_incompatible_downgrade_refuses_atomically_and_preserves_upgraded_
         repeated_ids = [row.id for row in repeated]
     await engine.dispose()
 
-    refused = _run_alembic("downgrade 8a7f2d91c402", expect_success=False)
+    refused = _run_alembic("downgrade b7c19a4e5d20", expect_success=False)
     assert refused.returncode != 0
     assert "cannot downgrade evidence invariants" in refused.stdout + refused.stderr
 
@@ -225,7 +246,7 @@ async def test_incompatible_downgrade_refuses_atomically_and_preserves_upgraded_
     async with sessions() as session:
         assert await session.scalar(
             sa.text("SELECT version_num FROM alembic_version")
-        ) == "b7c19a4e5d20"
+        ) == FINAL_EVIDENCE_REVISION
         assert await session.scalar(
             sa.text(
                 "SELECT count(*) FROM information_schema.columns "
@@ -239,5 +260,109 @@ async def test_incompatible_downgrade_refuses_atomically_and_preserves_upgraded_
             ).bindparams(ids=repeated_ids)
         ) == 2
         assert await session.scalar(sa.text("SELECT count(*) FROM evidence_derivations")) == 2
+        await _clear(session)
+    await engine.dispose()
+
+
+async def test_historical_b7_populated_database_upgrades_to_new_head() -> None:
+    if not _migration_tests_enabled():
+        pytest.skip("set DARKNETRA_RUN_MIGRATION_TESTS=1 for destructive migration proof")
+
+    _run_alembic("downgrade base")
+    _run_alembic("upgrade b7c19a4e5d20")
+
+    engine, sessions = await _owner_session_factory()
+    async with sessions() as session:
+        owner = User(
+            username="historical-b7-owner",
+            username_normalized="historical-b7-owner",
+            display_name="historical-b7-owner",
+            password_hash="not-used",
+            global_roles=[GlobalRole.CASE_OWNER],
+            is_active=True,
+            must_change_password=False,
+        )
+        session.add(owner)
+        await session.flush()
+        case = Case(
+            case_code="EVIDENCE-HISTORICAL-B7",
+            title="Historical b7 populated upgrade",
+            status=CaseStatus.OPEN,
+            sensitivity=CaseSensitivity.STANDARD,
+            owner_user_id=owner.id,
+            source_authority_summary="Synthetic authorized fixture",
+        )
+        session.add(case)
+        await session.flush()
+        parent = _artifact(case, owner, "e")
+        child = _artifact(case, owner, "f")
+        session.add_all([parent, child])
+        await session.flush()
+        value = build_sensitive_value(
+            case_id=case.id,
+            evidence_id=parent.id,
+            kind=EvidenceSensitiveValueKind.CONTACT,
+            plaintext="historical@example.test",
+            crypto=_crypto(),
+        )
+        derivation = build_evidence_derivation(
+            case_id=case.id,
+            parent_evidence_id=parent.id,
+            child_evidence_id=child.id,
+            transformation="historical-extract",
+            transformer_version="1",
+            parameters={"nested": [1.0, {"large": 1e20}]},
+        )
+        session.add_all([value, derivation])
+        await session.commit()
+        value_id = value.id
+        derivation_id = derivation.id
+    await engine.dispose()
+
+    _run_alembic("upgrade head")
+
+    engine, sessions = await _owner_session_factory()
+    async with sessions() as session:
+        assert await session.scalar(sa.text("SELECT version_num FROM alembic_version")) == (
+            FINAL_EVIDENCE_REVISION
+        )
+        assert await session.scalar(
+            sa.text(
+                "SELECT count(*) FROM pg_proc "
+                "WHERE proname IN ('darknetra_canonical_jsonb', "
+                "'darknetra_derivation_parameters_digest')"
+            )
+        ) == 2
+        assert await session.scalar(
+            sa.text(
+                "SELECT count(*) FROM pg_trigger "
+                "WHERE tgname IN ('custody_events_reject_runtime_truncate', "
+                "'evidence_manifest_immutable') AND NOT tgisinternal"
+            )
+        ) == 2
+        assert await session.scalar(
+            sa.text("SELECT count(*) FROM evidence_sensitive_values WHERE id = :id").bindparams(
+                id=value_id
+            )
+        ) == 1
+        assert await session.scalar(
+            sa.text(
+                "SELECT parameters_digest = "
+                "darknetra_derivation_parameters_digest(parameters_json) "
+                "FROM evidence_derivations WHERE id = :id"
+            ).bindparams(id=derivation_id)
+        ) is True
+        assert await session.scalar(
+            sa.text(
+                "SELECT has_table_privilege('darknetra_runtime', "
+                "'custody_events', 'SELECT, INSERT')"
+            )
+        ) is True
+        assert await session.scalar(
+            sa.text(
+                "SELECT has_table_privilege('darknetra_runtime', "
+                "'custody_events', 'UPDATE, DELETE, TRUNCATE')"
+            )
+        ) is False
         await _clear(session)
     await engine.dispose()

@@ -1,4 +1,8 @@
+import json
+import os
+import subprocess
 from pathlib import Path
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -31,3 +35,46 @@ def test_runtime_images_drop_root_privileges() -> None:
     assert "USER appuser" in api
     assert "USER appuser" in web
     assert "latest" not in api.lower()
+
+
+def test_e2e_runtime_database_credential_is_shared_by_every_consumer() -> None:
+    runtime_password = "rendered-contract-runtime-password"
+    environment = {
+        **os.environ,
+        "DARKNETRA_JWT_SIGNING_KEY_B64": "runtime-only-test-key",
+        "DARKNETRA_POSTGRES_RUNTIME_PASSWORD": runtime_password,
+    }
+    rendered = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            "docker-compose.yml",
+            "-f",
+            "docker-compose.e2e.yml",
+            "config",
+            "--format",
+            "json",
+        ],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    services = json.loads(rendered.stdout)["services"]
+
+    assert services["postgres"]["environment"]["DARKNETRA_POSTGRES_RUNTIME_PASSWORD"] == (
+        runtime_password
+    )
+    assert services["postgres"]["environment"]["POSTGRES_DB"] == "darknetra_e2e_test"
+    assert services["db-bootstrap"]["environment"][
+        "DARKNETRA_POSTGRES_RUNTIME_PASSWORD"
+    ] == runtime_password
+    assert services["db-bootstrap"]["environment"]["POSTGRES_DB"] == (
+        "darknetra_e2e_test"
+    )
+    for service_name in ("api", "worker", "migrate"):
+        database_url = services[service_name]["environment"]["DARKNETRA_DATABASE_URL"]
+        assert urlsplit(database_url).password == runtime_password
+        assert urlsplit(database_url).path == "/darknetra_e2e_test"

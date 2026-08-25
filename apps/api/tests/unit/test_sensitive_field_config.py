@@ -81,6 +81,25 @@ def test_sensitive_field_keys_are_redacted_from_settings_repr() -> None:
     assert blind_index_key not in rendered
 
 
+def test_database_credentials_are_redacted_from_settings_repr() -> None:
+    runtime_password = "runtime-password-must-not-leak"
+    owner_password = "owner-password-must-not-leak"
+    rendered = repr(
+        Settings(
+            database_url=(
+                f"postgresql+psycopg://runtime:{runtime_password}@db:5432/darknetra"
+            ),
+            database_owner_url=(
+                f"postgresql+psycopg://owner:{owner_password}@db:5432/darknetra"
+            ),
+            _env_file=None,
+        )
+    )
+
+    assert runtime_password not in rendered
+    assert owner_password not in rendered
+
+
 @pytest.mark.parametrize(
     "field_name",
     ["field_key_v1_b64", "field_blind_index_key_b64"],

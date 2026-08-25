@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import secrets
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -44,6 +45,11 @@ from darknetra_api.services.sensitive_values import (
 from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+
+@app.get("/api/v1/test-only-unrelated-failure", include_in_schema=False)
+async def _test_only_unrelated_failure_route() -> None:
+    raise RuntimeError("unrelated synthetic failure")
 
 
 def crypto() -> SensitiveFieldCrypto:
@@ -415,6 +421,19 @@ async def test_real_asgi_reveal_enforces_auth_csrf_canonical_field_and_no_store(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_unrelated_unexpected_failure_uses_fastapi_default_response() -> None:
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
+        response = await client.get("/api/v1/test-only-unrelated-failure")
+
+    assert response.status_code == 500
+    assert response.headers["content-type"].startswith("text/plain")
+    assert response.text == "Internal Server Error"
+    assert "cache-control" not in response.headers
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_evidence_ids_lineage_case_scope_and_custody_are_enforced() -> None:
     async with async_session_factory() as session:
         owner = user("constraint-owner", GlobalRole.CASE_OWNER)
@@ -689,6 +708,25 @@ async def test_database_blocks_bulk_manifest_and_custody_mutation() -> None:
                 session.add(incomplete)
                 await session.flush()
 
+        for invalid_object_key in ("\t", "\n", "\u00a0", "sha256/path with-space"):
+            with pytest.raises(IntegrityError):
+                async with session.begin_nested():
+                    await session.execute(
+                        sa.insert(EvidenceArtifact).values(
+                            id=uuid4(),
+                            case_id=case_id,
+                            source_class=EvidenceSourceClass.SYNTHETIC,
+                            source_type="invalid-object-key",
+                            acquisition_method="fixture",
+                            collector_user_id=owner_id,
+                            captured_at=datetime.now(UTC),
+                            state=EvidenceState.PRESERVED,
+                            size_bytes=1,
+                            sha256="7" * 64,
+                            object_key=invalid_object_key,
+                        )
+                    )
+
         custody = CustodyEvent(
             case_id=case_id,
             evidence_id=staging_id,
@@ -769,16 +807,31 @@ async def test_runtime_role_cannot_mutate_or_truncate_custody() -> None:
 async def test_database_derives_canonical_parameters_digest_and_rejects_mismatch() -> None:
     samples = [
         {"z": [1, True, None], "a": {"é": "東京"}},
-        {"nested": {"integer": -12, "decimal": 1.5}, "empty": {}},
+        {
+            "positive_exponent": 1e20,
+            "integral_float": 1.0,
+            "negative_zero": -0.0,
+            "large_integer": 123456789012345678901234567890,
+            "nested": [2.0, {"value": -3.0}],
+        },
     ]
     async with async_session_factory() as session:
         for parameters in samples:
             database_digest = await session.scalar(
                 sa.text("SELECT darknetra_derivation_parameters_digest(CAST(:value AS jsonb))").bindparams(
-                    value=__import__("json").dumps(parameters, ensure_ascii=False)
+                    value=json.dumps(parameters, ensure_ascii=False)
                 )
             )
             assert database_digest == derivation_parameters_digest(parameters)
+
+        for unsupported in (1e-7, 1.5):
+            with pytest.raises(DBAPIError, match="integer-valued"):
+                async with session.begin_nested():
+                    await session.scalar(
+                        sa.text(
+                            "SELECT darknetra_derivation_parameters_digest(CAST(:value AS jsonb))"
+                        ).bindparams(value=json.dumps({"unsupported": unsupported}))
+                    )
 
         owner = user("digest-authority-owner", GlobalRole.CASE_OWNER)
         session.add(owner)
@@ -817,10 +870,15 @@ async def test_database_derives_canonical_parameters_digest_and_rejects_mismatch
             child_evidence_id=child.id,
             transformation="extract",
             transformer_version="1",
-            parameters={"member": "safe.txt"},
+            parameters=samples[1],
         )
         session.add(valid)
         await session.commit()
+        valid_id = valid.id
+        session.expunge_all()
+        loaded = await session.get(EvidenceDerivation, valid_id)
+        assert loaded is not None
+        assert loaded.parameters_json["positive_exponent"] == 100000000000000000000
         with pytest.raises(IntegrityError):
             async with session.begin_nested():
                 await session.execute(

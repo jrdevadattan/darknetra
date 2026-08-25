@@ -168,6 +168,26 @@ def test_custom_startup_provider_requires_explicit_web_origin() -> None:
         create_app(startup_settings_provider=lambda: supplied)  # type: ignore[call-arg]
 
 
+def test_unrelated_unexpected_failure_keeps_fastapi_default_response() -> None:
+    settings = Settings(**valid_crypto_settings(), _env_file=None)
+    application = create_app(
+        startup_settings_provider=lambda: settings,
+        web_origin="https://failure.example",
+    )
+
+    @application.get("/api/v1/test-only-unrelated-failure")
+    async def unrelated_failure() -> None:
+        raise RuntimeError("unrelated synthetic failure")
+
+    with TestClient(application, raise_server_exceptions=False) as client:
+        response = client.get("/api/v1/test-only-unrelated-failure")
+
+    assert response.status_code == 500
+    assert response.headers["content-type"].startswith("text/plain")
+    assert response.text == "Internal Server Error"
+    assert "cache-control" not in response.headers
+
+
 def worker_environment(settings: Settings) -> dict[str, str]:
     environment = os.environ.copy()
     for name in CRYPTO_ENV_NAMES:

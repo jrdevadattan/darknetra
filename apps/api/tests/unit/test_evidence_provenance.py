@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import secrets
 from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import uuid4
 
 import darknetra_api.services.evidence as evidence_service
@@ -73,6 +74,29 @@ def test_derivation_parameters_use_versioned_canonical_json() -> None:
     assert derivation_parameters_digest(first) != derivation_parameters_digest({"z": [1]})
     with pytest.raises(ValueError, match="finite"):
         canonical_derivation_parameters_json({"bad": float("nan")})
+
+
+def test_derivation_parameters_normalize_only_integer_valued_numbers() -> None:
+    parameters = {
+        "positive_exponent": 1e20,
+        "integral_float": 1.0,
+        "negative_zero": -0.0,
+        "large_integer": 123456789012345678901234567890,
+        "nested": [2.0, {"value": -3.0}],
+    }
+
+    assert canonical_derivation_parameters_json(parameters) == (
+        b'{"integral_float":1,"large_integer":123456789012345678901234567890,'
+        b'"negative_zero":0,"nested":[2,{"value":-3}],'
+        b'"positive_exponent":100000000000000000000}'
+    )
+
+    for unsupported in (1e-7, 1.5, float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="integer-valued"):
+            canonical_derivation_parameters_json({"unsupported": unsupported})
+    for unsupported_type in (Decimal(1), 1 + 0j):
+        with pytest.raises(ValueError, match="supported JSON"):
+            canonical_derivation_parameters_json({"unsupported": unsupported_type})
 
 
 def test_repeated_values_use_independent_row_identity_for_aad() -> None:
@@ -242,6 +266,10 @@ def test_preservation_accepts_sha256_only_and_validates_optional_sha512() -> Non
     [
         ("A" * 64, "sha256/aa/value", "sha256"),
         ("a" * 64, "   ", "object_key"),
+        ("a" * 64, "\t", "object_key"),
+        ("a" * 64, "\n", "object_key"),
+        ("a" * 64, "\u00a0", "object_key"),
+        ("a" * 64, "sha256/path with-space", "object_key"),
     ],
 )
 def test_preservation_rejects_noncanonical_required_manifest_fields(

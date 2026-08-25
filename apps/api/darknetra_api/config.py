@@ -18,10 +18,13 @@ class Settings(BaseSettings):
     environment: str = "development"
     build_version: str = "dev"
     redis_url: str = "redis://127.0.0.1:6379/0"
-    database_url: str = (
-        "postgresql+psycopg://darknetra:darknetra-dev-only@127.0.0.1:5432/darknetra"
+    database_url: str = Field(
+        default=(
+            "postgresql+psycopg://darknetra:darknetra-dev-only@127.0.0.1:5432/darknetra"
+        ),
+        repr=False,
     )
-    database_owner_url: str = ""
+    database_owner_url: str = Field(default="", repr=False)
     web_origin: str = "http://localhost:3000"
     jwt_signing_key_b64: str = ""
     field_key_v1_b64: str = Field(default="", repr=False)

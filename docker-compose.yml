@@ -7,7 +7,7 @@ services:
       POSTGRES_DB: darknetra
       POSTGRES_USER: darknetra
       POSTGRES_PASSWORD: ${DARKNETRA_POSTGRES_PASSWORD:-darknetra-dev-only}
-      DARKNETRA_POSTGRES_RUNTIME_PASSWORD: ${DARKNETRA_POSTGRES_RUNTIME_PASSWORD:-darknetra-runtime-dev-only}
+      DARKNETRA_POSTGRES_RUNTIME_PASSWORD: ${DARKNETRA_POSTGRES_RUNTIME_PASSWORD:?runtime PostgreSQL password required}
     volumes:
       - postgres-data:/var/lib/postgresql
       - ./infrastructure/docker/postgres-init:/docker-entrypoint-initdb.d:ro
@@ -38,7 +38,7 @@ services:
       POSTGRES_USER: darknetra
       PGPASSWORD: ${DARKNETRA_POSTGRES_PASSWORD:-darknetra-dev-only}
       PGHOST: postgres
-      DARKNETRA_POSTGRES_RUNTIME_PASSWORD: ${DARKNETRA_POSTGRES_RUNTIME_PASSWORD:-darknetra-runtime-dev-only}
+      DARKNETRA_POSTGRES_RUNTIME_PASSWORD: ${DARKNETRA_POSTGRES_RUNTIME_PASSWORD:?runtime PostgreSQL password required}
     volumes:
       - ./infrastructure/docker/postgres-init/001-runtime-role.sh:/opt/darknetra/001-runtime-role.sh:ro
     depends_on:
@@ -54,7 +54,7 @@ services:
     environment: &api-environment
       DARKNETRA_ENVIRONMENT: development
       DARKNETRA_BUILD_VERSION: docker-dev
-      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra_runtime:${DARKNETRA_POSTGRES_RUNTIME_PASSWORD:-darknetra-runtime-dev-only}@postgres:5432/darknetra
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra_runtime:${DARKNETRA_POSTGRES_RUNTIME_PASSWORD:?runtime PostgreSQL password required}@postgres:5432/darknetra
       DARKNETRA_REDIS_URL: redis://redis:6379/0
       DARKNETRA_WEB_ORIGIN: ${DARKNETRA_WEB_ORIGIN:-http://localhost:3000}
       DARKNETRA_JWT_SIGNING_KEY_B64: ${DARKNETRA_JWT_SIGNING_KEY_B64:-}
@@ -96,7 +96,7 @@ services:
       - upgrade
       - head
     environment:
-      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra_runtime:${DARKNETRA_POSTGRES_RUNTIME_PASSWORD:-darknetra-runtime-dev-only}@postgres:5432/darknetra
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra_runtime:${DARKNETRA_POSTGRES_RUNTIME_PASSWORD:?runtime PostgreSQL password required}@postgres:5432/darknetra
       DARKNETRA_DATABASE_OWNER_URL: postgresql+psycopg://darknetra:${DARKNETRA_POSTGRES_PASSWORD:-darknetra-dev-only}@postgres:5432/darknetra
     depends_on:
       postgres:

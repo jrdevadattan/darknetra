@@ -54,8 +54,32 @@ jobs:
           print(base64.b64encode(secrets.token_bytes(32)).decode("ascii"))
           PY
           )"
+          FIELD_KEY="$(python - <<'PY'
+          import base64
+          import secrets
+          print(base64.b64encode(secrets.token_bytes(32)).decode("ascii"))
+          PY
+          )"
+          BLIND_INDEX_KEY="$(python - <<'PY'
+          import base64
+          import secrets
+          print(base64.b64encode(secrets.token_bytes(32)).decode("ascii"))
+          PY
+          )"
+          RUNTIME_DB_PASSWORD="$(python - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(32))
+          PY
+          )"
           echo "::add-mask::$KEY"
+          echo "::add-mask::$FIELD_KEY"
+          echo "::add-mask::$BLIND_INDEX_KEY"
+          echo "::add-mask::$RUNTIME_DB_PASSWORD"
           echo "DARKNETRA_JWT_SIGNING_KEY_B64=$KEY" >> "$GITHUB_ENV"
+          echo "DARKNETRA_FIELD_KEY_V1_B64=$FIELD_KEY" >> "$GITHUB_ENV"
+          echo "DARKNETRA_FIELD_BLIND_INDEX_KEY_B64=$BLIND_INDEX_KEY" >> "$GITHUB_ENV"
+          echo "DARKNETRA_POSTGRES_RUNTIME_PASSWORD=$RUNTIME_DB_PASSWORD" >> "$GITHUB_ENV"
+          unset KEY FIELD_KEY BLIND_INDEX_KEY RUNTIME_DB_PASSWORD
 
       - id: docs_preflight
         name: Apply and validate final documentation corrections
@@ -261,6 +285,7 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
+          export DARKNETRA_POSTGRES_RUNTIME_PASSWORD="${DARKNETRA_POSTGRES_RUNTIME_PASSWORD:-cleanup-only-placeholder}"
           docker compose -p darknetra-plan02-final \
             -f docker-compose.yml -f docker-compose.e2e.yml \
             down -v --remove-orphans

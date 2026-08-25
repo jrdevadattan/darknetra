@@ -55,26 +55,24 @@ def create_app(
 
     @application.middleware("http")
     async def protect_sensitive_reveal_responses(request: Request, call_next):
-        response = await call_next(request)
-        if is_sensitive_reveal_path(request.url.path):
+        reveal_path = is_sensitive_reveal_path(request.url.path)
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            if not reveal_path:
+                raise
+            logger.error(
+                "unexpected sensitive reveal failure type=%s",
+                type(exc).__name__,
+            )
+            return JSONResponse(
+                status_code=500,
+                content={"detail": "internal server error"},
+                headers={"Cache-Control": "no-store"},
+            )
+        if reveal_path:
             response.headers["Cache-Control"] = "no-store"
         return response
-
-    @application.exception_handler(Exception)
-    async def protect_unexpected_sensitive_reveal_failure(
-        request: Request, exc: Exception
-    ) -> JSONResponse:
-        if not is_sensitive_reveal_path(request.url.path):
-            raise exc
-        logger.error(
-            "unexpected sensitive reveal failure type=%s",
-            type(exc).__name__,
-        )
-        return JSONResponse(
-            status_code=500,
-            content={"detail": "internal server error"},
-            headers={"Cache-Control": "no-store"},
-        )
     application.include_router(health_router, prefix="/api/v1")
     application.include_router(auth_router, prefix="/api/v1")
     application.include_router(cases_router, prefix="/api/v1")

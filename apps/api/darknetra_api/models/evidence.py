@@ -67,7 +67,7 @@ class EvidenceArtifact(Base):
         ),
         sa.CheckConstraint(
             "state = 'STAGING' OR (size_bytes IS NOT NULL AND sha256 IS NOT NULL "
-            "AND object_key IS NOT NULL AND btrim(object_key) <> '')",
+            "AND object_key IS NOT NULL AND object_key ~ '^[!-~]+$')",
             name="ck_evidence_manifest_complete_after_staging",
         ),
     )

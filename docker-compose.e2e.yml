@@ -4,7 +4,6 @@ services:
       POSTGRES_DB: darknetra_e2e_test
       POSTGRES_USER: darknetra
       POSTGRES_PASSWORD: darknetra-e2e
-      DARKNETRA_POSTGRES_RUNTIME_PASSWORD: darknetra-runtime-e2e
     ports:
       - "127.0.0.1:55432:5432"
 
@@ -12,7 +11,7 @@ services:
     environment:
       DARKNETRA_ENVIRONMENT: development
       DARKNETRA_BUILD_VERSION: plan02-real-e2e
-      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra_runtime:darknetra-runtime-e2e@postgres:5432/darknetra_e2e_test
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra_runtime:${DARKNETRA_POSTGRES_RUNTIME_PASSWORD:?runtime PostgreSQL password required}@postgres:5432/darknetra_e2e_test
       DARKNETRA_WEB_ORIGIN: http://127.0.0.1:3000
       DARKNETRA_JWT_SIGNING_KEY_B64: ${DARKNETRA_JWT_SIGNING_KEY_B64:?runtime JWT signing key required}
     ports:
@@ -26,8 +25,12 @@ services:
 
   migrate:
     environment:
-      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra_runtime:darknetra-runtime-e2e@postgres:5432/darknetra_e2e_test
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra_runtime:${DARKNETRA_POSTGRES_RUNTIME_PASSWORD:?runtime PostgreSQL password required}@postgres:5432/darknetra_e2e_test
       DARKNETRA_DATABASE_OWNER_URL: postgresql+psycopg://darknetra:darknetra-e2e@postgres:5432/darknetra_e2e_test
+
+  worker:
+    environment:
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra_runtime:${DARKNETRA_POSTGRES_RUNTIME_PASSWORD:?runtime PostgreSQL password required}@postgres:5432/darknetra_e2e_test
 
   web:
     build:
