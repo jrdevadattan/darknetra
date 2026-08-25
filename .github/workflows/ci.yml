@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, testing-codex]
+    branches: [main, testing-codex, production]
   pull_request:
 
 permissions:

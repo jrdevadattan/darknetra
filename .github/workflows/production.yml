@@ -1,0 +1,117 @@
+name: Production CI/CD
+
+on:
+  push:
+    branches: [production]
+  workflow_dispatch:
+
+concurrency:
+  group: darknetra-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify production candidate
+    runs-on: [self-hosted, linux, x64, darknetra-production]
+    timeout-minutes: 45
+    env:
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra:darknetra-ci@127.0.0.1:5432/darknetra
+      DARKNETRA_ENVIRONMENT: development
+      DARKNETRA_WEB_ORIGIN: http://localhost:3000
+      NEXT_PUBLIC_DARKNETRA_API_BASE_URL: http://localhost:8000
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: "0.12.4"
+
+      - name: Generate test-only secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          readarray -t GENERATED < <(python - <<'PY'
+          import base64
+          import secrets
+
+          print(base64.b64encode(secrets.token_bytes(32)).decode("ascii"))
+          print(base64.b64encode(secrets.token_bytes(32)).decode("ascii"))
+          print(base64.b64encode(secrets.token_bytes(32)).decode("ascii"))
+          print(secrets.token_urlsafe(32))
+          PY
+          )
+          JWT_KEY="${GENERATED[0]}"
+          FIELD_KEY="${GENERATED[1]}"
+          BLIND_KEY="${GENERATED[2]}"
+          RUNTIME_DB_PASSWORD="${GENERATED[3]}"
+          echo "::add-mask::$JWT_KEY"
+          echo "::add-mask::$FIELD_KEY"
+          echo "::add-mask::$BLIND_KEY"
+          echo "::add-mask::$RUNTIME_DB_PASSWORD"
+          {
+            echo "DARKNETRA_JWT_SIGNING_KEY_B64=$JWT_KEY"
+            echo "DARKNETRA_FIELD_KEY_V1_B64=$FIELD_KEY"
+            echo "DARKNETRA_FIELD_KEYRING_B64_JSON={\"v1\":\"$FIELD_KEY\"}"
+            echo "DARKNETRA_FIELD_BLIND_INDEX_KEY_B64=$BLIND_KEY"
+            echo "DARKNETRA_POSTGRES_RUNTIME_PASSWORD=$RUNTIME_DB_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      - name: Verify Python
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --all-packages --dev --frozen
+          uv run ruff check .
+          uv run pytest -q -m "not integration"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Verify web application
+        shell: bash
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack prepare pnpm@10.15.0 --activate
+          pnpm install --frozen-lockfile
+          pnpm --filter @darknetra/web lint
+          pnpm --filter @darknetra/web typecheck
+          pnpm --filter @darknetra/web test
+          pnpm --filter @darknetra/web build
+
+      - name: Validate production Compose
+        shell: bash
+        env:
+          DARKNETRA_BUILD_VERSION: ${{ github.sha }}
+          DARKNETRA_PUBLIC_ORIGIN: https://darknetra.8.231.123.247.sslip.io
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml config --quiet
+
+  deploy:
+    name: Deploy exact verified commit
+    needs: verify
+    if: github.ref == 'refs/heads/production'
+    runs-on: [self-hosted, linux, x64, darknetra-production]
+    timeout-minutes: 45
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Deploy with health check and rollback
+        shell: bash
+        env:
+          DARKNETRA_DEPLOY_SHA: ${{ github.sha }}
+        run: ./scripts/deploy-production.sh

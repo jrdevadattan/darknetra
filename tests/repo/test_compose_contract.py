@@ -12,6 +12,7 @@ EXECUTABLE_COMPOSE_FILES = {
     Path(".github/workflows/plan02-task13.yml"),
     Path(".github/workflows/plan02-task14.yml"),
     Path(".github/workflows/plan02-task2.yml"),
+    Path(".github/workflows/production.yml"),
     Path(".github/workflows/task08-docker.yml"),
     Path(".github/workflows/task09-finalize-v2.yml"),
     Path(".github/workflows/task09-finalize-v3.yml"),
@@ -19,6 +20,7 @@ EXECUTABLE_COMPOSE_FILES = {
     Path(".github/workflows/task09-finalize.yml"),
     Path("Makefile"),
     Path("scripts/finalize_plan01_task9.sh"),
+    Path("scripts/deploy-production.sh"),
     Path("scripts/smoke.sh"),
 }
 
