@@ -3,7 +3,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/apps/api \
     UV_NO_PROGRESS=1
-RUN useradd --create-home --uid 10001 appuser
+RUN useradd --create-home --uid 10001 appuser \
+    && install -d -o appuser -g appuser -m 0755 /var/lib/darknetra/evidence
 WORKDIR /app
 COPY --from=ghcr.io/astral-sh/uv:0.12.4 /uv /uvx /bin/
 COPY pyproject.toml uv.lock ./

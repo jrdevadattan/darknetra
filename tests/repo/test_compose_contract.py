@@ -53,6 +53,45 @@ def test_runtime_images_drop_root_privileges() -> None:
     assert "latest" not in api.lower()
 
 
+def test_evidence_volume_is_shared_only_by_api_and_worker() -> None:
+    runtime_password = "rendered-contract-runtime-password"
+    environment = {
+        **os.environ,
+        "DARKNETRA_POSTGRES_RUNTIME_PASSWORD": runtime_password,
+    }
+    rendered = subprocess.run(
+        ["docker", "compose", "-f", "docker-compose.yml", "config", "--format", "json"],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    configuration = json.loads(rendered.stdout)
+    services = configuration["services"]
+
+    assert "evidence_store" in configuration["volumes"]
+    for service_name in ("api", "worker"):
+        mounts = services[service_name]["volumes"]
+        assert mounts == [
+            {
+                "type": "volume",
+                "source": "evidence_store",
+                "target": "/var/lib/darknetra/evidence",
+                "volume": {},
+            }
+        ]
+        assert services[service_name]["environment"]["DARKNETRA_EVIDENCE_STORE_ROOT"] == (
+            "/var/lib/darknetra/evidence"
+        )
+
+    for service_name in ("web", "postgres", "redis", "db-bootstrap", "migrate"):
+        assert all(
+            mount.get("source") != "evidence_store"
+            for mount in services[service_name].get("volumes", [])
+        )
+
+
 def test_e2e_runtime_database_credential_is_shared_by_every_consumer() -> None:
     runtime_password = "rendered-contract-runtime-password"
     environment = {
