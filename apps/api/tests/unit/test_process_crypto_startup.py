@@ -4,12 +4,11 @@ import os
 import secrets
 import subprocess
 import sys
-from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 from darknetra_api.config import Settings, get_settings
-from darknetra_api.main import app
+from darknetra_api.main import create_app
 from fastapi.testclient import TestClient
 
 CRYPTO_ENV_NAMES = (
@@ -53,23 +52,11 @@ def invalid_crypto_settings(case: str) -> Settings:
     return Settings(**valid, _env_file=None)
 
 
-@pytest.fixture
-def api_settings_override() -> Iterator[Callable[[Settings], None]]:
-    def apply(settings: Settings) -> None:
-        app.dependency_overrides[get_settings] = lambda: settings
+def test_api_startup_accepts_sync_settings_provider() -> None:
+    settings = Settings(**valid_crypto_settings(), _env_file=None)
+    application = create_app(startup_settings_provider=lambda: settings)
 
-    try:
-        yield apply
-    finally:
-        app.dependency_overrides.pop(get_settings, None)
-
-
-def test_api_startup_exposes_validated_crypto_in_readiness(
-    api_settings_override: Callable[[Settings], None],
-) -> None:
-    api_settings_override(Settings(**valid_crypto_settings(), _env_file=None))
-
-    with TestClient(app) as client:
+    with TestClient(application) as client:
         response = client.get("/api/v1/health/ready")
 
     assert response.status_code == 200
@@ -77,6 +64,43 @@ def test_api_startup_exposes_validated_crypto_in_readiness(
         "api",
         "sensitive-field-crypto",
     }
+
+
+def test_api_startup_accepts_async_settings_provider() -> None:
+    settings = Settings(**valid_crypto_settings(), _env_file=None)
+
+    async def settings_provider() -> Settings:
+        return settings
+
+    application = create_app(startup_settings_provider=settings_provider)
+
+    with TestClient(application) as client:
+        assert client.get("/api/v1/health/ready").status_code == 200
+
+
+def test_request_dependency_override_is_independent_from_startup_provider() -> None:
+    startup = Settings(build_version="startup", **valid_crypto_settings(), _env_file=None)
+    request = Settings(build_version="request", **valid_crypto_settings(), _env_file=None)
+    application = create_app(startup_settings_provider=lambda: startup)
+    application.dependency_overrides[get_settings] = lambda: request
+
+    try:
+        with TestClient(application) as client:
+            assert client.get("/api/v1/health/live").json()["version"] == "request"
+    finally:
+        application.dependency_overrides.clear()
+
+
+def test_production_default_startup_provider_uses_runtime_environment(monkeypatch) -> None:
+    monkeypatch.setenv("DARKNETRA_FIELD_KEY_V1_B64", encoded_random_key())
+    monkeypatch.setenv("DARKNETRA_FIELD_BLIND_INDEX_KEY_B64", encoded_random_key())
+    get_settings.cache_clear()
+    try:
+        application = create_app()
+        with TestClient(application) as client:
+            assert client.get("/api/v1/health/ready").status_code == 200
+    finally:
+        get_settings.cache_clear()
 
 
 @pytest.mark.parametrize(
@@ -91,11 +115,11 @@ def test_api_startup_exposes_validated_crypto_in_readiness(
 )
 def test_api_startup_fails_closed_for_invalid_crypto(
     case: str,
-    api_settings_override: Callable[[Settings], None],
 ) -> None:
-    api_settings_override(invalid_crypto_settings(case))
+    settings = invalid_crypto_settings(case)
+    application = create_app(startup_settings_provider=lambda: settings)
 
-    with pytest.raises(ValueError), TestClient(app):
+    with pytest.raises(ValueError), TestClient(application):
         pass
 
 

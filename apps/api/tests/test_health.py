@@ -4,7 +4,7 @@ from collections.abc import Iterator
 
 import pytest
 from darknetra_api.config import Settings, get_settings
-from darknetra_api.main import app
+from darknetra_api.main import create_app
 from fastapi.testclient import TestClient
 
 TEST_BUILD_VERSION = "health-contract-test"
@@ -17,6 +17,9 @@ def _test_settings() -> Settings:
         field_blind_index_key_b64=base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
         _env_file=None,
     )
+
+
+app = create_app(startup_settings_provider=_test_settings)
 
 
 @pytest.fixture

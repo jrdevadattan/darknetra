@@ -2,6 +2,7 @@ from celery import Celery
 from kombu import Queue
 
 from darknetra_api.config import get_settings
+from darknetra_api.jobs.base import IngestTask
 
 settings = get_settings()
 sensitive_field_crypto = settings.require_sensitive_field_crypto()
@@ -10,6 +11,7 @@ celery_app = Celery(
     "darknetra",
     broker=settings.redis_url,
     include=["darknetra_api.jobs.tasks"],
+    task_cls=IngestTask,
 )
 celery_app.conf.update(
     accept_content=["json"],

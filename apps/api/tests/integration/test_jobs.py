@@ -85,7 +85,7 @@ def make_job(case: Case, *, idempotency_key: str) -> AnalysisJob:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_pending_job_history_survives_redis_flush() -> None:
+async def test_pending_job_history_survives_owned_delivery_key_cleanup() -> None:
     case = await seed_case()
     job = make_job(case, idempotency_key=f"ingest:{uuid4()}")
     async with async_session_factory() as session:
@@ -94,12 +94,14 @@ async def test_pending_job_history_survives_redis_flush() -> None:
         job_id = job.id
         idempotency_key = job.idempotency_key
 
+    owned_key = f"darknetra:test:{uuid4()}:delivery:{job_id}"
     redis = Redis.from_url(redis_url(), decode_responses=True)
     try:
-        await redis.set(f"transient-job:{job_id}", "queued")
-        await redis.flushdb()
-        assert await redis.get(f"transient-job:{job_id}") is None
+        await redis.set(owned_key, "queued")
+        assert await redis.delete(owned_key) == 1
+        assert await redis.get(owned_key) is None
     finally:
+        await redis.delete(owned_key)
         await redis.aclose()
 
     async with async_session_factory() as session:
