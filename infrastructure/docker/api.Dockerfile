@@ -1,7 +1,7 @@
 FROM python:3.12-slim AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app/apps/api \
+    PYTHONPATH=/app:/app/apps/api \
     UV_NO_PROGRESS=1
 RUN useradd --create-home --uid 10001 appuser \
     && install -d -o appuser -g appuser -m 0755 /var/lib/darknetra/evidence

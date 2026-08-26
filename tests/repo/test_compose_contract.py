@@ -55,6 +55,11 @@ def test_runtime_images_drop_root_privileges() -> None:
     assert "latest" not in api.lower()
 
 
+def test_api_runtime_can_import_repository_owned_service_packages() -> None:
+    api = (ROOT / "infrastructure" / "docker" / "api.Dockerfile").read_text(encoding="utf-8")
+    assert "PYTHONPATH=/app:/app/apps/api" in api
+
+
 def test_evidence_volume_is_shared_only_by_api_and_worker() -> None:
     runtime_password = "rendered-contract-runtime-password"
     environment = {
