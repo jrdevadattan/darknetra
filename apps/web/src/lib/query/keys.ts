@@ -16,4 +16,8 @@ export const queryKeys = {
     users: ["admin", "users"] as const,
     roles: ["admin", "roles"] as const,
   },
+  intelligence: {
+    all: ["intelligence"] as const,
+    integrations: ["intelligence", "integrations"] as const,
+  },
 } as const;

@@ -11,6 +11,7 @@ COPY pyproject.toml uv.lock ./
 COPY apps/api/pyproject.toml apps/api/pyproject.toml
 RUN uv sync --frozen --all-packages --no-dev
 COPY apps/api apps/api
+COPY services/collector services/collector
 USER appuser
 EXPOSE 8000
 CMD ["uv", "run", "--no-sync", "uvicorn", "--app-dir", "apps/api", "darknetra_api.main:app", "--host", "0.0.0.0", "--port", "8000"]

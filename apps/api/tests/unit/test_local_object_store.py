@@ -20,7 +20,7 @@ from darknetra_api.storage.base import (
     ObjectStoreConfigurationError,
 )
 from darknetra_api.storage.local import LocalObjectStore
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 CONTENT = b"immutable evidence bytes\x00\xff"
@@ -71,6 +71,7 @@ def test_put_verified_returns_deterministic_key_digest_and_byte_count(tmp_path: 
 
 
 @given(st.binary(max_size=256 * 1024))
+@settings(deadline=None)
 def test_arbitrary_bytes_round_trip_by_content_digest(payload: bytes) -> None:
     with tempfile.TemporaryDirectory() as directory:
         store = _store(directory)

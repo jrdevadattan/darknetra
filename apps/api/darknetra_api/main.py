@@ -16,6 +16,7 @@ from darknetra_api.routes.auth import router as auth_router
 from darknetra_api.routes.cases import router as cases_router
 from darknetra_api.routes.evidence import is_sensitive_reveal_path
 from darknetra_api.routes.evidence import router as evidence_router
+from darknetra_api.routes.intelligence import router as intelligence_router
 from darknetra_api.routes.memberships import router as memberships_router
 from darknetra_api.routes.users import router as users_router
 
@@ -82,6 +83,7 @@ def create_app(
     application.include_router(auth_router, prefix="/api/v1")
     application.include_router(cases_router, prefix="/api/v1")
     application.include_router(evidence_router, prefix="/api/v1")
+    application.include_router(intelligence_router, prefix="/api/v1")
     application.include_router(memberships_router, prefix="/api/v1")
     application.include_router(users_router, prefix="/api/v1")
     application.include_router(admin_router, prefix="/api/v1")

@@ -1,5 +1,5 @@
-import { GlobalOperationalSurface } from "@/components/darknetra/operational-surfaces";
+import { SourceRegistryLiveView } from "@/features/intelligence/source-registry-live-view";
 
 export default function Page() {
-  return <GlobalOperationalSurface surface="sources" />;
+  return <SourceRegistryLiveView />;
 }
