@@ -2,12 +2,9 @@
 
 from sqlalchemy import select
 
-from darknetra.auth.models import User
-from darknetra.auth.service import user_actor
-from darknetra.authz.deps import visible_case
-from darknetra.authz.permissions import Permission, permitted
 from darknetra.evidence.models import Evidence
 from darknetra.monitor.models import WatchlistItem
+from darknetra.monitor.principal import execution_actor
 from darknetra.monitor.runner import run_item
 
 
@@ -37,12 +34,18 @@ async def on_evidence(app, case_id, evidence_id):
 
         async def work(iid=item.id, uid=item.created_by):
             async with app.state.session_factory() as db:
-                user = await db.get(User, uid)
-                if not user or not user.is_active or user.must_change_password:
+                current = await db.scalar(
+                    select(WatchlistItem).where(
+                        WatchlistItem.case_id == case_id, WatchlistItem.id == iid
+                    )
+                )
+                if current is None or not current.active:
                     return
-                actor = user_actor(user)
-                _, role = await visible_case(db, actor, case_id)
-                if not permitted(actor.global_role, role, Permission.WATCHLIST_MANAGE):
+                actor = await execution_actor(
+                    db, case_id=case_id, user_id=uid, settings=app.state.settings, item=current
+                )
+                if actor is None:
+                    await db.commit()
                     return
                 await run_item(
                     db,

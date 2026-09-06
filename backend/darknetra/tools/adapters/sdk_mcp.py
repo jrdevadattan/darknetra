@@ -10,7 +10,9 @@ from darknetra.tools.invoke import invoke
 from darknetra.tools.registry import for_role
 
 
-def build_sdk_server(role: AgentRole) -> McpSdkServerConfig:
+def build_sdk_server(
+    role: AgentRole, disabled_tools: frozenset[str] = frozenset()
+) -> McpSdkServerConfig:
     def build(spec: ToolSpec) -> Any:
         async def handler(args: dict[str, Any]) -> dict[str, Any]:
             ctx = replace(current_run_ctx.get(), transport="sdk_mcp")
@@ -23,5 +25,7 @@ def build_sdk_server(role: AgentRole) -> McpSdkServerConfig:
         return tool(spec.name, spec.description, spec.input_model.model_json_schema())(handler)
 
     return create_sdk_mcp_server(
-        name="darknetra", version="0.1.0", tools=[build(spec) for spec in for_role(role)]
+        name="darknetra",
+        version="0.1.0",
+        tools=[build(spec) for spec in for_role(role) if spec.name not in disabled_tools],
     )

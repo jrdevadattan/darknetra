@@ -55,6 +55,10 @@ async def check(
         if case.status != "OPEN":
             raise ToolError("POLICY_DENIED", "Case is read-only")
         policy = SourcePolicy.model_validate(case.source_policy)
+        from darknetra.plugins.catalog import tool_enabled
+
+        if not await tool_enabled(session, spec, policy):
+            raise ToolError("POLICY_DENIED", "Plugin disabled or manifest requires review")
         evaluate(
             policy,
             offline=ctx.settings.offline_mode,

@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from .common import ActorRef, CaseRole, CaseStatus, ResourceRef, Schema, SourceClass
 
@@ -29,6 +29,18 @@ class SourcePolicy(Schema):
         "telegram": 30,
     }
     retention_days: int | None = Field(None, gt=0)
+    enabled_plugins: list[str] | None = Field(None, max_length=64)
+
+    @field_validator("enabled_plugins")
+    @classmethod
+    def reviewed_plugins(cls, values):
+        if values is not None:
+            from darknetra.plugins.catalog import catalog
+
+            if any(name not in catalog() for name in values):
+                raise ValueError("Only reviewed plugin IDs are allowed")
+            return sorted(set(values))
+        return values
 
 
 class CaseCreate(Schema):

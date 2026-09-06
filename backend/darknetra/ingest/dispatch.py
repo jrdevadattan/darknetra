@@ -13,6 +13,7 @@ from PIL import Image, ImageOps
 from pypdf import PdfReader
 from selectolax.parser import HTMLParser
 
+from darknetra.ingest.office import parse_office
 from darknetra.ingest.sniff import decode
 
 
@@ -26,6 +27,8 @@ def text_doc(text, contexts=()):
 
 
 def parse(data: bytes, kind: str, filename: str):
+    if kind == "OFFICE":
+        return parse_office(data, filename)
     derivatives, notices = [], []
     contexts = []
     text = None
@@ -82,9 +85,22 @@ def parse(data: bytes, kind: str, filename: str):
         reader = PdfReader(io.BytesIO(data), strict=False)
         if reader.is_encrypted:
             return [], ["ENCRYPTED"]
-        text = "\f".join(page.extract_text() or "" for page in reader.pages)
+        pages = [page.extract_text() or "" for page in reader.pages]
+        stored_pages = [page.rstrip("\n") for page in pages]
+        text = "\n\f\n".join(stored_pages)
         if not text.strip():
             notices.append("TEXT_NOT_AVAILABLE")
+        else:
+            page_map = []
+            position = 0
+            for index, page in enumerate(stored_pages):
+                if index:
+                    position += len("\n\f\n")
+                line = text.count("\n", 0, position)
+                count = page.count("\n") + 1 if page else 0
+                page_map.append((line, line + count))
+                position += len(page)
+            derivatives.append(("TEXT", {**text_doc(text, contexts), "page_map": page_map}))
     elif kind == "IMAGE":
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
@@ -254,6 +270,6 @@ def parse(data: bytes, kind: str, filename: str):
         notices.append("TRANSCRIPT_PENDING")
     else:
         notices.append("PARSER_UNAVAILABLE")
-    if text:
+    if text and kind != "PDF":
         derivatives.append(("TEXT", text_doc(text, contexts)))
     return derivatives, notices

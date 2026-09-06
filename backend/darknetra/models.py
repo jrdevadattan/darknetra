@@ -23,6 +23,7 @@ from darknetra.analytics.models import (
 from darknetra.audit.models import AuditEvent
 from darknetra.auth.models import ApiToken, Session, User
 from darknetra.cases.models import Case, CaseMembership
+from darknetra.chats.models import PrivateMessage, PrivateRun, PrivateRunEvent, PrivateThread
 from darknetra.decisions.models import Decision, Finding
 from darknetra.evidence.models import CustodyEvent, Derivative, Evidence, EvidenceCodeCounter
 from darknetra.extract.models import CanonicalEntity, ExtractionRun, Observation, TaxonomyTerm
@@ -42,6 +43,10 @@ from darknetra.tools.models import ToolRegistry
 
 __all__ = [
     "User",
+    "PrivateThread",
+    "PrivateRun",
+    "PrivateMessage",
+    "PrivateRunEvent",
     "Session",
     "ApiToken",
     "Case",

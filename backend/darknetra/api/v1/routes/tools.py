@@ -51,8 +51,21 @@ def info(name, settings):
 
 
 @router.get("/tools", response_model=Page[ToolInfo])
-async def list_tools(request: Request, actor: Actor = Depends(current_actor)):
-    return Page(items=[info(name, request.app.state.settings) for name in REGISTRY])
+async def list_tools(
+    request: Request,
+    actor: Actor = Depends(current_actor),
+    db: AsyncSession = Depends(get_session, scope="function"),
+):
+    from darknetra.plugins.catalog import tool_enabled
+
+    items = []
+    for name, spec in REGISTRY.items():
+        item = info(name, request.app.state.settings)
+        if not await tool_enabled(db, spec):
+            item.enabled = False
+            item.health.message = "Plugin disabled or manifest requires review"
+        items.append(item)
+    return Page(items=items)
 
 
 @router.post("/tools/{name}/health", response_model=ToolHealth)

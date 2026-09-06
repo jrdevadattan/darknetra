@@ -42,7 +42,11 @@ def conversation_prompt(prompt: str, history: list[dict[str, Any]] | None) -> st
 def build_options(ctx: ToolContext, goal: str | None, budget: float) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(
         tools=[],
-        allowed_tools=["mcp__darknetra__" + s.name for s in for_role(ctx.role)],
+        allowed_tools=[
+            "mcp__darknetra__" + s.name
+            for s in for_role(ctx.role)
+            if s.name not in ctx.disabled_tools
+        ],
         disallowed_tools=[
             "Bash",
             "Read",
@@ -57,7 +61,7 @@ def build_options(ctx: ToolContext, goal: str | None, budget: float) -> ClaudeAg
             "Task",
         ],
         system_prompt=system_prompt(goal, ctx.role),
-        mcp_servers={"darknetra": build_sdk_server(ctx.role)},
+        mcp_servers={"darknetra": build_sdk_server(ctx.role, ctx.disabled_tools)},
         strict_mcp_config=True,
         setting_sources=[],
         skills=[],

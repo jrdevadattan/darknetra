@@ -68,7 +68,7 @@ async def search_evidence(ctx: ToolContext, args: BaseModel) -> BaseModel:
     query = cast(SearchQuery, args).model_copy(deep=True)
     query.filters.include_quarantined = False
     async with ctx.session_factory() as session:
-        return await search(session, ctx.case_id, query, actor=ctx.actor)
+        return await search(session, ctx.case_id, query, actor=ctx.actor, settings=ctx.settings)
 
 
 async def read_evidence(ctx: ToolContext, args: BaseModel) -> BaseModel:
@@ -82,7 +82,9 @@ async def read_evidence(ctx: ToolContext, args: BaseModel) -> BaseModel:
         if evidence.status in {"QUARANTINED", "EXPIRED", "FAILED"}:
             raise ToolError("POLICY_DENIED", "Evidence is not available to models")
         text, _ = await get_text(session, ctx.case_id, evidence.id, ctx.settings)
-        lines = text.splitlines()
+        # Canonical derivative offsets and citation line numbers count LF only;
+        # splitlines() also splits PDF form-feeds and shifts subsequent citations.
+        lines = text.split("\n")
         end = min(args.end_line or len(lines), len(lines))
         selected = "\n".join(lines[args.start_line - 1 : end])
         bounded = selected[: args.max_chars]

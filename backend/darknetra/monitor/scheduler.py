@@ -7,13 +7,10 @@ from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import select
 
 from darknetra.auth.actor import Actor
-from darknetra.auth.models import User
-from darknetra.auth.service import user_actor
-from darknetra.authz.deps import visible_case
-from darknetra.authz.permissions import Permission, permitted
 from darknetra.cases.models import Case
 from darknetra.errors import AppError
 from darknetra.monitor.models import Watchlist, WatchlistItem
+from darknetra.monitor.principal import execution_actor
 from darknetra.monitor.runner import run_item
 from darknetra.monitor.service import effective_interval
 
@@ -44,13 +41,16 @@ class MonitorScheduler:
                 )
                 if not item:
                     return
-                user = await db.get(User, item.created_by)
-                if not user or not user.is_active or user.must_change_password:
-                    return
-                actor = user_actor(user)
                 try:
-                    _, role = await visible_case(db, actor, case_id)
-                    if not permitted(actor.global_role, role, Permission.WATCHLIST_MANAGE):
+                    actor = await execution_actor(
+                        db,
+                        case_id=case_id,
+                        user_id=item.created_by,
+                        settings=self.app.state.settings,
+                        item=item,
+                    )
+                    if actor is None:
+                        await db.commit()
                         return
                     await run_item(
                         db,
@@ -100,13 +100,15 @@ class MonitorScheduler:
             cases = list(await db.scalars(select(Case).where(Case.status == "OPEN")))
         for case in cases:
             async with self.app.state.session_factory() as db:
-                user = await db.get(User, case.created_by)
-                if not user or not user.is_active or user.must_change_password:
-                    continue
-                actor = user_actor(user)
                 try:
-                    _, role = await visible_case(db, actor, case.id)
-                    if not permitted(actor.global_role, role, Permission.WATCHLIST_MANAGE):
+                    actor = await execution_actor(
+                        db,
+                        case_id=case.id,
+                        user_id=case.created_by,
+                        settings=self.app.state.settings,
+                    )
+                    if actor is None:
+                        await db.commit()
                         continue
                     await promote_candidates(db, case=case, actor=actor)
                     await db.commit()

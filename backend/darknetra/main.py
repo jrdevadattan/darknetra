@@ -55,18 +55,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
             from darknetra.agent.service import recover_interrupted_runs
             from darknetra.cases.models import Case
+            from darknetra.chats.service import recover_interrupted
             from darknetra.ingest.recovery import recover_interrupted_evidence
+            from darknetra.monitor.recovery import recover_interrupted_monitors
             from darknetra.reports.service import recover_interrupted_reports
 
             try:
                 await recover_interrupted_runs(app)
                 await recover_interrupted_reports(app)
+                await recover_interrupted(app.state.session_factory)
                 recovery_before = datetime.now(UTC)
                 async with app.state.session_factory() as db:
                     case_ids = list(await db.scalars(select(Case.id)))
                 for case_id in case_ids:
                     async with app.state.session_factory() as db:
                         await recover_interrupted_evidence(db, case_id, before=recovery_before)
+                        await recover_interrupted_monitors(
+                            db, case_id, settings=settings, before=recovery_before
+                        )
                         await db.commit()
             except Exception:
                 # Readiness still reports database failures; do not fabricate recovery.
@@ -105,6 +111,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     for name in (
         "auth",
         "cases",
+        "digest",
         "evidence",
         "search",
         "entities",
@@ -116,6 +123,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "alerts",
         "reports",
         "tools",
+        "plugins",
+        "chats",
         "admin",
         "health",
     ):

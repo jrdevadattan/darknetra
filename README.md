@@ -49,7 +49,7 @@ Evidence codes are local to each case. Case access checks apply before resolving
 
 ## Configuration and optional providers
 
-Chat uses a custom Python runtime with interchangeable Claude Agent SDK, Ollama and deterministic quotation adapters. It does not use LangChain or LangGraph. Threads, messages, tool calls and SSE event sequences persist in PostgreSQL. Each model adapter receives bounded conversation and attachment/pinned-finding context, uses the shared typed tool registry and policy/capture boundary, and returns answers through the claim checker. Replay keys include conversation context and current case state. NVIDIA NIM is compatible with this adapter design, but a NIM/OpenAI-compatible adapter is not implemented in this build.
+Chat uses a custom Python runtime with interchangeable Claude Agent SDK, NVIDIA NIM, Ollama and deterministic quotation adapters. It does not use LangChain or LangGraph. Case threads, messages, tool calls and SSE events persist in PostgreSQL. Case adapters use the shared registry, capture policy and claim checker. Separate owner-scoped private chats use tool-free providers and cannot access case evidence. The plugin catalog supports reviewed bundled integrations and case allowlists. See `docs/backend-audit.md` for model setup, new operations and remaining acceptance work.
 
 Every setting is listed in `.env.example`. Settings and API keys use the `DARKNETRA_` prefix. Docker replaces the database and vault addresses with its internal addresses; host scripts use loopback port 55432. The API uses the restricted `darknetra_app` role; only migrations use `darknetra_migrate`.
 

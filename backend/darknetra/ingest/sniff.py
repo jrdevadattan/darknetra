@@ -3,12 +3,30 @@ from pathlib import Path
 
 import filetype
 
+from darknetra.ingest.office import inspect_office
+
 
 @dataclass(frozen=True)
 class Sniffed:
     mime: str
     kind: str
     ext_mismatch: bool = False
+    unsafe_reason: str | None = None
+
+
+_OFFICE_MIMES = {
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+}
+
+
+def _office_sniff(data: bytes, ext: str) -> Sniffed | None:
+    """Recognise OOXML by package contents, never by a filename alone."""
+    matched, unsafe = inspect_office(data, ext)
+    if not matched:
+        return None
+    return Sniffed(_OFFICE_MIMES[ext], "OFFICE", unsafe_reason=unsafe)
 
 
 def decode(data: bytes) -> str:
@@ -17,6 +35,9 @@ def decode(data: bytes) -> str:
 
 def sniff(data: bytes, filename: str) -> Sniffed:
     ext = Path(filename).suffix.lower()
+    office = _office_sniff(data, ext)
+    if office is not None:
+        return office
     guessed = filetype.guess(data)
     if guessed:
         mime = guessed.mime
@@ -29,8 +50,6 @@ def sniff(data: bytes, filename: str) -> Sniffed:
             if mime.startswith("video/")
             else {"application/pdf": "PDF", "application/zip": "ZIP"}.get(mime, "UNKNOWN")
         )
-        if ext in {".docx", ".xlsx", ".pptx"}:
-            kind = "OFFICE"
         return Sniffed(
             mime,
             kind,
@@ -72,7 +91,9 @@ def quarantine_reason(sniffed, filename, source_class):
         ".dll",
     }:
         return "UNSAFE_EXECUTABLE_OR_SCRIPT"
-    if sniffed.kind in {"UNKNOWN", "OFFICE", "VIDEO"}:
+    if sniffed.unsafe_reason:
+        return sniffed.unsafe_reason
+    if sniffed.kind in {"UNKNOWN", "VIDEO"}:
         return "UNSUPPORTED_UNSAFE_TYPE"
     if sniffed.kind == "IMAGE" and source_class == "OSINT_DARK":
         return "DARK_IMAGE_REVIEW_REQUIRED"

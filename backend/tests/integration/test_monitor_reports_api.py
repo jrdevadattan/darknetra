@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
+from freezegun import freeze_time
 from pypdf import PdfReader
 from sqlalchemy import func, select, text
 
@@ -255,6 +256,7 @@ async def test_scenario_36_bad_narrative_is_dropped(client, app, actor_login):
 async def test_simultaneous_ticks_cannot_create_duplicate_hits(
     client, app, actor_login, monkeypatch
 ):
+
     from darknetra.monitor import adapters
 
     await actor_login()
@@ -357,9 +359,12 @@ async def test_three_failures_raise_one_error_alert_and_rate_limits_do_not_count
 
     monkeypatch.setattr(adapters, "collect", unavailable)
     url = f"/api/v1/cases/{cid}/watchlists/{wid}/items/{iid}/run"
-    for _ in range(4):
-        response = await client.post(url)
-        assert response.status_code == 200
+    start = datetime.now(UTC)
+    for elapsed in (0, 61, 182, 423):
+        with freeze_time(start + timedelta(seconds=elapsed), real_asyncio=True):
+            response = await client.post(url)
+            assert response.status_code == 200
+            assert (await client.post(url)).status_code == 429
     alerts = (await client.get(f"/api/v1/cases/{cid}/alerts")).json()["items"]
     assert len(alerts) == 1 and alerts[0]["kind"] == "MONITOR_ERROR"
     failure["code"] = "RATE_LIMITED"

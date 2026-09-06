@@ -8,8 +8,9 @@ from darknetra.api.v1.schemas.search import SearchHit, SearchQuery, SearchResult
 from darknetra.auth.actor import Actor
 from darknetra.authz.deps import visible_case
 from darknetra.authz.permissions import Permission, permitted, scope_permits
-from darknetra.errors import Forbidden
+from darknetra.errors import Forbidden, Unavailable
 from darknetra.evidence.models import Derivative, Evidence
+from darknetra.rag import embed
 from darknetra.rag.expand import query_expansions
 from darknetra.rag.models import Chunk
 
@@ -23,7 +24,11 @@ def rrf(*rankings, constant=60):
 
 
 async def search(
-    session: AsyncSession, case_id: UUID, query: SearchQuery, actor: Actor | None = None
+    session: AsyncSession,
+    case_id: UUID,
+    query: SearchQuery,
+    actor: Actor | None = None,
+    settings=None,
 ) -> SearchResult:
     filters = query.filters
     if filters.include_quarantined:
@@ -77,7 +82,7 @@ async def search(
         .join(Evidence, and_(Evidence.id == Chunk.evidence_id, Evidence.case_id == Chunk.case_id))
         .where(*conditions, Chunk.tsv.op("@@")(tsquery))
         .order_by(score.desc(), Chunk.id)
-        .limit(query.k)
+        .limit(max(40, query.k))
     )
     rows = (await session.execute(stmt)).all()
     if not rows and len(query.query.split()) <= 3:
@@ -97,11 +102,71 @@ async def search(
                 ),
             )
             .order_by(similarity.desc(), Chunk.id)
-            .limit(query.k)
+            .limit(max(40, query.k))
         )
         rows = (await session.execute(stmt)).all()
+    mode_used = "lexical"
+    dense_available = False
+    if query.mode != "lexical":
+        model = await embed.load_embedder(settings)
+        if model.available:
+            compatible = [
+                *conditions,
+                Chunk.embedding.is_not(None),
+                Chunk.embedding_model == model.name,
+            ]
+            available = await session.scalar(
+                select(func.count())
+                .select_from(Chunk)
+                .join(
+                    Evidence,
+                    and_(Evidence.id == Chunk.evidence_id, Evidence.case_id == Chunk.case_id),
+                )
+                .where(*compatible)
+            )
+            total = await session.scalar(
+                select(func.count())
+                .select_from(Chunk)
+                .join(
+                    Evidence,
+                    and_(Evidence.id == Chunk.evidence_id, Evidence.case_id == Chunk.case_id),
+                )
+                .where(*conditions)
+            )
+            if available and available == total:
+                try:
+                    vector = (await embed.encode(settings, model, query.query, query=True))[0]
+                except Unavailable:
+                    pass
+                else:
+                    distance = Chunk.embedding.cosine_distance(vector)
+                    dense_rows = (
+                        await session.execute(
+                            select(Chunk, Evidence.code, (1 - distance).label("score"))
+                            .join(
+                                Evidence,
+                                and_(
+                                    Evidence.id == Chunk.evidence_id,
+                                    Evidence.case_id == Chunk.case_id,
+                                ),
+                            )
+                            .where(*compatible)
+                            .order_by(distance, Chunk.id)
+                            .limit(max(40, query.k))
+                        )
+                    ).all()
+                    dense_available = True
+                    mode_used = query.mode
+                    if query.mode == "semantic":
+                        rows = dense_rows
+                    else:
+                        scores = rrf([r[0].id for r in rows], [r[0].id for r in dense_rows])
+                        unique = {
+                            r[0].id: (r[0], r[1], scores[r[0].id]) for r in [*rows, *dense_rows]
+                        }
+                        rows = sorted(unique.values(), key=lambda r: (-r[2], str(r[0].id)))
     hits = []
-    for chunk, code, value in rows:
+    for chunk, code, value in rows[: query.k]:
         terms = [
             term for term in [query.query] + expansions if term.casefold() in chunk.text.casefold()
         ]
@@ -120,5 +185,5 @@ async def search(
             )
         )
     return SearchResult(
-        hits=hits, mode_used="lexical", dense_available=False, expansions=expansions
+        hits=hits, mode_used=mode_used, dense_available=dense_available, expansions=expansions
     )

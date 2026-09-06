@@ -31,7 +31,8 @@ class OllamaHarness:
         specs = [
             spec
             for spec in for_role(ctx.role)
-            if spec.lane == Lane.EVIDENCE or spec.name == "delegate_task"
+            if (spec.lane == Lane.EVIDENCE or spec.name == "delegate_task")
+            and spec.name not in ctx.disabled_tools
         ]
         names = {spec.name for spec in specs}
         try:

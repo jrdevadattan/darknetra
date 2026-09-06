@@ -29,8 +29,8 @@ This is a working local backend baseline across M0–M6. It does **not** satisfy
 ## Chat architecture
 
 The user's Codex-style workspace direction is recorded in `reuse-integrations.md`:
-case projects and case membership already exist; private normal chats and installable
-plugin management still need implementation. The agent visibility increment now
+case projects, case membership and private normal chats exist. Reviewed bundled
+plugin controls exist; arbitrary third-party installation remains future work. The agent visibility increment now
 supports actual bounded specialist execution through the registered `delegate_task`,
 with shared budgets/cancellation and persisted activity inside the parent run.
 
@@ -58,12 +58,16 @@ with shared budgets/cancellation and persisted activity inside the parent run.
   Report: `backend/evals/out/activity-http-20260906.json`. The diagnostic thread is
   closed with its history retained. Model-driven delegation was exercised with test
   harnesses against PostgreSQL; no live model credentials or model calls were used.
-- Independently resumable or parallel child jobs, UI implementation, installable plugins,
-  semantic RAG and isolated Tor monitoring remain separate work.
+- Independently resumable or parallel child jobs, UI implementation, arbitrary plugin
+  installation and isolated Tor monitoring remain separate work. The later completion
+  increment adds semantic/hybrid retrieval mechanics and private chats.
 
 The application owns the run lifecycle; it has no LangChain or LangGraph dependency. A provider adapter receives bounded conversation context and calls the same registered tools as the other adapters. PostgreSQL records messages, tool results and SSE events; the claim checker verifies every assistant answer. Models cannot confirm findings or bypass capture/policy through built-in shell or web tools.
 
-The running demo uses deterministic evidence quotations with zero model usage. Claude and Ollama integrations are present but have not been validated with live credentials/model weights. NVIDIA NIM would use an additional OpenAI-compatible adapter; that adapter is not part of this build.
+The running demo uses deterministic evidence quotations with zero model usage. Claude,
+NIM and Ollama integrations are present; live acceptance requires configured
+credentials/model weights. The NIM adapter is now implemented and tested with mocked
+responses, including budget and malformed-usage cases.
 
 ## Verification record — 6 September 2026
 
@@ -78,9 +82,57 @@ The running demo uses deterministic evidence quotations with zero model usage. C
 - The full generated 16-item fixture passed a real PostgreSQL/ASGI integration test: the planted A/A_CHAT pair is STRONG, the A/B shared-escrow decoy is WEAK, and candidates remain PENDING until human review. Scoring weights were not relaxed.
 - Review found and fixed six issues: domestic phone report redaction, Claude history, chat attachments, entity visibility for unavailable evidence, expired-evidence reprocessing, and interrupted ingestion recovery. A bounded rereview found no remaining P1/P2 issues in those six paths.
 - Additional regressions cover response transaction completion before audit insertion, context-sensitive replay, pinned findings, and background authorization revocation including cached tool calls.
-- GitHub Actions is configured; no remote CI execution or production deployment has been performed.
+- This earlier baseline included GitHub Actions. At the user's later request, workflows
+  were removed from main/dev; production retains only its production pipeline. This
+  completion increment is locally verified and has not been deployed to production.
 
 ## Remaining acceptance work
+
+### Core completion verification — 6 September 2026
+
+The completion increment passed **373 tests** on fresh database
+`darknetra_test_reuse_20260906_092632` in 195.77 seconds. Ruff lint/format and
+strict mypy on 26 tools/capture/policy files passed. Migration
+`0003_workspace_completion` applied to both the test and local Docker databases,
+bringing the schema to 47 tables. OpenAPI matches the application at 87 paths.
+
+The rebuilt Docker API passed authenticated HTTP checks for the 11-plugin catalog,
+case digest, honest semantic-to-lexical fallback, private chat provider unavailability,
+private SSE resume and administrator isolation. A fresh deterministic case run exposed
+6 graph nodes, 5 edges and 17 activity events, with complete zero-cost usage and no
+duplicate SSE events after resume. These checks used synthetic data and no live model.
+
+The follow-up audit adds Office/PDF provenance, monitoring attempt recovery, current
+digest counts and consistent evidence line numbering.
+
+### Final completion gate — 6 September 2026
+
+- Fresh database `darknetra_test_reuse_20260906_141057` migrated through 0003;
+  **388 tests passed in 378.75 seconds**. Ruff lint passed, formatting checked 258 files,
+  and strict mypy passed on 26 tools/capture/policy files. Warnings: two dependency
+  deprecations and the intentionally malformed duplicate-ZIP fixture.
+- OpenAPI regenerated and matched 87 paths. No migration after 0003 was required.
+- Docker image `darknetra-backend:local` rebuilt and API restarted. Checksums of the
+  running Office parser, monitor runner/principal and evidence reader match the
+  verified local files. The optional heavyweight embedding build remains untested.
+- Authenticated HTTP verified DOCX text extraction, original-hash preservation,
+  two persisted successful monitoring attempts and zero duplicate hits on the second
+  attempt. The synthetic diagnostic cases were closed with history retained. The first
+  diagnostic's cleanup sent `rationale` instead of the contract's `reason`; this script
+  error was corrected and the complete rerun passed.
+- Private chat unavailability/isolation, plugins, digest, explicit lexical fallback,
+  database readiness and private SSE resume passed again. A fresh case run exposed
+  6 execution nodes, 5 edges, 17 activity events, complete zero-cost usage and SSE resume.
+  Reports are local ignored outputs under `backend/evals/out/`.
+- Independent monitoring review found a stale authority-denial item snapshot; scoped
+  locking/reload and a regression test fixed it. Scoped rereview passed. Digest version
+  selection and evidence line fixes also passed independent review. Office review
+  corrections cover source order, whitespace, bounds and exact line provenance.
+- No live model, trained extraction model, sanctions dataset or production deployment
+  is represented by these results. Main/dev retain no CI/CD workflows; production code
+  remains on its separate branch with only the production pipeline.
+
+### Earlier reuse and live-source acceptance
 
 The M5 reuse increment adds five registered tools (28 total): Robin index search,
 surface SERP search, RSS/Atom reading, Trafilatura page extraction and Agent Reach's
@@ -110,10 +162,17 @@ live search availability. Agent Reach's installed CLI reports 1.5.0 as current;
 cookie/login channels, Exa/mcporter and arbitrary upstream executables are not exposed
 to the case agent.
 
-- Dense embeddings/hybrid search, NER, OCR/transcription and trained GNN assets are absent. The baseline uses NullEmbedder/lexical retrieval and explicit unavailable results. It does not fabricate scores, clean sanctions screens or model inference.
-- Live Claude/Ollama calls, provider quality/budget evaluations, SDK session resume, compressed long-thread summaries and NVIDIA NIM integration remain unverified or unimplemented. The provided short lexical-query evaluation is not a natural-language holdout benchmark or the planned promptfoo suite.
+- Dense/hybrid code is now implemented; local embedding weights, NER, OCR/transcription
+  and trained GNN assets remain absent. Missing weights use explicit lexical fallback.
+  No scores, clean sanctions screens or model inference are fabricated.
+- Live Claude/NIM/Ollama calls, provider quality evaluations and SDK session resume
+  remain unverified. NIM, budget regressions and bounded extractive thread memory are
+  implemented. Lexical fixtures and synthetic vectors do not establish natural-language
+  quality or the planned promptfoo holdout suite.
 - Isolated Tor collection, unsupported Telegram/identity providers and sanctions-feed ingestion remain unavailable or policy-denied. Live checks used benign public software documentation, feeds and index queries, not investigative targets.
-- Parsing/extraction does not cover every planned format, PDF page mapping, language/script tagging, fuzzy/transliteration matching or the full precedence pipeline.
+- Parsing now includes passive DOCX/XLSX/PPTX text and PDF page mapping. Visual layout,
+  language/script tagging, fuzzy/transliteration matching and the full precedence
+  pipeline remain incomplete. Cached spreadsheet values are not recalculated formulas.
 - Verified image-to-author ownership, normalized price/unit correlation and near-duplicate family clustering are not implemented. No image ownership is inferred merely to increase a synthetic score.
 - Optional model-assisted monitoring triage/report narratives are not enabled. PDF uses an installed Unicode font when available, with an escaped fallback; Markdown/HTML preserve UTF-8. Retention preserves physical originals and derivatives.
 - Full scenario-matrix coverage, coverage percentage targets, large-corpus performance and production hardening are not established by the current tests. Use one API process per database because jobs/scheduling are in-process.

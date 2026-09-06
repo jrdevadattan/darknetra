@@ -39,8 +39,14 @@ async def ready(request: Request, response: Response):
         checks["vault"] = HealthCheck(status="ok")
     except OSError:
         checks["vault"] = HealthCheck(status="failed", message="Vault is not writable")
+    from darknetra.rag.embed import load_embedder
+
+    embedder = await load_embedder(request.app.state.settings)
     checks["embedding"] = HealthCheck(
-        status="degraded", message="Lexical retrieval available; embedding model is not loaded"
+        status="ok" if embedder.available else "degraded",
+        message="Local embedding model loaded; per-case index availability is returned by search"
+        if embedder.available
+        else "Lexical retrieval available; local embedding model unavailable",
     )
     mode = request.app.state.settings.harness_mode
     checks["harness"] = HealthCheck(

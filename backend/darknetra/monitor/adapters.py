@@ -124,7 +124,11 @@ def arguments(source: str, item) -> dict:
 async def collect(session, case, item, source, ctx) -> list[Hit]:
     if source == "evidence":
         return await local_hits(session, case, item, ctx.settings)
-    result = await invoke(ctx, source, arguments(source, item))
+    tool = {"web_search": "surface_search", "onion_search": "robin_search"}.get(source, source)
+    args = arguments(source, item)
+    if tool == "surface_search" and getattr(ctx.settings, "surface_search_searxng_url", None):
+        args["provider"] = "searxng"
+    result = await invoke(ctx, tool, args)
     if not result.ok:
         error = result.error or {}
         raise ToolError(
@@ -133,6 +137,44 @@ async def collect(session, case, item, source, ctx) -> list[Hit]:
             error.get("detail"),
         )
     data = result.data or {}
+    if tool in {"surface_search", "robin_search"}:
+        if result.truncated or not isinstance(data.get("hits"), list):
+            raise ToolError("UNAVAILABLE", "Parsed search results are incomplete")
+        # Index entries are observations about an index, never proof of target content.
+        from urllib.parse import urlsplit
+
+        hits = []
+        for entry in data.get("hits", []):
+            excerpt = (entry.get("title", "") + "\n" + entry.get("excerpt", ""))[:1200]
+            if not any(normalize(v) in normalize(excerpt) for v in item.variants if v):
+                continue
+            if not entry.get("evidence_id") or not entry.get("url"):
+                raise ToolError("UNAVAILABLE", "Search entry lacks capture provenance")
+            evidence = await get_evidence(session, case.id, entry["evidence_id"])
+            if evidence.status not in {"READY", "PARTIAL"}:
+                continue
+            # All entries from one search index share a family; target hostnames do not
+            # manufacture independent corroboration when target pages were never captured.
+            capture_locator = (
+                FieldCipher(ctx.settings.field_key).decrypt(evidence.locator_enc, str(case.id))
+                if evidence.locator_enc
+                else tool
+            )
+            family = hashlib.sha256(
+                ("index:" + (urlsplit(capture_locator).hostname or tool)).encode()
+            ).hexdigest()
+            hits.append(
+                Hit(
+                    evidence.id,
+                    evidence.code,
+                    "Index entry only: " + excerpt,
+                    evidence.source_class,
+                    entry["url"],
+                    hashlib.sha256(excerpt.encode()).hexdigest(),
+                    family,
+                )
+            )
+        return hits
     if not data.get("evidence_id") or data.get("quarantined"):
         return []
     evidence = await get_evidence(session, case.id, data["evidence_id"])

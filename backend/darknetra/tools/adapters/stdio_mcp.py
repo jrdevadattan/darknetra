@@ -101,7 +101,7 @@ async def create_server(
                     }
                 )
                 actor = await current_actor(request, db)
-                _, role = await visible_case(db, actor, case_id)
+                case, role = await visible_case(db, actor, case_id)
                 for permission in (Permission.EVIDENCE_VIEW, Permission.THREAD_RUN):
                     if not permitted(actor.global_role, role, permission) or not scope_permits(
                         actor.scopes, permission
@@ -115,7 +115,20 @@ async def create_server(
                 if operation != "tools.call":
                     await record(db, actor=actor, case_id=case_id, action="mcp." + operation)
                 await db.commit()
-                return ToolContext(case_id, actor, factory, effective, role=AgentRole.CASE_LEAD)
+                from darknetra.api.v1.schemas.cases import SourcePolicy
+                from darknetra.plugins.catalog import disabled_tool_names
+
+                disabled = await disabled_tool_names(
+                    db, SourcePolicy.model_validate(case.source_policy)
+                )
+                return ToolContext(
+                    case_id,
+                    actor,
+                    factory,
+                    effective,
+                    role=AgentRole.CASE_LEAD,
+                    disabled_tools=disabled,
+                )
         except (AppError, ToolError) as exc:
             # Denials before invoke have no case disclosure and are still audited.
             async with factory() as db:
@@ -134,7 +147,7 @@ async def create_server(
         _context: ServerRequestContext[None], _params: types.PaginatedRequestParams | None
     ) -> types.ListToolsResult:
         try:
-            await authorized_context("tools.list")
+            ctx = await authorized_context("tools.list")
         except (AppError, ToolError) as exc:
             raise MCPError(
                 -32001 if exc.code == "UNAUTHENTICATED" else -32000, exc.message, {"code": exc.code}
@@ -156,6 +169,7 @@ async def create_server(
                     ),
                 )
                 for spec in for_role(AgentRole.CASE_LEAD)
+                if spec.name not in ctx.disabled_tools
             ]
         )
 

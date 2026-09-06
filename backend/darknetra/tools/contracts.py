@@ -70,6 +70,7 @@ class ToolContext:
     transport: str = "internal"
     delegation: Any = None
     execution_budget: Any = None
+    disabled_tools: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)

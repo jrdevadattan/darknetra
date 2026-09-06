@@ -4,13 +4,15 @@ COPY --from=uv /uv /usr/local/bin/uv
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 RUN groupadd --gid 10001 darknetra && useradd --uid 10001 --gid darknetra --create-home darknetra
 WORKDIR /app/backend
+ARG DARKNETRA_EMBEDDINGS=0
 COPY backend/pyproject.toml backend/uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN if [ "$DARKNETRA_EMBEDDINGS" = "1" ]; then uv sync --frozen --no-dev --no-install-project --extra embed; else uv sync --frozen --no-dev --no-install-project; fi
 COPY backend/ ./
 COPY data/ /app/data/
 COPY docs/ /app/docs/
 COPY third_party/ /app/third_party/
-RUN uv sync --frozen --no-dev && mkdir -p /var/lib/darknetra/vault /app/models/cache && chown -R darknetra:darknetra /var/lib/darknetra /app/models
+RUN if [ "$DARKNETRA_EMBEDDINGS" = "1" ]; then uv sync --frozen --no-dev --extra embed; else uv sync --frozen --no-dev; fi
+RUN mkdir -p /var/lib/darknetra/vault /app/models/cache && chown -R darknetra:darknetra /var/lib/darknetra /app/models
 ENV PATH="/app/backend/.venv/bin:$PATH" DARKNETRA_VAULT_PATH=/var/lib/darknetra/vault
 USER darknetra
 EXPOSE 8000

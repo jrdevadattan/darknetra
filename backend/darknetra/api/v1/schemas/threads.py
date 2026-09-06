@@ -19,7 +19,7 @@ from .common import (
 class ThreadCreate(Schema):
     title: str = Field(min_length=1, max_length=300)
     goal: str | None = None
-    harness: Literal["CLAUDE", "OFFLINE"] | None = None
+    harness: Literal["CLAUDE", "NIM", "OFFLINE"] | None = None
     budget_usd: float = Field(2.0, gt=0, le=1000)
 
 

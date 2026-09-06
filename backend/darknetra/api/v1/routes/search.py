@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from darknetra.api.v1.schemas.search import SearchQuery, SearchResult
@@ -16,7 +16,8 @@ router = APIRouter(tags=["search"])
 async def query_evidence(
     case_id: UUID,
     body: SearchQuery,
+    request: Request,
     access=Depends(require_case(Permission.EVIDENCE_VIEW)),
     db: AsyncSession = Depends(get_session, scope="function"),
 ):
-    return await search(db, case_id, body, actor=access[0])
+    return await search(db, case_id, body, actor=access[0], settings=request.app.state.settings)

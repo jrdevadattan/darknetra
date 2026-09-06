@@ -150,7 +150,7 @@ async def run_specialist(ctx: ToolContext, request: DelegateTaskInput) -> Delega
             ),
         )
         cost = Decimal("0")
-        usage_received = state.mode != "CLAUDE"
+        usage_received = state.mode not in {"CLAUDE", "NIM"}
         verified_text = ""
         verified_claims: list[Claim] = []
         buffered_text = ""
@@ -189,8 +189,11 @@ async def run_specialist(ctx: ToolContext, request: DelegateTaskInput) -> Delega
                 async for event in events:
                     kind = event.get("type")
                     if kind == "usage":
-                        usage_received = True
-                        amount = Decimal(str(event.get("cost_usd", 0)))
+                        reported_cost = event.get("cost_usd")
+                        usage_received |= bool(event.get("cost_complete", True))
+                        amount = (
+                            Decimal("0") if reported_cost is None else Decimal(str(reported_cost))
+                        )
                         if not amount.is_finite() or amount < 0:
                             raise ToolError("UNAVAILABLE", "Invalid provider usage")
                         cost += amount

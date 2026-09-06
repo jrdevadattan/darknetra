@@ -14,8 +14,9 @@ Case membership, case threads, persisted runs/events, tool policy, capture, lexi
 RAG with citations, watchlists and scheduling exist. The agent visibility increment
 now adds bounded one-level specialist execution through `delegate_task`, with durable
 activity records and a case-scoped execution snapshot. See `agent-visibility-plan.md`
-and root `frontend.md`. Semantic embeddings, independent personal chats and installable
-plugin management remain unimplemented. Native Agent/Task and arbitrary SDK plugins
+and root `frontend.md`. The completion increment adds local semantic/hybrid retrieval,
+private normal chats, NIM and reviewed bundled plugin controls; see `backend-audit.md`.
+Arbitrary third-party plugin installation remains future work. Native Agent/Task and arbitrary SDK plugins
 stay disabled; delegation goes through the case-authorized registry instead.
 
 Normal chats need their own owner-scoped data model and must not gain case tools or
@@ -45,11 +46,14 @@ the case switch; a clearnet index result does not establish current site availab
 
 ## Next platform milestones
 
-- M2: dense embedding job, model identity/version, hybrid ranking and retrieval evals.
+- M2: provision local embedding assets and measure natural-language retrieval quality;
+  indexing, model identity and hybrid ranking are implemented.
 - M3 follow-up: independently resumable/parallel child runs beyond the implemented
   sequential, bounded worker activity within a root run.
-- M1/M3 extension: private standalone chats, explicit attach/import into a case.
-- M5 extension: reviewed plugin manifests, version pins, case allowlists and health.
+- M1/M3 extension: explicit attach/import from private chats into a case; private chat
+  storage and execution are implemented with no implicit case access.
+- M5 extension: third-party sandboxed plugin installation and gateway lifecycle;
+  reviewed bundled manifests and case allowlists are implemented.
 - M6/M9: durable monitoring execution and isolated read-only Tor collection.
 
 These are separate acceptance milestones; this integration increment does not claim

@@ -29,17 +29,29 @@ class Settings(BaseSettings):
     max_zip_bytes: int = Field(500 * 1024 * 1024, gt=0)
     embedding_model: str = "BAAI/bge-m3"
     embedding_dim: Literal[1024] = 1024
+    embedding_backend: Literal["none", "sentence_transformers"] = "none"
+    embedding_model_path: Path | None = None
+    embedding_batch_size: int = Field(32, ge=1, le=256)
+    embedding_timeout_seconds: float = Field(60, gt=0, le=600)
     offline_mode: bool = False
     demo_mode: bool = False
     scheduler_enabled: bool = True
     triage_model_enabled: bool = False
     apify_telegram_actor: str | None = None
     monitor_interval_override: int | None = Field(None, gt=0)
-    harness_mode: Literal["auto", "offline", "deterministic"] = "auto"
+    harness_mode: Literal["auto", "offline", "deterministic", "nim"] = "auto"
     anthropic_api_key: SecretStr | None = None
     anthropic_api_key_backup: SecretStr | None = None
     case_lead_model: str = "claude-opus-5"
     worker_model: str = "claude-sonnet-5"
+    nim_base_url: str | None = None
+    nim_api_key: SecretStr | None = None
+    nim_model: str | None = None
+    nim_worker_model: str | None = None
+    nim_timeout_seconds: float = Field(120, gt=0, le=600)
+    nim_max_tokens: int = Field(4096, ge=1, le=65536)
+    nim_input_cost_per_million: float | None = Field(None, ge=0, allow_inf_nan=False)
+    nim_output_cost_per_million: float | None = Field(None, ge=0, allow_inf_nan=False)
     ollama_url: str = "http://127.0.0.1:11434"
     offline_model: str = "qwen3:8b"
     tavily_api_key: SecretStr | None = None
@@ -56,8 +68,15 @@ class Settings(BaseSettings):
         "migration_database_url",
         "test_database_url",
         "monitor_interval_override",
+        "embedding_model_path",
         "anthropic_api_key",
         "anthropic_api_key_backup",
+        "nim_base_url",
+        "nim_api_key",
+        "nim_model",
+        "nim_worker_model",
+        "nim_input_cost_per_million",
+        "nim_output_cost_per_million",
         "tavily_api_key",
         "chainalysis_api_key",
         "trongrid_api_key",

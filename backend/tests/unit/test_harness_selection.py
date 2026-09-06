@@ -11,6 +11,8 @@ from darknetra.config import Settings
 @pytest.mark.parametrize(
     ("mode", "offline", "key", "requested", "expected"),
     [
+        ("nim", False, None, None, "NIM"),
+        ("auto", False, None, "NIM", "NIM"),
         ("auto", False, "SYNTHETIC-not-a-real-key", None, "CLAUDE"),
         ("auto", False, None, None, "OFFLINE"),
         ("auto", True, "SYNTHETIC-not-a-real-key", None, "OFFLINE"),
@@ -31,5 +33,22 @@ def test_selection_does_not_require_global_claude_binary(
         harness_mode=mode,
         offline_mode=offline,
         anthropic_api_key=key,
+        nim_base_url="https://nim.test/v1" if expected == "NIM" else None,
+        nim_model="meta/model" if expected == "NIM" else None,
     )
     assert select_harness(settings, requested) == expected
+
+
+def test_nim_request_without_configuration_preserves_explicit_selection():
+    material = base64.b64encode(b"s" * 32).decode()
+    settings = Settings(
+        _env_file=None,
+        database_url="postgresql+psycopg://synthetic",
+        jwt_signing_key_b64=material,
+        field_key_b64=material,
+        harness_mode="auto",
+        offline_mode=False,
+        nim_base_url=None,
+        nim_model=None,
+    )
+    assert select_harness(settings, "NIM") == "NIM"

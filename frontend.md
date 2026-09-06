@@ -6,9 +6,9 @@ implemented in this increment.** Consume `docs/openapi.json`; this document exte
 
 ## Product layout
 
-The sidebar contains cases, case chats, monitoring and the tool catalogue. A normal
-chat area outside cases is a separate planned feature; the current backend requires
-a case for investigative chats. Sharing uses authenticated case membership, not a
+The sidebar contains cases, case chats, private normal chats, monitoring and plugins.
+Normal chats use `/chats`; investigative chats require a case. Private chats have
+no case tools, evidence access or delegation. Sharing uses authenticated case membership, not a
 public evidence URL. The case work area has a conversation and activity timeline,
 with an execution graph beside it. Selecting a graph node opens its activity history,
 status, tool metadata, duration and evidence references.
@@ -153,6 +153,46 @@ until it has conformance tests. [Official event semantics](https://docs.ag-ui.co
 - Case switching clears subscriptions/state; inaccessible cases return the same 404.
 - Evidence drawers use authorized APIs; no credentials, full tool arguments, raw
   provider envelopes or private reasoning enter browser activity payloads.
-- No frontend library, UI implementation or browser acceptance testing is claimed
-  by this backend increment. Private normal chats, plugin installation management,
-  independently resumable/parallel workers and advanced Tor monitoring remain future work.
+- No frontend library, UI implementation or browser acceptance testing is claimed.
+  Arbitrary third-party plugin installation, independently resumable/parallel workers
+  and advanced Tor monitoring remain future work.
+
+## Backend completion additions
+
+All routes below are relative to `/api/v1` and use the existing authentication/CSRF rules.
+
+| Surface | Contract |
+|---|---|
+| Normal chats | `POST/GET /chats`, `GET/PATCH /chats/{chat_id}`. Private owner access only, including for administrators; other users receive 404. |
+| Normal chat execution | `POST/GET /chats/{chat_id}/messages`; `GET /chats/{chat_id}/runs/{run_id}`; `/events` with `Last-Event-ID`; `POST /cancel`. One active run per chat. |
+| Private answer status | Verification is `NOT_APPLICABLE`: the message is not an evidence-backed case finding. Persisted SSE exposes lifecycle/completed answers, not incremental token streaming or a fabricated subagent graph. |
+| Plugins | `GET /plugins`, `GET /cases/{case_id}/plugins`; `PATCH /admin/plugins/{plugin_id}` accepts `{enabled, manifest_hash}`. These are reviewed bundled integrations; UI must not claim arbitrary repository installation. |
+| Case plugin policy | Existing case PATCH `source_policy.enabled_plugins`: `null` permits the reviewed catalog, `[]` disables external plugins, a list permits only those IDs. Administrator global disable still wins. |
+| Provider choice | Case harness now includes `NIM`; private providers support AUTO, CLAUDE, NIM and OFFLINE. Missing provider/weights produce explicit unavailable results. |
+| Retrieval | `mode_used` reflects semantic/hybrid only when the loaded model and entire eligible index match. Otherwise render the returned lexical fallback and `dense_available=false`. |
+| Case summary card | `GET /cases/{case_id}/digest?since=...` returns counts, bounded open alerts and recent findings. `since` must be timezone aware. |
+| Thread memory | Existing `summary` now contains bounded historical user requests, refreshed every six assistant messages. Do not display it as confirmed evidence. |
+| Suspended monitoring | Show `state.suspension_reason`, failed runs and operational alerts when execution authority is revoked; per-source backoff lives in persisted item state. |
+
+HTTP provider outputs are bounded complete answers. A running state must not animate
+invented token activity. Costs are conservative reserves rounded upward to four decimal
+places; incomplete provider usage must retain its incomplete flag. See
+`docs/backend-audit.md` for activation requirements and remaining roadmap work.
+
+## Backend continuation: monitoring attempt visibility
+
+The existing `GET /cases/{case_id}/monitor/runs` response now includes `RUNNING`
+attempts while collection is in progress. Poll it for the monitoring panel; it is
+separate from chat-run SSE. Interrupted attempts finish as `ERROR` with an
+`errors.execution` entry and a public reason (`CANCELLED`, `RUN_FAILED`, or
+`APPLICATION_RESTART`). Watchlist item state carries the last outcome and persisted
+retry time. A retry creates a new attempt; earlier attempt history remains visible.
+This provides operational status, not private model reasoning. Collection remains
+single-process; externally queued or independently resumable workers are not implied.
+
+For evidence text, `line_offsets` and tool/context line numbers use LF boundaries.
+`page_map` contains zero-based, end-exclusive line intervals: PDF page order, XLSX
+sheet order, or PPTX slide order. Blank source units can have empty intervals. DOCX
+uses `null` because rendered page boundaries cannot be inferred from its paragraph XML.
+The map describes extracted text, not visual coordinates; cached spreadsheet values
+are not evidence that a formula was recalculated.

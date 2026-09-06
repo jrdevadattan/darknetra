@@ -3,7 +3,7 @@
 import asyncio
 import time
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -33,9 +33,16 @@ def select_harness(settings: Settings, requested: str | None = None) -> str:
         return "DETERMINISTIC"
     if settings.offline_mode or settings.harness_mode == "offline" or requested == "OFFLINE":
         return "OFFLINE"
+    nim_ready = bool(settings.nim_base_url and settings.nim_model)
+    if requested == "NIM":
+        return "NIM"
+    if settings.harness_mode == "nim":
+        return "NIM"
     if settings.anthropic_api_key:
         # The pinned SDK resolves its bundled runtime before searching PATH.
         return "CLAUDE"
+    if nim_ready:
+        return "NIM"
     return "OFFLINE"
 
 
@@ -48,6 +55,10 @@ def harness_for(name: str) -> Any:
         from darknetra.agent.harness_claude import ClaudeHarness
 
         return ClaudeHarness()
+    if name == "NIM":
+        from darknetra.agent.harness_nim import NimHarness
+
+        return NimHarness()
     from darknetra.agent.harness_offline import OllamaHarness
 
     return OllamaHarness()
@@ -345,6 +356,9 @@ async def save_assistant(ctx: ToolContext, text: str, *, revised: bool = False) 
         )
         session.add(message)
         await session.flush()
+        from darknetra.agent.summary import refresh_summary
+
+        await refresh_summary(session, ctx.case_id, ctx.thread_id)
         await append(
             session,
             ctx.case_id,
@@ -395,6 +409,7 @@ async def execute_run(
     replay_key = None
     delegation = None
     cost_complete = True
+    mode = ""
     activity_started = False
 
     async def root_activity(status: str, summary: str) -> None:
@@ -423,6 +438,13 @@ async def execute_run(
         async with factory() as session:
             run = await get_run(session, case_id, thread_id, run_id)
             thread = await get_thread(session, case_id, thread_id)
+            from darknetra.api.v1.schemas.cases import SourcePolicy
+            from darknetra.plugins.catalog import disabled_tool_names
+
+            case = await session.scalar(select(Case).where(Case.id == case_id))
+            ctx.disabled_tools = await disabled_tool_names(
+                session, SourcePolicy.model_validate(case.source_policy)
+            )
             if run.cancel_requested or run.status in TERMINAL:
                 terminal = "CANCELLED" if run.cancel_requested else run.status
                 return
@@ -451,6 +473,8 @@ async def execute_run(
             context, ctx.context_evidence_codes = await current_context(session, thread, run_id)
             if context:
                 history.append({"role": "user", "content": context})
+            if thread.summary:
+                history.append({"role": "user", "content": thread.summary})
             # A follow-up with the same words can mean something different after prior turns.
             replay_key = digest({"prompt": prompt, "goal": goal, "history": history})
             if settings.demo_mode:
@@ -503,7 +527,9 @@ async def execute_run(
                 raise ToolError("BUDGET_EXCEEDED", "Case lead budget exhausted")
             # Claude reports its aggregate usage at ResultMessage; interruption before
             # that point leaves known charges incomplete, never an invented zero bill.
-            cost_complete = mode != "CLAUDE"
+            prior_complete = cost_complete
+            usage_received = mode not in {"CLAUDE", "NIM"}
+            cost_complete = usage_received and prior_complete
             async with managed_events(
                 harness.run(
                     ctx,
@@ -529,13 +555,24 @@ async def execute_run(
                         partial += event.get("data", {}).get("text", "")
                         await emit(event)
                     elif kind == "usage":
-                        amount = Decimal(str(event.get("cost_usd", 0)))
+                        if not usage_received:
+                            cost_complete = prior_complete
+                        usage_received = True
+                        reported_cost = event.get("cost_usd")
+                        if reported_cost is None:
+                            cost_complete = False
+                            amount = Decimal("0")
+                        else:
+                            amount = Decimal(str(reported_cost))
                         if not amount.is_finite() or amount < 0:
                             raise ToolError("UNAVAILABLE", "Invalid provider usage")
                         cost += amount
-                        tokens_in += int(event.get("tokens_in", 0))
-                        tokens_out += int(event.get("tokens_out", 0))
-                        cost_complete = True
+                        counts = [event.get("tokens_in", 0), event.get("tokens_out", 0)]
+                        if any(type(n) is not int or n < 0 for n in counts):
+                            raise ToolError("UNAVAILABLE", "Invalid provider token usage")
+                        tokens_in += counts[0]
+                        tokens_out += counts[1]
+                        cost_complete &= bool(event.get("cost_complete", True))
                         if cost > delegation.parent_budget:
                             raise ToolError("BUDGET_EXCEEDED", "Case lead budget exhausted")
                     else:
@@ -587,6 +624,9 @@ async def execute_run(
             tokens_in += delegation.tokens_in
             tokens_out += delegation.tokens_out
             cost_complete &= delegation.cost_complete
+        if terminal != "DONE" and mode in {"CLAUDE", "NIM"}:
+            cost_complete = False
+        cost = cost.quantize(Decimal("0.0001"), rounding=ROUND_CEILING)
         if activity_started:
             await root_activity(
                 {"DONE": "completed", "CANCELLED": "cancelled"}.get(terminal, "failed"),

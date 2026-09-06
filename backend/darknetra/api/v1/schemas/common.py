@@ -76,7 +76,7 @@ DecisionValue = Literal["ACCEPT", "REJECT", "DEFER", "REQUEST_MORE_EVIDENCE"]
 FindingKind = Literal["OBSERVED", "MODEL", "CANDIDATE", "CONFIRMED"]
 FindingStatus = Literal["DRAFT", "PROMOTED", "SUPERSEDED"]
 ThreadStatus = Literal["OPEN", "CLOSED"]
-Harness = Literal["CLAUDE", "OFFLINE", "FAKE", "DETERMINISTIC"]
+Harness = Literal["CLAUDE", "NIM", "OFFLINE", "FAKE", "DETERMINISTIC"]
 MessageRole = Literal["USER", "ASSISTANT", "SYSTEM", "TOOL"]
 ItemType = Literal[
     "KEYWORD",

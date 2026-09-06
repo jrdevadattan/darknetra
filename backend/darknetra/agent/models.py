@@ -67,7 +67,7 @@ class Thread(Base):
         UniqueConstraint("case_id", "id"),
         CheckConstraint("status IN ('OPEN', 'CLOSED')", name="status"),
         CheckConstraint(
-            "harness IN ('CLAUDE', 'OFFLINE', 'FAKE', 'DETERMINISTIC')", name="harness"
+            "harness IN ('CLAUDE', 'NIM', 'OFFLINE', 'FAKE', 'DETERMINISTIC')", name="harness"
         ),
     )
 
@@ -107,7 +107,7 @@ class Run(Base):
             "status IN ('QUEUED', 'RUNNING', 'DONE', 'ERROR', 'CANCELLED', 'BUDGET')", name="status"
         ),
         CheckConstraint(
-            "harness IN ('CLAUDE', 'OFFLINE', 'FAKE', 'DETERMINISTIC')", name="harness"
+            "harness IN ('CLAUDE', 'NIM', 'OFFLINE', 'FAKE', 'DETERMINISTIC')", name="harness"
         ),
         ForeignKeyConstraint(
             ["case_id", "replayed_from_run_id"],
@@ -160,7 +160,7 @@ class Message(Base):
         ),
         CheckConstraint("role IN ('USER', 'ASSISTANT', 'SYSTEM', 'TOOL')", name="role"),
         CheckConstraint(
-            "harness IN ('CLAUDE', 'OFFLINE', 'FAKE', 'DETERMINISTIC')", name="harness"
+            "harness IN ('CLAUDE', 'NIM', 'OFFLINE', 'FAKE', 'DETERMINISTIC')", name="harness"
         ),
     )
 
@@ -253,7 +253,7 @@ class ReplayEntry(Base):
         UniqueConstraint("case_id", "id"),
         UniqueConstraint("case_id", "question_norm", "harness"),
         CheckConstraint(
-            "harness IN ('CLAUDE', 'OFFLINE', 'FAKE', 'DETERMINISTIC')", name="harness"
+            "harness IN ('CLAUDE', 'NIM', 'OFFLINE', 'FAKE', 'DETERMINISTIC')", name="harness"
         ),
         ForeignKeyConstraint(
             ["case_id", "run_id"], ["runs.case_id", "runs.id"], name="fk_agent_run_id_runs"
