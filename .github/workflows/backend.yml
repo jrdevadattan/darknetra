@@ -1,0 +1,29 @@
+name: Backend
+on: [push, pull_request]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.0'
+          python-version: '3.12'
+          enable-cache: true
+      - run: uv sync --project backend --frozen
+      - run: uv run --project backend python scripts/setup.py
+      - run: docker compose --env-file .env -f infra/docker-compose.yml up -d --wait postgres
+      - run: uv run --project backend python scripts/manage.py test
+      - run: uv run --project backend python scripts/manage.py check-openapi
+      - name: Check backwards compatibility
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if git cat-file -e "$BASE_SHA:docs/openapi.json"; then
+            git show "$BASE_SHA:docs/openapi.json" > /tmp/darknetra-before.json
+            uv run --project backend python scripts/check_openapi_compat.py /tmp/darknetra-before.json docs/openapi.json
+          fi
+      - run: docker compose --env-file .env -f infra/docker-compose.yml build api

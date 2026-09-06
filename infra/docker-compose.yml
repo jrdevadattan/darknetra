@@ -1,0 +1,90 @@
+name: darknetra
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    command: ["postgres", "-c", "shared_buffers=512MB", "-c", "maintenance_work_mem=256MB", "-c", "max_connections=100"]
+    environment:
+      POSTGRES_USER: darknetra_migrate
+      POSTGRES_PASSWORD: ${DARKNETRA_DB_MIGRATE_PASSWORD:?Run the setup command first}
+      POSTGRES_DB: darknetra
+      DARKNETRA_DB_APP_PASSWORD: ${DARKNETRA_DB_APP_PASSWORD:?Run the setup command first}
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init.sh:/docker-entrypoint-initdb.d/10-darknetra.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U darknetra_migrate -d darknetra"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+  migrate:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    image: darknetra-backend:local
+    env_file: ../.env
+    environment:
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra_migrate:${DARKNETRA_DB_MIGRATE_PASSWORD}@postgres:5432/darknetra
+      DARKNETRA_MIGRATION_DATABASE_URL: postgresql+psycopg://darknetra_migrate:${DARKNETRA_DB_MIGRATE_PASSWORD}@postgres:5432/darknetra
+    command: ["python", "scripts/migrate.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+  api:
+    image: darknetra-backend:local
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    env_file: ../.env
+    environment:
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra_app:${DARKNETRA_DB_APP_PASSWORD}@postgres:5432/darknetra
+      DARKNETRA_MIGRATION_DATABASE_URL: ""
+      DARKNETRA_VAULT_PATH: /var/lib/darknetra/vault
+      DARKNETRA_OLLAMA_URL: http://ollama:11434
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - vault:/var/lib/darknetra/vault
+      - models:/app/models/cache
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+  mcp:
+    image: darknetra-backend:local
+    profiles: [mcp]
+    env_file: ../.env
+    environment:
+      DARKNETRA_DATABASE_URL: postgresql+psycopg://darknetra_app:${DARKNETRA_DB_APP_PASSWORD}@postgres:5432/darknetra
+      DARKNETRA_MIGRATION_DATABASE_URL: ""
+      DARKNETRA_VAULT_PATH: /var/lib/darknetra/vault
+      DARKNETRA_MCP_CASE_ID: ${DARKNETRA_MCP_CASE_ID:-}
+      DARKNETRA_MCP_API_TOKEN: ${DARKNETRA_MCP_API_TOKEN:-}
+    command: ["python", "-m", "darknetra.tools.adapters.stdio_mcp"]
+    stdin_open: true
+    tty: false
+    volumes:
+      - vault:/var/lib/darknetra/vault
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    restart: "no"
+  ollama:
+    image: ollama/ollama:latest
+    profiles: [offline]
+    volumes:
+      - ollama:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+    restart: unless-stopped
+volumes:
+  pgdata:
+  vault:
+  models:
+  ollama:

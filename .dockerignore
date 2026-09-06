@@ -1,0 +1,14 @@
+.git
+.env
+.env.*
+.superpowers
+.cache
+backend/.venv
+backend/**/__pycache__
+backend/.pytest_cache
+backend/.ruff_cache
+backend/.mypy_cache
+data/synthetic/out
+vault
+backups
+*.log
