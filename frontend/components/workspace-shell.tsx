@@ -7,6 +7,7 @@ import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react
 import { ApiError, api } from "@/lib/api";
 import type { Case, Chat, ExecutionSnapshot, Thread, ThreadMessage, User } from "@/lib/types";
 import { ThemeToggle } from "./theme-toggle";
+import { CasePanels } from "./case-panels";
 
 type Notice = { tone: "error" | "warning" | "info"; title: string; body: string } | null;
 
@@ -84,6 +85,21 @@ export function WorkspaceShell({ initialCaseId }: { initialCaseId?: string }) {
   useEffect(() => { if (initialCaseId) setCaseId(initialCaseId); }, [initialCaseId]);
   useEffect(() => { if (!caseId) { setThreads([]); setThreadId(null); return; } void api.threads(caseId).then((page) => { setThreads(page.items); setThreadId((current) => current && page.items.some((thread) => thread.id === current) ? current : page.items[0]?.id ?? null); }).catch((error) => setNotice(noticeFor(error))); }, [caseId]);
   useEffect(() => { if (!caseId || !threadId) { setMessages([]); setSnapshot(null); return; } void api.messages(caseId, threadId).then((page) => setMessages(page.items)).catch((error) => setNotice(noticeFor(error))); }, [caseId, threadId]);
+  useEffect(() => {
+    if (!caseId || !threadId || !snapshot || (snapshot.run_status !== "RUNNING" && snapshot.run_status !== "QUEUED")) return;
+    const controller = new AbortController();
+    void api.subscribeRunEvents(caseId, threadId, snapshot.run_id, snapshot.cursor, (frame) => {
+      const payload = frame.data as Record<string, unknown>;
+      if (frame.event === "activity.updated" && payload.id) {
+        setSnapshot((current) => current ? { ...current, cursor: Number(frame.id ?? current.cursor), nodes: current.nodes.some((node) => node.id === payload.id) ? current.nodes.map((node) => node.id === payload.id ? { ...node, ...payload } : node) : [...current.nodes, payload as never] } : current);
+      }
+      if (frame.event === "run.finished" || frame.event === "run.cancelled" || frame.event === "run.error") {
+        void api.execution(caseId, threadId, snapshot.run_id).then(setSnapshot).catch((error) => setNotice(noticeFor(error)));
+        void api.messages(caseId, threadId).then((page) => setMessages(page.items)).catch(() => undefined);
+      }
+    }, controller.signal).catch((error) => { if (!controller.signal.aborted) setNotice(noticeFor(error)); });
+    return () => controller.abort();
+  }, [caseId, threadId, snapshot?.run_id, snapshot?.run_status]);
 
   const send = async (content: string) => {
     if (!caseId || !threadId) return; setPending(true); setNotice(null);
@@ -104,7 +120,7 @@ export function WorkspaceShell({ initialCaseId }: { initialCaseId?: string }) {
         <Separator /><Stack gap="1"><Text fontSize="xs" textTransform="uppercase" color="fg.muted" fontWeight="bold">Private chats</Text>{chats.length === 0 && <Text fontSize="sm" color="fg.muted">No private chats.</Text>}{chats.slice(0, 4).map((chat) => <HStack key={chat.id} px="2" py="1" color="fg.muted"><Bot size={15} /><Text fontSize="sm" truncate>{chat.title}</Text></HStack>)}</Stack>
         <Box flex="1" /><Button variant="outline" colorPalette="gray" justifyContent="start" onClick={() => void api.logout().finally(() => router.replace("/auth/login"))}><LogOut size={16} /> Sign out</Button>
       </Stack></Box>
-      <ChatPane thread={selectedThread} messages={messages} pending={pending} onSend={send} /><ActivityPanel snapshot={snapshot} onCancel={cancel} />
+      <Flex flex="1" minW="0" direction="column"><ChatPane thread={selectedThread} messages={messages} pending={pending} onSend={send} /><CasePanels caseId={caseId} /></Flex><ActivityPanel snapshot={snapshot} onCancel={cancel} />
     </Flex>}
   </Flex>;
 }

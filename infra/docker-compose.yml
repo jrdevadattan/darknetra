@@ -1,5 +1,21 @@
 name: darknetra
 services:
+  web:
+    build:
+      context: ..
+      dockerfile: frontend/Dockerfile
+      args:
+        DARKNETRA_API_BASE_URL: http://api:8000
+    image: darknetra-frontend:local
+    environment:
+      NODE_ENV: production
+      DARKNETRA_API_BASE_URL: http://api:8000
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
   postgres:
     image: pgvector/pgvector:pg16
     command: ["postgres", "-c", "shared_buffers=512MB", "-c", "maintenance_work_mem=256MB", "-c", "max_connections=100"]

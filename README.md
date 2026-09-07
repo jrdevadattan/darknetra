@@ -71,3 +71,16 @@ uv run --project backend python scripts/restore.py backups/<backup-name> --datab
 Backups contain a PostgreSQL custom dump, the immutable vault and a SHA-256 manifest. Restore verifies the backup, creates a fresh database and a new vault directory, then rehashes every referenced original, derivative and report artifact. Existing targets are refused. Back up the encryption/signing keys separately in an appropriate secret store: the backup intentionally does not copy `.env`.
 
 Keep backups on storage appropriate for the case data. The scripts preserve all backup versions; choose a retention schedule for deployment. The Compose stack is a local development installation bound to loopback, not a production deployment.
+
+## Frontend workspace
+
+The Chakra UI application lives in `frontend/` and runs on port 3000. It uses the
+same-origin `/api` rewrite so browser requests retain the backend session and CSRF
+cookies. Start it locally with `npm ci` followed by `npm run dev`; or start the
+full stack with `docker compose --env-file .env -f infra/docker-compose.yml up -d`.
+The web image builds with the backend URL set to `http://api:8000` inside Compose.
+
+The UI keeps case conversations and private chats separate, shows evidence codes
+on verified claims, and renders backend execution activity as it is recorded. Model
+and plugin availability are displayed from the API catalogue; the client does not
+pretend that an unconfigured Claude, NVIDIA NIM or Ollama runtime is available.
