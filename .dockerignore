@@ -12,3 +12,7 @@ data/synthetic/out
 vault
 backups
 *.log
+frontend/node_modules
+frontend/.next
+frontend/AGENTS.md
+frontend/CLAUDE.md

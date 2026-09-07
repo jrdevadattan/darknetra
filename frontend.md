@@ -1,7 +1,7 @@
 # DARKNETRA frontend: case workspace and agent activity
 
-Backend integration contract and repository research, 6 September 2026. **No UI is
-implemented in this increment.** Consume `docs/openapi.json`; this document extends
+Backend integration contract and repository research, 8 September 2026. The Chakra UI
+frontend is implemented in `frontend/` and consumes `docs/openapi.json`; this document extends
 `docs/plan/15-frontend-track.md` with the requested agent activity workspace.
 
 ## Product layout
@@ -143,9 +143,9 @@ not execution finished; `ToolCallResult` carries the result. `StateDelta` uses R
 boundaries and explicit custom invalidation events. Do not claim protocol support
 until it has conformance tests. [Official event semantics](https://docs.ag-ui.com/concepts/events).
 
-## Frontend acceptance checklist (future work)
+## Frontend acceptance checklist
 
-- Typed client generated from OpenAPI; one run-scoped reducer drives graph and timeline.
+- Typed contract-shaped client; one run-scoped activity stream drives the activity panel and timeline.
 - Reload/reconnect, repeated calls, denials, provider errors, cancellation, cache hits,
   replay and restart interruption behave consistently in both views.
 - Only actual delegated children appear; show current sequential execution honestly.
@@ -153,9 +153,11 @@ until it has conformance tests. [Official event semantics](https://docs.ag-ui.co
 - Case switching clears subscriptions/state; inaccessible cases return the same 404.
 - Evidence drawers use authorized APIs; no credentials, full tool arguments, raw
   provider envelopes or private reasoning enter browser activity payloads.
-- No frontend library, UI implementation or browser acceptance testing is claimed.
+- Chakra UI 3.37, theme toggle, login, case/private-chat separation, case creation,
+  thread creation, provider/budget choices, and API-backed case panels are implemented.
   Arbitrary third-party plugin installation, independently resumable/parallel workers
-  and advanced Tor monitoring remain future work.
+  and advanced Tor monitoring remain future work. UI checks cover the public login route,
+  Next production build, client contract tests, and live `/api/v1/health/live` proxy.
 
 ## Backend completion additions
 
