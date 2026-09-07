@@ -1,0 +1,6 @@
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+html, body { min-height: 100%; }
+body { margin: 0; background: #061626; color: #e8f1f5; font-family: Arial, Helvetica, sans-serif; }
+body::selection { background: #0f766e; color: white; }
+.light body { background: #f4f8fa; color: #102a3a; }
