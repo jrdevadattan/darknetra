@@ -78,6 +78,7 @@ export const api = {
   createWatchlistItem: (caseId: string, watchlistId: string, body: unknown) => request<Record<string, unknown>>(`/api/v1/cases/${caseId}/watchlists/${watchlistId}/items`, "POST", body),
   plugins: (caseId: string) => request<Record<string, unknown>>(`/api/v1/cases/${caseId}/plugins`),
   tools: () => request<Record<string, unknown>>("/api/v1/tools"),
+  monitoring: (caseId: string) => Promise.all([request<Record<string, unknown>>(`/api/v1/cases/${caseId}/watchlists`), request<Record<string, unknown>>(`/api/v1/cases/${caseId}/monitor/runs`)]),
   chats: () => request<Page<Chat>>("/api/v1/chats"),
   threads: (caseId: string) => request<Page<Thread>>(`/api/v1/cases/${caseId}/threads`),
   messages: (caseId: string, threadId: string) => request<Page<ThreadMessage>>(`/api/v1/cases/${caseId}/threads/${threadId}/messages`),
