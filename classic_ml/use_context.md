@@ -1,4 +1,27 @@
 # GraphSAGE Cryptocurrency Transaction Classifier
+## Model Specifications
+Model exists: True        
+Config exists: True                       
+Model configuration:                
+model: GraphSAGE
+feature_type: 94 local + 8 temporal graph features
+input_features: 102
+hidden_dim: 512
+dropout: 0.4
+learning_rate: 0.001
+weight_decay: 0.001
+loss: focal_loss
+gamma: 2.0
+threshold: 0.7166666666666667
+validation_f1: 0.8475073313782991
+test_f1: 0.581
+test_pr_auc: 0.4808
+test_accuracy: 0.9512
+Weights loaded successfully!
+Number of parameter tensors: 19
+Total parameters: 635908
+
+
 
 ## 1. Overview
 
