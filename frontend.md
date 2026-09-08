@@ -1,200 +1,93 @@
-# DARKNETRA frontend: case workspace and agent activity
+# DARKNETRA — AI Elements workspace
 
-Backend integration contract and repository research, 8 September 2026. The Chakra UI
-frontend is implemented in `frontend/` and consumes `docs/openapi.json`; this document extends
-`docs/plan/15-frontend-track.md` with the requested agent activity workspace.
+The frontend in `frontend/` was rebuilt with the official [AI Elements](https://elements.ai-sdk.dev/docs) registry components, React 19, Next.js 16, shadcn/Radix primitives, and Tailwind 4. It replaces the previous Chakra frontend. This document describes the implemented interface and the backend contract it uses.
 
-## Product layout
+## Interface
 
-The sidebar contains cases, case chats, private normal chats, monitoring and plugins.
-Normal chats use `/chats`; investigative chats require a case. Private chats have
-no case tools, evidence access or delegation. Sharing uses authenticated case membership, not a
-public evidence URL. The case work area has a conversation and activity timeline,
-with an execution graph beside it. Selecting a graph node opens its activity history,
-status, tool metadata, duration and evidence references.
+The graphite-and-sage workspace includes dark, light, and system themes with locally bundled Geist fonts. The sidebar separates shared cases and private chats. Case conversations have a collapsible activity panel with graph, chronological timeline, and recorded terminal output. Mobile navigation and activity drawers preserve access on narrow screens.
 
-Keep two distinct graphs: the **execution graph** shows who delegated or invoked
-what; the existing **case relationship graph** shows evidence, candidates and human
-decisions. Chat prose and graph animations cannot create either kind of fact.
-
-## How the agent chooses work
-
-The lead model sees its registered tool schemas and can call a tool directly or
-choose `delegate_task` with a specialist role and task. The backend authorizes every
-call. It is not an unconstrained decision to connect arbitrary MCP servers. The
-current Claude adapter presents the registry through the `darknetra` SDK MCP server;
-the standalone MCP adapter exposes the same tools to an authenticated case-bound
-client. Ollama uses function calls through the same invocation gate.
-
-Delegation is one level, with at most three specialists per root run and one active
-specialist at a time. The root run reserves a separate worker budget, shares a total
-tool/deadline cap, and cancellation propagates to awaited workers. Worker output is
-citation-checked before returning to the lead. Child activities persist under the
-root run; they are not independently resumable jobs or separate normal chats.
-Show actual child nodes only after receiving their backend records. Live provider
-behavior remains unverified without model credentials/weights; deterministic and
-test harness operation must be labelled accordingly.
-
-## Frontend data flow
-
-1. Create/read a case thread using the existing case APIs. Posting to
-   `/api/v1/cases/{case_id}/threads/{thread_id}/messages` returns a run ID.
-2. GET `/api/v1/cases/{case_id}/threads/{thread_id}/runs/{run_id}/execution`.
-   The snapshot supplies `schema_version`, `run_status`, `cursor`, `nodes`, `edges`,
-   chronological activity `events`, `truncated`, `cost_usd`, `cost_complete`, and
-   `replayed_from_run_id` (`cost_complete=null` means no completeness record).
-3. Subscribe to the existing `/events` SSE endpoint with `Last-Event-ID: {cursor}`.
-   Use a fetch-based SSE client when a custom header or service token is required;
-   browser EventSource cannot set arbitrary headers. Normal browser auth uses the
-   application's cookies; mutations also require its CSRF header and allowed origin.
-4. Apply each `activity.updated` by stable node `id`. Ignore duplicate or older
-   sequence numbers. Store event sequence per run, never across cases. A gap between
-   activity sequences can be normal: other SSE event types share the same sequence.
-5. Existing `run.started`, `run.step`, `message.delta`, `message.completed`,
-   `store.changed`, `run.error`, `run.cancelled`, and `run.finished` remain supported.
-   Avoid duplicate cards: `run.step.call_id` corresponds to the activity/tool-call ID.
-   Use verified `message.completed` for final claims; a delta is provisional text.
-6. On `store.changed`, refetch relevant case REST resources. Do not populate evidence
-   or findings from model prose. On terminal run state, settle active indicators;
-   refresh the snapshot to identify activities marked `interrupted` after a restart
-   or missing completion. `terminal_inferred=true` is not a successful tool result.
-7. To cancel, POST to the run's `/cancel` endpoint. The browser cannot assume the
-   request alone means every operation has stopped; reconcile terminal events.
-
-The snapshot locks the run row while reading its cursor and activity records. New
-events therefore replay after the returned cursor without a snapshot/subscription
-race. It returns at most 10,000 activity events. If `truncated=true`, show incomplete
-history explicitly; do not claim a complete graph. Older runs without these new
-events have only a root in `/execution`; separately GET `/runs/{run_id}` for their
-existing `tool_calls`. Do not invent phase histories for those calls.
-Replayed answers retain their source run ID and do not animate tools as newly run.
-
-## Activity contract and UI states
-
-Each update has `id`, `parent_id`, `kind` (`agent`, `tool`, `stage`), `label`, `status`,
-`phase`, `summary`, `seq`, and `at`. Optional fields include `agent_role`, `tool_name`,
-`integration_id`, `adapter_kind`, `transport`, `duration_ms`, `cached`, `error_code`,
-`evidence_ids` and `evidence_codes`. OpenAPI defines the precise types and defaults.
-
-States: `queued`, `running`, `completed`, `denied`, `failed`, `cancelled`,
-`interrupted`. Tool phases include `authorizing`, `executing`, `fetching`, `persisting`,
-`captured`, `parsing`, `cache_hit`, `complete`, `error`, `cancelled`. These are measured backend
-operations; providers do not necessarily expose their internal stages. Durations
-are observed, not fabricated percentages. Repeated calls to the same tool have
-different IDs; fetching/persisting/completion for one call reuse its ID.
-
-```mermaid
-flowchart LR
-  L[Case lead] --> D[Delegate task call]
-  D --> S[Evidence analyst]
-  S --> T[Search evidence call]
-  L --> R[Robin search call]
-```
-
-This is a conceptual example, not an actual executed run. Evidence chips on tool
-nodes open authorized evidence/context APIs. Do not add an evidence node without
-a real returned reference.
-
-**Thinking display:** show concise public operational summaries such as “Preparing
-response”, “Checking tool authorization”, “Specialist reviewing case evidence”, or
-“Persisting captured evidence”. Do not request, persist, or display raw private
-chain-of-thought, hidden reasoning blocks, signatures or SDK debug envelopes. Generic
-status text is not an evidentiary claim. A disconnected browser says “Reconnecting”,
-not “Agent stopped”; keep connection state separate from execution state.
-
-**Provider labels:** GET `/api/v1/tools` includes display names, integration identity,
-adapter kind, schemas, roles, supported invocation transports and health. This is a
-catalogue, not a case-specific authorization grant. `robin_search` currently uses an
-attributed local Robin parser and captured public Ahmia index. Its card can say
-“Robin search · via DARKNETRA MCP” when the event transport is `sdk_mcp`/`stdio_mcp`.
-Never say “Connecting to Robin MCP”: no separate Robin MCP server is configured.
-Similarly, installed, configured, unprobed, running, unavailable and rate-limited
-are distinct states. Show source denials explicitly; zero hits is not an outage.
-
-The final `run.finished.cost_complete` indicates whether all provider usage was
-reported. A cancellation can prevent a provider's final usage report; display
-incomplete cost instead of asserting a known zero. Model budgets are provider caps
-plus recorded usage, not a guaranteed final invoice.
-
-## Repositories to reuse
-
-Candidate versions were checked against primary sources; none are installed here.
-
-| Repository | Candidate / license | Integration decision |
-|---|---|---|
-| [xyflow / React Flow](https://github.com/xyflow/xyflow) | [12.11.6](https://github.com/xyflow/xyflow/releases/tag/%40xyflow/react%4012.11.6), MIT | Recommended execution graph: custom nodes, edges, pan/zoom. Render backend records; React Flow does not orchestrate agents. |
-| [assistant-ui](https://github.com/assistant-ui/assistant-ui) | [0.15.18](https://github.com/assistant-ui/assistant-ui/releases/tag/%40assistant-ui/react%400.15.18), MIT | Recommended chat primitives with [ExternalStoreRuntime](https://www.assistant-ui.com/docs/runtimes/custom/external-store). Adapt our messages and cancellation callbacks. |
-| [Vercel AI Elements](https://github.com/vercel/ai-elements) | Reviewed commit `6a9d5b1822ffb10bba4bd97175f01edd7d8651cd`, Apache-2.0 | Optional Tool/Agent/status card source reuse. Preserve license. Components do not make our stream compatible with AI SDK `useChat`. |
-| [CopilotKit](https://github.com/CopilotKit/CopilotKit) | [1.70.1](https://github.com/CopilotKit/CopilotKit/releases/tag/v1.70.1), MIT | Alternative if standard AG-UI interoperability is desired; requires a protocol adapter. Do not adopt a second runtime simply for cards. |
-| [AG-UI](https://github.com/ag-ui-protocol/ag-ui) | [2026-08-31 release](https://github.com/ag-ui-protocol/ag-ui/releases/tag/release/2026-08-31), MIT | Event protocol reference, not an orchestrator or graph component. Optional future adapter. |
-| [LangGraph Agent Chat UI](https://github.com/langchain-ai/agent-chat-ui) | MIT | Sidepanel reference. Expects a LangGraph server and messages state; not compatible with our API without adaptation. |
-| [LangGraph Supervisor](https://github.com/langchain-ai/langgraph-supervisor-py) | MIT | Supervisor-pattern reference. Upstream recommends direct tool-based supervisors for most use cases; retain the current audited registry approach. |
-
-Use React Flow directly with a read-only node/edge view and an accessible timeline.
-Disable node deletion, connection editing and persistence mutations. AI Elements'
-Canvas wrapper defaults to Delete/Backspace support, which is unsuitable for durable
-execution records. Retain Cytoscape for the separate evidence relationship graph.
-[React Flow custom nodes](https://reactflow.dev/learn/customization/custom-nodes),
-[AI Elements Canvas](https://elements.ai-sdk.dev/components/canvas).
-
-AG-UI is not a one-to-one event rename: `ToolCallEnd` means arguments finished,
-not execution finished; `ToolCallResult` carries the result. `StateDelta` uses RFC
-6902 patches, whereas our `store.changed` means refetch. An adapter needs message
-boundaries and explicit custom invalidation events. Do not claim protocol support
-until it has conformance tests. [Official event semantics](https://docs.ag-ui.com/concepts/events).
-
-## Frontend acceptance checklist
-
-- Typed contract-shaped client; one run-scoped activity stream drives the activity panel and timeline.
-- Reload/reconnect, repeated calls, denials, provider errors, cancellation, cache hits,
-  replay and restart interruption behave consistently in both views.
-- Only actual delegated children appear; show current sequential execution honestly.
-- Keyboard-accessible list mode and stable node positioning; reduced-motion support.
-- Case switching clears subscriptions/state; inaccessible cases return the same 404.
-- Evidence drawers use authorized APIs; no credentials, full tool arguments, raw
-  provider envelopes or private reasoning enter browser activity payloads.
-- Chakra UI 3.37, theme toggle, login, case/private-chat separation, case creation,
-  thread creation, provider/budget choices, and API-backed case panels are implemented.
-  Arbitrary third-party plugin installation, independently resumable/parallel workers
-  and advanced Tor monitoring remain future work. UI checks cover the public login route,
-  Next production build, client contract tests, and live `/api/v1/health/live` proxy.
-
-## Backend completion additions
-
-All routes below are relative to `/api/v1` and use the existing authentication/CSRF rules.
-
-| Surface | Contract |
+| Area | Implemented operations |
 |---|---|
-| Normal chats | `POST/GET /chats`, `GET/PATCH /chats/{chat_id}`. Private owner access only, including for administrators; other users receive 404. |
-| Normal chat execution | `POST/GET /chats/{chat_id}/messages`; `GET /chats/{chat_id}/runs/{run_id}`; `/events` with `Last-Event-ID`; `POST /cancel`. One active run per chat. |
-| Private answer status | Verification is `NOT_APPLICABLE`: the message is not an evidence-backed case finding. Persisted SSE exposes lifecycle/completed answers, not incremental token streaming or a fabricated subagent graph. |
-| Plugins | `GET /plugins`, `GET /cases/{case_id}/plugins`; `PATCH /admin/plugins/{plugin_id}` accepts `{enabled, manifest_hash}`. These are reviewed bundled integrations; UI must not claim arbitrary repository installation. |
-| Case plugin policy | Existing case PATCH `source_policy.enabled_plugins`: `null` permits the reviewed catalog, `[]` disables external plugins, a list permits only those IDs. Administrator global disable still wins. |
-| Provider choice | Case harness now includes `NIM`; private providers support AUTO, CLAUDE, NIM and OFFLINE. Missing provider/weights produce explicit unavailable results. |
-| Retrieval | `mode_used` reflects semantic/hybrid only when the loaded model and entire eligible index match. Otherwise render the returned lexical fallback and `dense_available=false`. |
-| Case summary card | `GET /cases/{case_id}/digest?since=...` returns counts, bounded open alerts and recent findings. `since` must be timezone aware. |
-| Thread memory | Existing `summary` now contains bounded historical user requests, refreshed every six assistant messages. Do not display it as confirmed evidence. |
-| Suspended monitoring | Show `state.suspension_reason`, failed runs and operational alerts when execution authority is revoked; per-source backoff lives in persisted item state. |
+| Account | Cookie login, required password change, session refresh, logout, scoped API token creation/revocation |
+| Cases | Create investigation or explicitly SYNTHETIC training case; scope and authority reference; case navigation |
+| Case conversation | Create/send/read; citations and verification; captured evidence attachments; title, goal, status, budget; actual harness label |
+| Private chat | Owner-only conversations, provider selection, title/status/budget editing, persistent messages, cancellation |
+| Runtime choices | Automatic, Claude, NVIDIA NIM, and local model. The stored runtime shows any server override. Deterministic case quotation is not offered for private chat. |
+| Agent activity | Official Agent, Tool, Reasoning, Terminal, and Canvas components; actual saved nodes/edges, status, phase, transport, duration, errors, cached results, and evidence references |
+| Evidence | Filters, pagination, multi-file upload, immutable metadata, text/context, derivative status, custody, hash verification, authorised original download |
+| Retrieval | Lexical/hybrid/semantic selection, source-class filters, returned spans/citations, explicit lexical fallback and dense availability |
+| Case analysis | Entities, read-only relationship graph and edge provenance, findings, candidate decisions and promotion with a human rationale |
+| Monitoring | Watchlists, typed items/source choices, run-now, pause/resume, attempt polling and errors/backoff |
+| Alerts | Rationale-based acknowledgement, dismissal, escalation |
+| Reports | Section/redaction/narrative/appendix choices; generation status; MD, HTML, PDF, ZIP, SHA-256 and manifest downloads |
+| Sharing and policy | Authenticated case members and roles; source classes, limits, reviewed plugin allowlist |
+| Integrations | Reviewed plugin catalog, actual availability, administrator enable/disable with manifest hash, searchable tool schemas/metadata |
+| Settings | Theme, service readiness, administrator model defaults, offline/demo settings |
 
-HTTP provider outputs are bounded complete answers. A running state must not animate
-invented token activity. Costs are conservative reserves rounded upward to four decimal
-places; incomplete provider usage must retain its incomplete flag. See
-`docs/backend-audit.md` for activation requirements and remaining roadmap work.
+The execution graph describes agents and tool calls. The separate Relationships view describes evidence-supported case relationships. Both graphs are read-only; their nodes and edges come from the backend.
 
-## Backend continuation: monitoring attempt visibility
+## Data and authentication
 
-The existing `GET /cases/{case_id}/monitor/runs` response now includes `RUNNING`
-attempts while collection is in progress. Poll it for the monitoring panel; it is
-separate from chat-run SSE. Interrupted attempts finish as `ERROR` with an
-`errors.execution` entry and a public reason (`CANCELLED`, `RUN_FAILED`, or
-`APPLICATION_RESTART`). Watchlist item state carries the last outcome and persisted
-retry time. A retry creates a new attempt; earlier attempt history remains visible.
-This provides operational status, not private model reasoning. Collection remains
-single-process; externally queued or independently resumable workers are not implied.
+`docs/openapi.json` is the contract. `npm ci`, `npm run typecheck`, and `npm run build` generate local TypeScript declarations through `openapi-typescript`; generated declarations are not committed.
 
-For evidence text, `line_offsets` and tool/context line numbers use LF boundaries.
-`page_map` contains zero-based, end-exclusive line intervals: PDF page order, XLSX
-sheet order, or PPTX slide order. Blank source units can have empty intervals. DOCX
-uses `null` because rendered page boundaries cannot be inferred from its paragraph XML.
-The map describes extracted text, not visual coordinates; cached spreadsheet values
-are not evidence that a formula was recalculated.
+All browser requests use the same-origin `/api/v1` proxy route. `DARKNETRA_API_BASE_URL` selects one server-side backend origin at runtime and is never a browser environment variable. The proxy preserves separate session/refresh/CSRF cookies, multipart bodies, streaming responses, request IDs, and download headers. The client sends CSRF tokens on mutations and coalesces concurrent refreshes. Case query keys include the case ID; switching conversations unmounts and aborts their streams. Backend permissions remain authoritative, including indistinguishable 404 responses for unknown/inaccessible cases.
+
+The browser content policy restricts network requests to this application. Assistant markdown uses the official MessageResponse component with external links/images disabled. Finding claims render as plain text. Evidence originals download as files; the browser does not fetch a live source directly.
+
+## Durable run events
+
+Case run paths are relative to `/api/v1/cases/{case_id}/threads/{thread_id}`:
+
+1. POST `/messages` returns a run ID.
+2. GET `/runs/{run_id}/execution` returns an atomic snapshot with `cursor`, `run_status`, `nodes`, `edges`, `events`, costs, and a truncation flag.
+3. Fetch `/runs/{run_id}/events` with `Last-Event-ID: cursor`. The parser handles LF/CRLF framing, arbitrary chunk boundaries, comments, and multiple events.
+4. Merge `activity.updated` by stable ID and sequence. `message.completed` refetches saved messages; `store.changed` invalidates case resources.
+5. Reconnect with bounded backoff and a fresh snapshot. Polling independently reconciles terminal messages when the event connection is lost.
+6. Cancellation targets the current run even when the activity panel inspects an older run. Server status determines when execution has ended.
+
+Activity states are `queued`, `running`, `completed`, `failed`, `denied`, `cancelled`, and `interrupted`. Fields include parent, agent role, tool/integration identity, actual transport, phase, public summary, duration, cache flag, errors and evidence codes/IDs. Missing stages are not invented. Snapshots contain at most 10,000 events and display truncation explicitly. `terminal_inferred` identifies completion inferred from an ended run.
+
+The Reasoning component displays **public operational summaries**. It does not request, persist, or display private chain-of-thought. The Terminal component displays the **recorded run log**; it is not a shell. HTTP providers return complete answers, so the UI waits for persisted final responses instead of simulating token streaming.
+
+Private chats use the equivalent `/chats/{chat_id}` message/run/cancel endpoints and show verification as `NOT_APPLICABLE`; they have no case evidence, research tools, or subagent graph.
+
+## Tool and provider semantics
+
+The lead agent sees the audited tool registry and can delegate to bounded specialists. The current backend permits one delegation level and at most three specialists per root run, with one active specialist at a time. Children are recorded under the root run; they are not independently resumable jobs.
+
+The Claude adapter exposes registry tools through the DARKNETRA SDK MCP server; a case-bound standalone MCP adapter also exists. Tool catalog entries describe supported transports. An activity shows MCP only when its recorded transport says MCP. Robin is an attributed local adapter using captured public search-index results; the frontend does not claim that a separate Robin MCP server exists.
+
+Installed, enabled, configured, running, denied and unavailable are distinct. A catalog entry does not grant authority to use a tool. Global plugin disable and case source policy are enforced by the backend. Case plugin policy preserves the distinction between inherited catalog (`null`), none (`[]`), and an explicit reviewed-ID list.
+
+Claude/NIM credentials, local model weights, search-provider keys, and an isolated Tor collector require server configuration. Selecting a provider does not provision it. Deterministic local checks do not verify paid providers or live Tor. Subscription login is not a substitute for the provider credentials configured on this server. Incomplete provider cost records are labelled partial.
+
+## Libraries reused
+
+| Project | Use |
+|---|---|
+| [Vercel AI Elements](https://github.com/vercel/ai-elements) | Official copy-in Message, Conversation, Prompt Input, Agent, Tool, Reasoning, Terminal, Canvas, Sources components |
+| [shadcn/ui](https://github.com/shadcn-ui/ui) | Accessible Radix-based controls, dialogs, tooltips, forms and disclosure primitives |
+| [React Flow](https://github.com/xyflow/xyflow) | Execution and case relationship graphs with editing/deletion disabled |
+| [TanStack Query](https://github.com/TanStack/query) | Case-scoped queries, cursor pagination and invalidation |
+
+Upstream component licenses and local adaptations are recorded in `frontend/THIRD_PARTY_NOTICES.md`. This uses AI Elements for presentation while retaining the Python execution protocol; it does not claim AI SDK `useChat` or AG-UI wire compatibility. No second model execution service is introduced in Next.js.
+
+## Running and validation
+
+See `frontend/README.md` for local and Docker commands and the reproducible test procedure. Docker builds with `npm ci`, regenerates types, compiles the standalone Next.js server, and runs it as a non-root user. Compose connects the web service to the existing API and binds the interface to loopback port 3000. CI/CD remains confined to the production branch.
+
+Verified on 8 September 2026: TypeScript checks, 17 unit tests, three Playwright browser scenarios against the Docker web service, and the standalone Docker production build pass. `npm audit` reports zero known vulnerabilities for the locked dependency graph at verification time.
+
+Unit coverage exercises CSRF, multipart requests, session refresh, stable errors, permissions, and chunked SSE framing. Browser checks exercise real local authentication, private conversation persistence and provider-unavailable errors, evidence upload/integrity, lexical retrieval, a deterministic case response with verified citations, activity persistence, case view navigation, themes, and mobile layout using explicitly SYNTHETIC records. They also verify access-cookie refresh, lost-session logout, and preservation of the workspace during an injected temporary refresh outage. Those immutable test records are retained.
+
+Claude/NIM/local-model generation, live external searches, and live MCP/subagent execution were not available in this local test configuration. Graph and log checks use real recorded deterministic case-tool execution. Browser navigation checks do not imply every case mutation or report export format was exercised end to end.
+
+## Remaining backend limits
+
+- Live provider/collector operation depends on configured credentials, models, network and case authority. The local interface cannot manufacture that readiness.
+- Report jobs have no separate status/error-detail endpoint. The UI polls report records and can show an ERROR status without an unavailable failure explanation.
+- Adding case members requires an existing user's exact UUID; the API has no case-scoped directory search.
+- External plugin installation, arbitrary shell commands, independent resumable workers, and production Tor deployment are outside the current backend contract.
+- Graph layout is computed in the browser because the backend returns relationships, not positions. Monitoring attempts are polled separately from chat activity events.
+
+For backend activation requirements and the remaining roadmap, see `docs/backend-audit.md` and `docs/implementation-plan.md`.

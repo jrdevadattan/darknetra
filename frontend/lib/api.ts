@@ -1,93 +1,197 @@
-import type { Case, CaseDigest, Chat, ExecutionSnapshot, Page, RunRef, Thread, ThreadMessage, User } from "@/lib/types";
+"use client";
+
+import {
+  useInfiniteQuery,
+  useQuery,
+  type QueryClient,
+} from "@tanstack/react-query";
+import type { Page } from "./types";
 
 export class ApiError extends Error {
-  constructor(public readonly status: number, public readonly code?: string, message = "Request failed") {
+  constructor(
+    public status: number,
+    public code: string,
+    message: string,
+    public requestId?: string,
+  ) {
     super(message);
     this.name = "ApiError";
   }
 }
-
-function csrfToken(): string | undefined {
-  if (typeof document === "undefined") return undefined;
-  return document.cookie.split("; ").find((cookie) => cookie.startsWith("darknetra_csrf="))?.split("=").slice(1).join("=");
+export function csrfToken(
+  cookie = typeof document === "undefined" ? "" : document.cookie,
+) {
+  return cookie
+    .split(";")
+    .map((v) => v.trim())
+    .find((v) => v.startsWith("darknetra_csrf="))
+    ?.slice(15);
 }
-
-export function buildRequest(method: string, body?: unknown, csrf = csrfToken()): RequestInit {
-  const mutation = !["GET", "HEAD", "OPTIONS"].includes(method);
-  const headers: Record<string, string> = {};
-  if (body !== undefined) headers["Content-Type"] = "application/json";
-  if (mutation && csrf) headers["X-CSRF-Token"] = csrf;
-  return { method, headers, credentials: "include", body: body === undefined ? undefined : JSON.stringify(body) };
+export function requestOptions(method: string, body?: unknown): RequestInit {
+  const headers = new Headers({ Accept: "application/json" });
+  if (!["GET", "HEAD"].includes(method)) {
+    const csrf = csrfToken();
+    if (csrf) headers.set("X-CSRF-Token", csrf);
+  }
+  const form = typeof FormData !== "undefined" && body instanceof FormData;
+  if (body !== undefined && !form)
+    headers.set("Content-Type", "application/json");
+  return {
+    method,
+    headers,
+    credentials: "include",
+    cache: "no-store",
+    body: body === undefined ? undefined : form ? body : JSON.stringify(body),
+  };
 }
-
-export async function request<T>(path: string, method = "GET", body?: unknown): Promise<T> {
+let refreshPromise: Promise<boolean> | null = null;
+export const SESSION_EXPIRED = "darknetra:session-expired";
+async function refresh() {
+  if (!refreshPromise)
+    refreshPromise = fetch("/api/v1/auth/refresh", requestOptions("POST"))
+      .then(async (response) => {
+        if (response.ok) return true;
+        if (response.status === 401 || response.status === 403) return false;
+        throw await readError(response);
+      })
+      .catch((error: unknown) => {
+        if (error instanceof ApiError) throw error;
+        throw new ApiError(
+          0,
+          "NETWORK_REQUIRED",
+          "Session refresh is temporarily unavailable. Check the connection and retry.",
+        );
+      })
+      .finally(() => {
+        refreshPromise = null;
+      });
+  return refreshPromise;
+}
+export async function authorizedFetch(path: string, options: RequestInit = {}) {
+  const sessionEndpoint = path === "/auth/login" || path === "/auth/refresh";
+  let response = await fetch("/api/v1" + path, {
+    credentials: "include",
+    cache: "no-store",
+    ...options,
+  });
+  if (response.status === 401 && !sessionEndpoint && (await refresh())) {
+    const headers = new Headers(options.headers);
+    if (options.method && options.method !== "GET") {
+      const csrf = csrfToken();
+      if (csrf) headers.set("X-CSRF-Token", csrf);
+    }
+    response = await fetch("/api/v1" + path, {
+      credentials: "include",
+      cache: "no-store",
+      ...options,
+      headers,
+    });
+  }
+  if (
+    response.status === 401 &&
+    !sessionEndpoint &&
+    !options.signal?.aborted &&
+    typeof window !== "undefined"
+  ) {
+    window.dispatchEvent(new Event(SESSION_EXPIRED));
+  }
+  return response;
+}
+export async function readError(response: Response) {
+  const data = await response.json().catch(() => ({}));
+  const message =
+    data.error?.message ??
+    (typeof data.detail === "string"
+      ? data.detail
+      : "The request could not be completed.");
+  return new ApiError(
+    response.status,
+    data.error?.code ?? "REQUEST_FAILED",
+    message,
+    data.error?.request_id,
+  );
+}
+export async function api<T>(
+  path: string,
+  method = "GET",
+  body?: unknown,
+  signal?: AbortSignal,
+): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(path, buildRequest(method, body));
-  } catch {
-    throw new ApiError(0, "NETWORK_REQUIRED", "DARKNETRA is unavailable. Check the API connection and try again.");
+    const options = { ...requestOptions(method, body), signal };
+    if (path === "/auth/me") {
+      response = await fetch("/api/v1" + path, options);
+      if (response.status === 401 && (await refresh()))
+        response = await fetch("/api/v1" + path, options);
+    } else response = await authorizedFetch(path, options);
+  } catch (error) {
+    if (signal?.aborted || error instanceof ApiError) throw error;
+    throw new ApiError(
+      0,
+      "NETWORK_REQUIRED",
+      "Unable to reach DARKNETRA. Check the connection and try again.",
+    );
   }
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({})) as { error?: { code?: string; message?: string }; detail?: string };
-    throw new ApiError(response.status, payload.error?.code, payload.error?.message ?? payload.detail ?? "Request failed");
-  }
-  if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
+  if (!response.ok) throw await readError(response);
+  const text = await response.text();
+  return text ? (JSON.parse(text) as T) : (undefined as T);
 }
-
-export type SseFrame = { id?: string; event: string; data: unknown };
-
-export function parseSseFrames(text: string): SseFrame[] {
-  return text.split(/\r?\n\r?\n/).flatMap((frame) => {
-    const values = Object.fromEntries(frame.split(/\r?\n/).flatMap((line) => {
-      const match = /^(id|event|data):\s?(.*)$/.exec(line);
-      return match ? [[match[1], match[2]]] : [];
-    }));
-    if (!values.data) return [];
-    try { return [{ id: values.id, event: values.event ?? "message", data: JSON.parse(values.data) }]; } catch { return []; }
+export function useApi<T>(
+  path: string | null,
+  interval?: number | ((data: T | undefined) => number | false),
+) {
+  return useQuery<T, ApiError>({
+    queryKey: ["api", path],
+    enabled: Boolean(path),
+    queryFn: ({ signal }) => api<T>(path!, "GET", undefined, signal),
+    staleTime: 10_000,
+    retry: false,
+    refetchInterval:
+      typeof interval === "function"
+        ? (query) => interval(query.state.data)
+        : interval,
   });
 }
-
-async function stream(path: string, lastEventId: number, onFrame: (frame: SseFrame) => void, signal: AbortSignal) {
-  const response = await fetch(path, { headers: { "Last-Event-ID": String(lastEventId) }, credentials: "include", signal });
-  if (!response.ok || !response.body) throw new ApiError(response.status, undefined, "Run-event connection failed");
-  const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
-  while (!signal.aborted) {
-    const next = await reader.read(); if (next.done) break;
-    buffer += decoder.decode(next.value, { stream: true });
-    const cut = buffer.lastIndexOf("\n\n");
-    if (cut < 0) continue;
-    const complete = buffer.slice(0, cut + 2); buffer = buffer.slice(cut + 2);
-    parseSseFrames(complete).forEach(onFrame);
-  }
+export function usePaged<T>(path: string | null, interval?: number) {
+  const query = useInfiniteQuery<Page<T>, ApiError>({
+    queryKey: ["api", path, "pages"],
+    enabled: Boolean(path),
+    initialPageParam: "",
+    queryFn: ({ pageParam, signal }) =>
+      api<Page<T>>(
+        path! +
+          (path!.includes("?") ? "&" : "?") +
+          "limit=50" +
+          (pageParam ? "&cursor=" + encodeURIComponent(String(pageParam)) : ""),
+        "GET",
+        undefined,
+        signal,
+      ),
+    getNextPageParam: (page) => page.next_cursor || undefined,
+    refetchInterval: interval,
+    retry: false,
+  });
+  return {
+    ...query,
+    items: query.data?.pages.flatMap((p) => p.items) ?? [],
+    total: query.data?.pages[0]?.total,
+  };
 }
-
-export const api = {
-  health: () => request<{ status: string }>("/api/v1/health/ready"),
-  me: () => request<User>("/api/v1/auth/me"),
-  login: (username: string, password: string) => request<User>("/api/v1/auth/login", "POST", { username, password }),
-  logout: () => request<void>("/api/v1/auth/logout", "POST"),
-  cases: () => request<Page<Case>>("/api/v1/cases"),
-  caseDigest: (caseId: string) => request<CaseDigest>(`/api/v1/cases/${caseId}/digest`),
-  createCase: (body: unknown) => request<Case>("/api/v1/cases", "POST", body),
-  summary: (caseId: string) => request<Record<string, unknown>>(`/api/v1/cases/${caseId}/summary`),
-  panel: (caseId: string, path: string) => request<Record<string, unknown>>(`/api/v1/cases/${caseId}/${path}`),
-  createThread: (caseId: string, body: unknown) => request<Thread>(`/api/v1/cases/${caseId}/threads`, "POST", body),
-  createChat: (body: unknown) => request<Chat>("/api/v1/chats", "POST", body),
-  createWatchlist: (caseId: string, name: string) => request<Record<string, unknown>>(`/api/v1/cases/${caseId}/watchlists`, "POST", { name }),
-  createWatchlistItem: (caseId: string, watchlistId: string, body: unknown) => request<Record<string, unknown>>(`/api/v1/cases/${caseId}/watchlists/${watchlistId}/items`, "POST", body),
-  plugins: (caseId: string) => request<Record<string, unknown>>(`/api/v1/cases/${caseId}/plugins`),
-  tools: () => request<Record<string, unknown>>("/api/v1/tools"),
-  monitoring: (caseId: string) => Promise.all([request<Record<string, unknown>>(`/api/v1/cases/${caseId}/watchlists`), request<Record<string, unknown>>(`/api/v1/cases/${caseId}/monitor/runs`)]),
-  chats: () => request<Page<Chat>>("/api/v1/chats"),
-  threads: (caseId: string) => request<Page<Thread>>(`/api/v1/cases/${caseId}/threads`),
-  messages: (caseId: string, threadId: string) => request<Page<ThreadMessage>>(`/api/v1/cases/${caseId}/threads/${threadId}/messages`),
-  postMessage: (caseId: string, threadId: string, content: string) =>
-    request<RunRef>(`/api/v1/cases/${caseId}/threads/${threadId}/messages`, "POST", { content }),
-  execution: (caseId: string, threadId: string, runId: string) =>
-    request<ExecutionSnapshot>(`/api/v1/cases/${caseId}/threads/${threadId}/runs/${runId}/execution`),
-  cancelRun: (caseId: string, threadId: string, runId: string) =>
-    request<void>(`/api/v1/cases/${caseId}/threads/${threadId}/runs/${runId}/cancel`, "POST"),
-  subscribeRunEvents: (caseId: string, threadId: string, runId: string, lastEventId: number, onFrame: (frame: SseFrame) => void, signal: AbortSignal) =>
-    stream(`/api/v1/cases/${caseId}/threads/${threadId}/runs/${runId}/events`, lastEventId, onFrame, signal),
-};
+export function invalidateCase(client: QueryClient, id: string) {
+  return client.invalidateQueries({
+    predicate: (query) =>
+      query.queryKey[0] === "api" &&
+      String(query.queryKey[1]).startsWith("/cases/" + id),
+  });
+}
+export async function download(path: string, filename: string) {
+  const response = await authorizedFetch(path);
+  if (!response.ok) throw await readError(response);
+  const href = URL.createObjectURL(await response.blob());
+  const anchor = document.createElement("a");
+  anchor.href = href;
+  anchor.download = filename;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(href), 30_000);
+}

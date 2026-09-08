@@ -74,11 +74,13 @@ Keep backups on storage appropriate for the case data. The scripts preserve all 
 
 ## Frontend workspace
 
-The Chakra UI application lives in `frontend/` and runs on port 3000. It uses the
-same-origin `/api` rewrite so browser requests retain the backend session and CSRF
-cookies. Start it locally with `npm ci` followed by `npm run dev`; or start the
-full stack with `docker compose --env-file .env -f infra/docker-compose.yml up -d`.
-The web image builds with the backend URL set to `http://api:8000` inside Compose.
+The AI Elements application lives in `frontend/` and runs on port 3000. It uses a
+same-origin `/api/v1` streaming proxy so browser requests retain the backend session
+and CSRF cookies. Inside `frontend/`, run `npm ci` followed by `npm run dev`; or from
+the repository root run `docker compose --env-file .env -f infra/docker-compose.yml up -d --build web`.
+Compose supplies `http://api:8000` as the web container's runtime backend URL.
+Open **http://localhost:3000**. See [frontend.md](frontend.md) and
+[frontend/README.md](frontend/README.md) for the implemented screens and test commands.
 
 The UI keeps case conversations and private chats separate, shows evidence codes
 on verified claims, and renders backend execution activity as it is recorded. Model

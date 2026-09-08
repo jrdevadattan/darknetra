@@ -1,3 +1,4 @@
-import { WorkspaceShell } from "@/components/workspace-shell";
-
-export default function CasesPage() { return <WorkspaceShell />; }
+import { redirect } from "next/navigation";
+export default function CasesPage() {
+  redirect("/");
+}

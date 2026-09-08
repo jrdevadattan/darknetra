@@ -1,3 +1,9 @@
-import { WorkspaceShell } from "@/components/workspace-shell";
-
-export default async function CasePage({ params }: { params: Promise<{ caseId: string }> }) { const { caseId } = await params; return <WorkspaceShell initialCaseId={caseId} />; }
+import { redirect } from "next/navigation";
+export default async function CasePage({
+  params,
+}: {
+  params: Promise<{ caseId: string }>;
+}) {
+  const { caseId } = await params;
+  redirect("/?case=" + encodeURIComponent(caseId));
+}

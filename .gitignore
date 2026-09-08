@@ -26,4 +26,7 @@ frontend/.next/
 frontend/tsconfig.tsbuildinfo
 frontend/AGENTS.md
 frontend/CLAUDE.md
+frontend/lib/generated/
+frontend/test-results/
+frontend/playwright-report/
 
