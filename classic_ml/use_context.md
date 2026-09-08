@@ -1,4 +1,26 @@
 # GraphSAGE Cryptocurrency Transaction Classifier
+## Model Specifications
+Model exists: True        
+Config exists: True                       
+Model configuration:                
+model: GraphSAGE
+feature_type: 94 local + 8 temporal graph features
+input_features: 102
+hidden_dim: 512
+dropout: 0.4
+learning_rate: 0.001
+weight_decay: 0.001
+loss: focal_loss
+gamma: 2.0
+threshold: 0.7166666666666667
+validation_f1: 0.8475073313782991
+test_f1: 0.581
+test_pr_auc: 0.4808
+test_accuracy: 0.9512
+Weights loaded successfully!
+Number of parameter tensors: 19
+Total parameters: 635908
+
 
 ## 1. Overview
 
@@ -550,35 +572,231 @@ The valid range is:
 
 ---
 
-# 15. Example inference
+# 15. How to use the model end-to-end
+
+This section shows the complete, concrete steps to go from raw CSV data to a prediction.
+
+---
+
+## Step 1 — load the raw data
 
 ```python
+import pandas as pd
 import numpy as np
+
+df_feat  = pd.read_csv("data/elliptic_txs_features.csv", header=None)
+df_cls   = pd.read_csv("data/elliptic_txs_classes.csv")
+df_edges = pd.read_csv("data/elliptic_txs_edgelist.csv")
+
+# name the columns
+n_feat = df_feat.shape[1] - 2
+df_feat.columns = ['txId', 'timestep'] + [f'f_{i}' for i in range(n_feat)]
+
+df = df_feat.merge(df_cls, on='txId', how='left')
+```
+
+---
+
+## Step 2 — pick a target transaction
+
+```python
+target_tx = "some_transaction_id"   # the txId you want to classify
+```
+
+---
+
+## Step 3 — build the neighborhood (graph context)
+
+GraphSAGE needs the target node AND its neighbors to do message passing.
+Pull the direct 1-hop neighbors from the edgelist.
+
+```python
+# all edges where the target is source or destination
+neighbor_edges = df_edges[
+    (df_edges['txId1'] == target_tx) |
+    (df_edges['txId2'] == target_tx)
+]
+
+# collect all involved txIds
+context_ids = set([target_tx])
+context_ids.update(neighbor_edges['txId1'].tolist())
+context_ids.update(neighbor_edges['txId2'].tolist())
+context_ids = list(context_ids)
+
+# keep only txIds that exist in the feature dataframe
+context_ids = [tx for tx in context_ids if tx in set(df_feat['txId'].values)]
+```
+
+---
+
+## Step 4 — re-index nodes to 0…N-1
+
+`edge_index` must use integer positions (0, 1, 2 …), not raw txId strings.
+
+```python
+local_idx = {tx: i for i, tx in enumerate(context_ids)}
+target_node_index = local_idx[target_tx]   # this is what you pass as node_index
+```
+
+---
+
+## Step 5 — build edge_index
+
+```python
+src_list, dst_list = [], []
+for _, row in neighbor_edges.iterrows():
+    s, d = row['txId1'], row['txId2']
+    if s in local_idx and d in local_idx:
+        src_list.append(local_idx[s])
+        dst_list.append(local_idx[d])
+
+edge_index = np.array([src_list, dst_list], dtype=np.int64)
+# shape: (2, E)  — row 0 = sources, row 1 = destinations
+```
+
+If the target transaction has no neighbors at all (isolated node), use an empty edge list:
+
+```python
+edge_index = np.empty((2, 0), dtype=np.int64)
+```
+
+---
+
+## Step 6 — extract the 94 local features
+
+```python
+context_df = df_feat[df_feat['txId'].isin(context_ids)].copy()
+context_df = context_df.set_index('txId').reindex(context_ids)
+
+local_cols = [f'f_{i}' for i in range(94)]
+X_local = context_df[local_cols].fillna(0).values.astype(np.float32)
+# shape: (N, 94)
+```
+
+---
+
+## Step 7 — compute the 8 temporal graph features
+
+These must be computed the same way as during training (historical degree counts up to each node's timestep).
+
+```python
+# use the FULL edgelist to compute historical degrees
+all_tx_list = df_feat['txId'].values
+all_tx_idx  = {tx: i for i, tx in enumerate(all_tx_list)}
+
+full_src = [all_tx_idx[tx] for tx in df_edges['txId1'] if tx in all_tx_idx]
+full_dst = [all_tx_idx[tx] for tx in df_edges['txId2'] if tx in all_tx_idx]
+
+full_src = np.array(full_src, dtype=np.int32)
+full_dst = np.array(full_dst, dtype=np.int32)
+
+src_time = df_feat['timestep'].values[full_src]
+dst_time = df_feat['timestep'].values[full_dst]
+edge_time = np.maximum(src_time, dst_time)
+
+n_all = len(df_feat)
+temporal_features = {}
+
+for tx in context_ids:
+    if tx not in all_tx_idx:
+        temporal_features[tx] = np.zeros(8, dtype=np.float32)
+        continue
+
+    t = df_feat.loc[df_feat['txId'] == tx, 'timestep'].values[0]
+    mask = edge_time <= t
+    s = full_src[mask]
+    d = full_dst[mask]
+
+    in_deg  = np.bincount(d, minlength=n_all).astype(np.float32)
+    out_deg = np.bincount(s, minlength=n_all).astype(np.float32)
+    total   = in_deg + out_deg
+
+    node_i = all_tx_idx[tx]
+    hi  = in_deg[node_i]
+    ho  = out_deg[node_i]
+    hd  = total[node_i]
+    hr  = hi / (ho + 1.0)
+
+    # neighbor degree (undirected)
+    nbr_sum   = np.zeros(n_all, dtype=np.float32)
+    nbr_count = np.zeros(n_all, dtype=np.float32)
+    np.add.at(nbr_sum,   s, total[d])
+    np.add.at(nbr_sum,   d, total[s])
+    np.add.at(nbr_count, s, 1)
+    np.add.at(nbr_count, d, 1)
+    hnd = (nbr_sum / np.maximum(nbr_count, 1))[node_i]
+
+    temporal_features[tx] = np.array([
+        hi, ho, hd, hr, hnd,
+        np.log1p(hd),
+        np.log1p(hi),
+        np.log1p(ho),
+    ], dtype=np.float32)
+
+X_temporal = np.stack(
+    [temporal_features[tx] for tx in context_ids],
+    axis=0
+).astype(np.float32)
+# shape: (N, 8)
+```
+
+---
+
+## Step 8 — assemble the full feature matrix
+
+```python
+X_raw = np.hstack([X_local, X_temporal]).astype(np.float32)
+# shape: (N, 102)
+```
+
+The column order must be exactly:
+
+```text
+[f_0 … f_93,
+ hist_in_degree, hist_out_degree, hist_degree, hist_in_out_ratio,
+ hist_neighbor_degree, log_hist_degree, log_hist_in_degree, log_hist_out_degree]
+```
+
+Do not reorder.
+
+---
+
+## Step 9 — call predict()
+
+```python
 from predict import predict
 
-features = np.array([
-    [0.10] * 102,
-    [0.20] * 102,
-    [0.30] * 102,
-    [0.40] * 102,
-    [0.50] * 102,
-], dtype=np.float32)
-
-edge_index = np.array([
-    [0, 1, 2, 3, 4],
-    [1, 2, 3, 4, 0],
-], dtype=np.int64)
-
 result = predict(
-    features=features,
-    edge_index=edge_index,
-    node_index=2
+    features=X_raw,        # (N, 102) raw unscaled features
+    edge_index=edge_index, # (2, E)   re-indexed integer edges
+    node_index=target_node_index  # int  position of target in X_raw
 )
 
 print(result)
 ```
 
-Example output:
+`predict()` applies the saved scaler internally — pass **raw unscaled features**.
+
+---
+
+## Step 10 — read the result
+
+```python
+{
+    "prediction":          "illicit",   # or "licit"
+    "class":               1,           # 0 = licit, 1 = illicit
+    "probability":         0.91,        # probability of the returned class
+    "licit_probability":   0.09,
+    "illicit_probability": 0.91,
+    "threshold":           0.7166666666666667
+}
+```
+
+Flag the transaction as illicit if `illicit_probability >= threshold`.
+
+---
+
+# 16. Example inference (minimal synthetic data)
 
 ```python
 {
@@ -593,7 +811,7 @@ Example output:
 
 ---
 
-# 16. Output parameters
+# 17. Output parameters
 
 `predict()` returns:
 
@@ -630,7 +848,7 @@ class 1 = illicit
 
 ---
 
-# 17. Very important: GraphSAGE needs graph context
+# 18. Very important: GraphSAGE needs graph context
 
 This is a **graph model**, not a normal standalone tabular classifier.
 
@@ -672,7 +890,7 @@ The application/agent is responsible for constructing the graph context and the 
 
 ---
 
-# 18. Real transaction inference pipeline
+# 19. Real transaction inference pipeline
 
 For a real transaction, the application should produce:
 
@@ -700,7 +918,7 @@ The feature engineering must match the training process.
 
 ---
 
-# 19. Qwen3 SLM integration
+# 20. Qwen3 SLM integration
 
 The SLM is an **additional reasoning layer**, not another classifier replacing GraphSAGE.
 
@@ -759,7 +977,7 @@ The transaction should be flagged for further investigation.
 
 ---
 
-# 20. What the SLM should NOT do
+# 21. What the SLM should NOT do
 
 The SLM must not:
 
@@ -788,7 +1006,7 @@ produce an investigation response
 
 ---
 
-# 21. Suggested SLM tool interface
+# 22. Suggested SLM tool interface
 
 The agent can expose GraphSAGE as a tool:
 
@@ -832,7 +1050,7 @@ This keeps the model implementation isolated from the agent.
 
 ---
 
-# 22. Recommended SLM system instructions
+# 23. Recommended SLM system instructions
 
 Use a system instruction along these lines:
 
@@ -866,7 +1084,7 @@ Do not claim certainty when the model only provides a probability.
 
 ---
 
-# 23. Performance
+# 24. Performance
 
 The final trained temporal-feature GraphSAGE model achieved:
 
@@ -902,7 +1120,7 @@ For illicit detection, F1 and PR-AUC are more informative.
 
 ---
 
-# 24. Current model limitation
+# 25. Current model limitation
 
 The temporal feature engineering uses historical graph information up to the transaction timestep.
 
@@ -914,7 +1132,7 @@ Therefore this model should currently be treated as a **trained research/hackath
 
 ---
 
-# 25. Project structure
+# 26. Project structure
 
 Recommended structure:
 
@@ -944,7 +1162,7 @@ project/
 
 ---
 
-# 26. Dependencies
+# 27. Dependencies
 
 The reference predictor requires the Python packages used by the model:
 
@@ -967,7 +1185,7 @@ The model does not need to be retrained when the application starts.
 
 ---
 
-# 27. Quick verification
+# 28. Quick verification
 
 After installing dependencies and placing the model files correctly:
 
@@ -987,7 +1205,7 @@ and return a structured prediction.
 
 ---
 
-# 28. What the AI coding agent needs to know
+# 29. What the AI coding agent needs to know
 
 The AI coding agent should treat these files as fixed model artifacts:
 
@@ -1028,6 +1246,6 @@ explanation / investigation workflow
 
 ---
 
-# 29. One-line summary
+# 30. One-line summary
 
 **GraphSAGE performs the numerical graph-based illicit-transaction classification; the surrounding application supplies the 102 features and graph context, and a Qwen3-class SLM can use the resulting structured evidence for reasoning, explanation, and agent orchestration.**

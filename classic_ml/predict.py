@@ -1,3 +1,6 @@
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = ""   # force CPU — prevents CUDA DLL load on Windows
+
 from pathlib import Path
 import json
 import pickle
@@ -53,7 +56,7 @@ def load_model():
 
     state_dict = torch.load(
         MODEL_PATH,
-        map_location="cpu",
+        map_location=torch.device("cpu"),
         weights_only=True,
     )
     model.load_state_dict(state_dict)

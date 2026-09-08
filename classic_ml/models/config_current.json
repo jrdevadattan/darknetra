@@ -1,0 +1,13 @@
+{
+    "model": "GraphSAGE",
+    "input_features": 104,
+    "hidden_dim": 512,
+    "dropout": 0.4,
+    "learning_rate": 0.001,
+    "gamma": 2.0,
+    "threshold": 0.7049999999999996,
+    "best_validation_f1": 0.7232,
+    "test_f1": 0.6064516129032258,
+    "test_pr_auc": 0.5497573467608056,
+    "test_accuracy": 0.9556076655615752
+}
