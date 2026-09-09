@@ -6,7 +6,7 @@ import "@fontsource-variable/geist-mono";
 
 export const metadata: Metadata = {
   title: "DARKNETRA",
-  description: "Evidence-first narcotics intelligence workspace",
+  description: "Local case workspace",
 };
 
 export default function RootLayout({

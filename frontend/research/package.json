@@ -1,0 +1,10 @@
+{
+  "name": "darknetra-research-tools",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "cheerio": "1.2.0",
+    "ipaddr.js": "2.5.0",
+    "socks-proxy-agent": "10.1.0"
+  }
+}

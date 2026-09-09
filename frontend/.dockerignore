@@ -1,0 +1,10 @@
+node_modules
+.next
+.codex-chat
+.env*
+test-results
+playwright-report
+*.log
+*.tsbuildinfo
+.git
+Dockerfile

@@ -1,22 +1,31 @@
-FROM node:24-alpine AS deps
-WORKDIR /app
-COPY frontend/package.json frontend/package-lock.json ./
-COPY docs/openapi.json /docs/openapi.json
-RUN --mount=type=cache,target=/root/.npm npm ci --fetch-retries=5 --fetch-retry-mintimeout=1000 --fetch-retry-maxtimeout=10000
+FROM python:3.12-slim-bookworm AS ml_runtime
+COPY research/ml-requirements.txt /tmp/ml-requirements.txt
+RUN pip install --no-cache-dir torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir -r /tmp/ml-requirements.txt
 
-FROM node:24-alpine AS builder
+FROM node:22-bookworm-slim AS build
 WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
-COPY docs/openapi.json /docs/openapi.json
-COPY frontend/ ./
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
-FROM node:24-alpine AS runner
+FROM research_runtime AS runtime
+USER root
 WORKDIR /app
-ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 HOSTNAME=0.0.0.0 PORT=3000
-COPY --from=builder --chown=node:node /app/.next/standalone ./
-COPY --from=builder --chown=node:node /app/.next/static ./.next/static
+ARG CODEX_VERSION=0.153.4
+RUN npm install --global @openai/codex@${CODEX_VERSION} && npm cache clean --force
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 libexpat1 libuuid1 && rm -rf /var/lib/apt/lists/*
+COPY --from=ml_runtime /usr/local /usr/local
+COPY --from=build --chown=node:node /app/node_modules ./node_modules
+COPY --from=build --chown=node:node /app/.next ./.next
+COPY --from=build --chown=node:node /app/skills ./skills
+COPY --from=build --chown=node:node /app/public ./public
+COPY --from=build --chown=node:node /app/package.json /app/next.config.ts /app/assistant-instructions.md ./
+COPY --chown=node:node docker-entrypoint.sh ./docker-entrypoint.sh
+RUN mkdir -p /app/.codex-chat && chown node:node /app/.codex-chat
+ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 CODEX_HOME=/app/.codex-chat/codex-home DARKNETRA_ML_PYTHON=/usr/local/bin/python3.12 PYTHONDONTWRITEBYTECODE=1
 USER node
 EXPOSE 3000
-CMD ["node", "server.js"]
+ENTRYPOINT ["sh", "/app/docker-entrypoint.sh"]

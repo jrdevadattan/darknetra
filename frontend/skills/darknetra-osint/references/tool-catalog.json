@@ -1,0 +1,1034 @@
+{
+  "source": "User-supplied tool list, reviewed 2026-09-08",
+  "scope": "Local integration inventory, not a claim that each named product is current or available. Check status and actual command results.",
+  "tools": [
+    {
+      "name": "Apify",
+      "category": "Backup Public Web Collection",
+      "status": "adapter_available",
+      "command": "apify-page <public-url> <backup-reason>",
+      "note": "Backup only after failed/incomplete ordinary reads or explicit request. One pinned public-page reader; not the whole Actor store. Run apify-status to verify account access."
+    },
+    {
+      "name": "GraphSAGE classic_ml",
+      "category": "Offline Transaction Graph Analysis / Machine Learning",
+      "status": "bundled_model",
+      "command": "ml-predict <uploaded-json-file>",
+      "note": "Original checkpoint and scaler bundled. Run ml-status to verify the CPU runtime. Requires 102 unscaled Elliptic-compatible features per node, directed edges and a target node index. A wallet address alone is insufficient. Research output is not a confirmed finding."
+    },
+    {
+      "name": "Flashpoint",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "adapter_available",
+      "note": "Read-only CLI adapter installed. Run integrations to check local credential configuration; a successful lookup verifies account access."
+    },
+    {
+      "name": "Recorded Future",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "adapter_available",
+      "note": "Read-only CLI adapter installed. Run integrations to check local credential configuration; a successful lookup verifies account access."
+    },
+    {
+      "name": "Sixgill / ReliaQuest",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Digital Shadows / ReliaQuest",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "DarkOwl Vision",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Intel 471",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Constella Intelligence",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "SpyCloud",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "ZeroFox",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Cyble DarkIQ / Vision",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Group-IB Threat Intelligence",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Mandiant / Google Threat Intelligence",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Team Cymru",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Ahmia.fi",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "provider_dependent",
+      "note": "Robin fallback provider. A live successful response is required; availability is not assumed."
+    },
+    {
+      "name": "DarkSearch",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Torch / Tor66 / Haystak",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Kilos",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "OnionScan",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_enabled",
+      "note": "Not included in automatic research. This app supports public-source reads and offline supplied-file analysis."
+    },
+    {
+      "name": "TorBot",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_enabled",
+      "note": "Not included in automatic research. This app supports public-source reads and offline supplied-file analysis."
+    },
+    {
+      "name": "Recon",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Hunchly Dark Web",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Babel Street / Babel X",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "LifeRaft Navigator",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Skopenow",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Hootsuite / CrowdTangle",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "TweetDeck",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "CrowdTangle",
+      "category": "Dark Web and Surface Web Monitoring / Threat Intelligence",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Maltego",
+      "category": "OSINT and Link Analysis / Attribution",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "IBM i2 Analyst’s Notebook",
+      "category": "OSINT and Link Analysis / Attribution",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "IBM iBase",
+      "category": "OSINT and Link Analysis / Attribution",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Palantir Gotham / Foundry",
+      "category": "OSINT and Link Analysis / Attribution",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Linkurious",
+      "category": "OSINT and Link Analysis / Attribution",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Neo4j / Gephi",
+      "category": "OSINT and Link Analysis / Attribution",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Social Links Professional",
+      "category": "OSINT and Link Analysis / Attribution",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "SpiderFoot",
+      "category": "OSINT and Link Analysis / Attribution",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Recon-ng",
+      "category": "OSINT and Link Analysis / Attribution",
+      "status": "not_enabled",
+      "note": "Not included in automatic research. This app supports public-source reads and offline supplied-file analysis."
+    },
+    {
+      "name": "theHarvester",
+      "category": "OSINT and Link Analysis / Attribution",
+      "status": "not_enabled",
+      "note": "Not included in automatic research. This app supports public-source reads and offline supplied-file analysis."
+    },
+    {
+      "name": "Sherlock / WhatsMyName / Holehe",
+      "category": "OSINT and Link Analysis / Attribution",
+      "status": "not_enabled",
+      "note": "Not included in automatic research. This app supports public-source reads and offline supplied-file analysis."
+    },
+    {
+      "name": "Ghunt",
+      "category": "OSINT and Link Analysis / Attribution",
+      "status": "not_enabled",
+      "note": "Not included in automatic research. This app supports public-source reads and offline supplied-file analysis."
+    },
+    {
+      "name": "Holehe",
+      "category": "OSINT and Link Analysis / Attribution",
+      "status": "not_enabled",
+      "note": "Not included in automatic research. This app supports public-source reads and offline supplied-file analysis."
+    },
+    {
+      "name": "Lampyre",
+      "category": "OSINT and Link Analysis / Attribution",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Hunchly",
+      "category": "OSINT and Link Analysis / Attribution",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Pagefreezer / WebPreserver",
+      "category": "OSINT and Link Analysis / Attribution",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Shodan / Censys / FOFA / ZoomEye",
+      "category": "OSINT and Link Analysis / Attribution",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "FOCA / Photon / Metagoofil",
+      "category": "OSINT and Link Analysis / Attribution",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "ExifTool",
+      "category": "OSINT and Link Analysis / Attribution",
+      "status": "bundled_offline",
+      "note": "metadata helper; confirm availability with status. Reads supplied files only."
+    },
+    {
+      "name": "GeoTime / ArcGIS / Google Earth",
+      "category": "OSINT and Link Analysis / Attribution",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Pimeyes / FaceCheck.ID",
+      "category": "OSINT and Link Analysis / Attribution",
+      "status": "not_enabled",
+      "note": "Not included in automatic research. This app supports public-source reads and offline supplied-file analysis."
+    },
+    {
+      "name": "FotoForensics / Forensically",
+      "category": "OSINT and Link Analysis / Attribution",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Wireshark / tshark",
+      "category": "Network Forensics and Traffic Analysis",
+      "status": "partial_offline",
+      "note": "Wireshark capinfos is bundled for pcap-summary. No live capture or network interception."
+    },
+    {
+      "name": "NetworkMiner",
+      "category": "Network Forensics and Traffic Analysis",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Zeek / Bro",
+      "category": "Network Forensics and Traffic Analysis",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Suricata / Snort",
+      "category": "Network Forensics and Traffic Analysis",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Arkime / Moloch",
+      "category": "Network Forensics and Traffic Analysis",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Security Onion",
+      "category": "Network Forensics and Traffic Analysis",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "SELKS",
+      "category": "Network Forensics and Traffic Analysis",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "NetWitness",
+      "category": "Network Forensics and Traffic Analysis",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Splunk / Elastic Stack",
+      "category": "Network Forensics and Traffic Analysis",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "ntopng",
+      "category": "Network Forensics and Traffic Analysis",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "SiLK / flow-tools",
+      "category": "Network Forensics and Traffic Analysis",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "CloudShark / PacketTotal",
+      "category": "Network Forensics and Traffic Analysis",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "EnCase Forensic",
+      "category": "Endpoint, Disk and File System Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "FTK / Forensic Toolkit",
+      "category": "Endpoint, Disk and File System Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "X-Ways Forensics",
+      "category": "Endpoint, Disk and File System Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Magnet AXIOM",
+      "category": "Endpoint, Disk and File System Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Magnet IGNITE",
+      "category": "Endpoint, Disk and File System Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Autopsy / The Sleuth Kit",
+      "category": "Endpoint, Disk and File System Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "SIFT Workstation",
+      "category": "Endpoint, Disk and File System Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "CAINE",
+      "category": "Endpoint, Disk and File System Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "DEFT Linux",
+      "category": "Endpoint, Disk and File System Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "PALADIN",
+      "category": "Endpoint, Disk and File System Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Nuix Workstation / Investigate",
+      "category": "Endpoint, Disk and File System Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Belkasoft X",
+      "category": "Endpoint, Disk and File System Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Intella",
+      "category": "Endpoint, Disk and File System Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "BlackLight",
+      "category": "Endpoint, Disk and File System Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Griffeye Analyze",
+      "category": "Endpoint, Disk and File System Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "OSForensics",
+      "category": "Endpoint, Disk and File System Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Arsenal Image Mounter",
+      "category": "Endpoint, Disk and File System Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Volatility / Volatility 3",
+      "category": "Memory Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Rekall",
+      "category": "Memory Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Mandiant Redline",
+      "category": "Memory Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Magnet RAM Capture",
+      "category": "Memory Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "FTK Imager",
+      "category": "Memory Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Belkasoft RAM Capturer",
+      "category": "Memory Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "AVML",
+      "category": "Memory Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "LiME",
+      "category": "Memory Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "IDA Pro",
+      "category": "Malware Analysis and Reverse Engineering",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Ghidra",
+      "category": "Malware Analysis and Reverse Engineering",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Binary Ninja",
+      "category": "Malware Analysis and Reverse Engineering",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Hopper",
+      "category": "Malware Analysis and Reverse Engineering",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Radare2 / Rizin",
+      "category": "Malware Analysis and Reverse Engineering",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "x64dbg / x32dbg",
+      "category": "Malware Analysis and Reverse Engineering",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "OllyDbg",
+      "category": "Malware Analysis and Reverse Engineering",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "WinDbg",
+      "category": "Malware Analysis and Reverse Engineering",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Cuckoo Sandbox / CAPE",
+      "category": "Malware Analysis and Reverse Engineering",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Joe Sandbox",
+      "category": "Malware Analysis and Reverse Engineering",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Any.Run",
+      "category": "Malware Analysis and Reverse Engineering",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Hybrid Analysis / Falcon Sandbox",
+      "category": "Malware Analysis and Reverse Engineering",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "VirusTotal",
+      "category": "Malware Analysis and Reverse Engineering",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "MalwareBazaar",
+      "category": "Malware Analysis and Reverse Engineering",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "YARA / ClamAV",
+      "category": "Malware Analysis and Reverse Engineering",
+      "status": "partial_offline",
+      "note": "YARA is bundled for supplied files and rules. ClamAV is not installed."
+    },
+    {
+      "name": "FLARE VM",
+      "category": "Malware Analysis and Reverse Engineering",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "REMnux",
+      "category": "Malware Analysis and Reverse Engineering",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Sysinternals Suite",
+      "category": "Malware Analysis and Reverse Engineering",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Cellebrite UFED",
+      "category": "Mobile, IoT and Vehicle Forensics",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "Cellebrite Physical Analyzer",
+      "category": "Mobile, IoT and Vehicle Forensics",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "Cellebrite Premium",
+      "category": "Mobile, IoT and Vehicle Forensics",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "Cellebrite Inseyets",
+      "category": "Mobile, IoT and Vehicle Forensics",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "Magnet GrayKey",
+      "category": "Mobile, IoT and Vehicle Forensics",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "Magnet Acquire",
+      "category": "Mobile, IoT and Vehicle Forensics",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "Oxygen Forensic Detective",
+      "category": "Mobile, IoT and Vehicle Forensics",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "MSAB XRY / XAMN",
+      "category": "Mobile, IoT and Vehicle Forensics",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "Belkasoft X",
+      "category": "Mobile, IoT and Vehicle Forensics",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "Elcomsoft iOS Forensic Toolkit",
+      "category": "Mobile, IoT and Vehicle Forensics",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "Elcomsoft Phone Breaker",
+      "category": "Mobile, IoT and Vehicle Forensics",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "MOBILedit Forensic",
+      "category": "Mobile, IoT and Vehicle Forensics",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "Passware Kit Forensic",
+      "category": "Mobile, IoT and Vehicle Forensics",
+      "status": "not_enabled",
+      "note": "Not included in automatic research. This app supports public-source reads and offline supplied-file analysis."
+    },
+    {
+      "name": "Berla iVe",
+      "category": "Mobile, IoT and Vehicle Forensics",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "Bosch CDR",
+      "category": "Mobile, IoT and Vehicle Forensics",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "Magnet AXIOM Cloud",
+      "category": "Cloud, Email and Social Media Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Cellebrite Cloud / Endpoint Inspector",
+      "category": "Cloud, Email and Social Media Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Oxygen Forensic Cloud",
+      "category": "Cloud, Email and Social Media Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Elcomsoft Cloud eXplorer",
+      "category": "Cloud, Email and Social Media Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "E3:DS",
+      "category": "Cloud, Email and Social Media Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "X1 Social Discovery",
+      "category": "Cloud, Email and Social Media Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Aid4Mail / MailXaminer / Emailchemy",
+      "category": "Cloud, Email and Social Media Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "HstEx / Browser History Examiner",
+      "category": "Cloud, Email and Social Media Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Intella",
+      "category": "Cloud, Email and Social Media Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Chainalysis Reactor",
+      "category": "Cryptocurrency Tracing and Blockchain Forensics",
+      "status": "not_connected",
+      "note": "Requires the corresponding customer API entitlement and account documentation. The separate Chainalysis Sanctions adapter does not provide Reactor tracing or KYT monitoring."
+    },
+    {
+      "name": "Chainalysis KYT",
+      "category": "Cryptocurrency Tracing and Blockchain Forensics",
+      "status": "not_connected",
+      "note": "Requires the corresponding customer API entitlement and account documentation. The separate Chainalysis Sanctions adapter does not provide Reactor tracing or KYT monitoring."
+    },
+    {
+      "name": "CipherTrace Inspector",
+      "category": "Cryptocurrency Tracing and Blockchain Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Elliptic Navigator",
+      "category": "Cryptocurrency Tracing and Blockchain Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "TRM Labs Forensics",
+      "category": "Cryptocurrency Tracing and Blockchain Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Crystal Blockchain",
+      "category": "Cryptocurrency Tracing and Blockchain Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "QLUE / Blockchain Intelligence Group",
+      "category": "Cryptocurrency Tracing and Blockchain Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Breadcrumbs",
+      "category": "Cryptocurrency Tracing and Blockchain Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Coinpath / Bitquery",
+      "category": "Cryptocurrency Tracing and Blockchain Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "OXT / Blockchair / WalletExplorer",
+      "category": "Cryptocurrency Tracing and Blockchain Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Maltego Crypto Transforms",
+      "category": "Cryptocurrency Tracing and Blockchain Forensics",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Tableau Forensic Bridges",
+      "category": "Hardware, Acquisition and Decryption",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "WiebeTech / CRU write blockers",
+      "category": "Hardware, Acquisition and Decryption",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "Logicube Falcon / Neon",
+      "category": "Hardware, Acquisition and Decryption",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "Image MASSter Solo",
+      "category": "Hardware, Acquisition and Decryption",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "Faraday bags / boxes",
+      "category": "Hardware, Acquisition and Decryption",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "Passware Kit Forensic",
+      "category": "Hardware, Acquisition and Decryption",
+      "status": "not_enabled",
+      "note": "Not included in automatic research. This app supports public-source reads and offline supplied-file analysis."
+    },
+    {
+      "name": "Elcomsoft Password Recovery",
+      "category": "Hardware, Acquisition and Decryption",
+      "status": "not_enabled",
+      "note": "Not included in automatic research. This app supports public-source reads and offline supplied-file analysis."
+    },
+    {
+      "name": "Atola TaskForce / Insight",
+      "category": "Hardware, Acquisition and Decryption",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "DeepSpar Disk Imager",
+      "category": "Hardware, Acquisition and Decryption",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "PC-3000",
+      "category": "Hardware, Acquisition and Decryption",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "JTAG / ISP / Chip-off tools",
+      "category": "Hardware, Acquisition and Decryption",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "Relativity",
+      "category": "Case Management, eDiscovery and Collaboration",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Nuix Discover / Investigate",
+      "category": "Case Management, eDiscovery and Collaboration",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Reveal",
+      "category": "Case Management, eDiscovery and Collaboration",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "FTK / EnCase / AXIOM",
+      "category": "Case Management, eDiscovery and Collaboration",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Intella",
+      "category": "Case Management, eDiscovery and Collaboration",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Palantir Gotham",
+      "category": "Case Management, eDiscovery and Collaboration",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "i2 iBase / Analyst’s Notebook",
+      "category": "Case Management, eDiscovery and Collaboration",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "OpenText Axcelerate",
+      "category": "Case Management, eDiscovery and Collaboration",
+      "status": "not_connected",
+      "note": "No adapter or operator-provided service access is configured. Do not claim this tool was used."
+    },
+    {
+      "name": "Pen register / trap-and-trace",
+      "category": "Legal Process, Lawful Interception and Law-Enforcement-Only Systems",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "IMSI catchers / Stingrays",
+      "category": "Legal Process, Lawful Interception and Law-Enforcement-Only Systems",
+      "status": "not_enabled",
+      "note": "Not included in automatic research. This app supports public-source reads and offline supplied-file analysis."
+    },
+    {
+      "name": "Lawful interception platforms",
+      "category": "Legal Process, Lawful Interception and Law-Enforcement-Only Systems",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "Europol SIRIUS",
+      "category": "Legal Process, Lawful Interception and Law-Enforcement-Only Systems",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "Interpol I-24/7",
+      "category": "Legal Process, Lawful Interception and Law-Enforcement-Only Systems",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "NCMEC CyberTipline",
+      "category": "Legal Process, Lawful Interception and Law-Enforcement-Only Systems",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "FBI IC3",
+      "category": "Legal Process, Lawful Interception and Law-Enforcement-Only Systems",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "MLAT / Mutual legal assistance",
+      "category": "Legal Process, Lawful Interception and Law-Enforcement-Only Systems",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "J-CAT / EC3",
+      "category": "Legal Process, Lawful Interception and Law-Enforcement-Only Systems",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "NCFTA",
+      "category": "Legal Process, Lawful Interception and Law-Enforcement-Only Systems",
+      "status": "external_workflow",
+      "note": "Not exposed to the agent. Requires external equipment, software or a separate human workflow."
+    },
+    {
+      "name": "Chainalysis Sanctions",
+      "category": "Cryptocurrency Tracing and Blockchain Forensics",
+      "status": "adapter_available",
+      "note": "Read-only direct sanctions lookup. Run integrations to check credential configuration. This does not enable Reactor or KYT."
+    }
+  ]
+}

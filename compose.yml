@@ -1,0 +1,55 @@
+name: darknetra-cli
+services:
+  research:
+    image: darknetra-research-tools:local
+    build:
+      context: ./frontend
+      dockerfile: research/Dockerfile
+    read_only: true
+    tmpfs:
+      - /tmp:uid=1000,gid=1000,mode=1777,size=128m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "try{process.exit(require('fs').readFileSync('/tmp/tor.log','utf8').includes('Bootstrapped 100%')?0:1)}catch{process.exit(1)}"]
+      interval: 15s
+      timeout: 5s
+      start_period: 120s
+      retries: 10
+  ui:
+    env_file:
+      - path: ./frontend/.env.local
+        required: false
+    build:
+      context: ./frontend
+      additional_contexts:
+        research_runtime: service:research
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      CODEX_MODEL: ${CODEX_MODEL:-}
+      DARKNETRA_VAPID_SUBJECT: ${DARKNETRA_VAPID_SUBJECT:-https://darknetra.invalid}
+      DARKNETRA_TOR_SOCKS_URL: socks5h://research:9050
+      DARKNETRA_PROVIDER_FILE: /app/.codex-chat/providers.json
+    depends_on:
+      research:
+        condition: service_started
+    volumes:
+      - ./frontend/.codex-chat:/app/.codex-chat
+      - ./frontend/assistant-instructions.md:/app/assistant-instructions.md:ro
+      - ./frontend/skills:/app/skills:ro
+    secrets:
+      - codex_auth
+    init: true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+secrets:
+  codex_auth:
+    file: ${CODEX_AUTH_FILE:-${USERPROFILE}/.codex/auth.json}

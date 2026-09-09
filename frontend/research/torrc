@@ -1,0 +1,10 @@
+ClientOnly 1
+SocksPort 0.0.0.0:9050
+SocksPolicy accept 127.0.0.1
+SocksPolicy accept 172.16.0.0/12
+SocksPolicy accept 192.168.0.0/16
+SocksPolicy accept 10.0.0.0/8
+SocksPolicy reject *
+DataDirectory /tmp/tor
+Log notice stdout
+Log notice file /tmp/tor.log

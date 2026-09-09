@@ -1,3 +1,10 @@
-.PHONY: dev up stop migrate test seed demo openapi check-openapi serve
-dev up stop migrate test seed demo openapi check-openapi serve:
-	uv run --project backend python scripts/manage.py $@
+.PHONY: dev test build
+
+dev:
+	cd frontend && npm run dev
+
+test:
+	cd frontend && npm test && npm run typecheck
+
+build:
+	cd frontend && npm run build

@@ -26,6 +26,8 @@ Overview and rationale: `docs/implementation-plan.md`. Conventions and invariant
 | 15 | [Frontend track (separate project, contract consumer)](15-frontend-track.md) | parallel from M0 | D | 11 |
 | 16 | [Post-hackathon: reach, Hermes, Codex, Graphiti, guardrails, Tor, sharing](16-post-hackathon.md) | M7–M9 | all | 10 |
 | 17 | [Scenario matrix: every case and the test that proves it](17-scenario-matrix.md) | cross-cutting | all | — |
+| 18–20 | [Sandbox setup](18-sandbox-setup.md), [gap closure](19-gap-closure-plan.md), [UI completion](20-ui-completion-plan.md) | M7 | all | audit |
+| 21 | [Codex harness, live scraping stack, Trends & Wallets UI](21-codex-harness.md) | M7 | all | 06, 08, 18–20 |
 
 ## Global rules (apply to every plan)
 

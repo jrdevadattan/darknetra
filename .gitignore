@@ -29,4 +29,13 @@ frontend/CLAUDE.md
 frontend/lib/generated/
 frontend/test-results/
 frontend/playwright-report/
+# trained research model artefacts are distributed separately
+models/gnn/models/
 
+# Local Codex chat state
+.codex-chat/
+
+# Local presentation builds, generated exports and documentation archive
+/.ppt-build/
+/output/
+/docs.rar

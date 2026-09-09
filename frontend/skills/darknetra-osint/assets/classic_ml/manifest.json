@@ -1,0 +1,11 @@
+{
+  "source_commit": "f9e4311f0f6331d05427245be7877651d0a17271",
+  "source_path": "classic_ml",
+  "sha256": {
+    "predict.py": "e488d501a927a50883c5a893389d93212947221815ab58af56847f4e3a2dceca",
+    "models/graphsage_temporal_best.pt": "02ebad62ddf88155c33cceb116031686fc732d88cd3e25adbd217536e12c3e04",
+    "models/graphsage_temporal_config.json": "9e70bb28d9c6037aed7dd5e7be893aa3c8cc38005acd5824c1d829bea731960f",
+    "models/temporal_scaler.pkl": "298a909144d163f4ae66f16e8c40ab45ff67027b463f9b2d87ff33b141b0a311",
+    "models/temporal_feature_names.txt": "0d13cc8d9460567b5df2f99fe677262cf4259b1548840aaf1a177485bf0a53ac"
+  }
+}
