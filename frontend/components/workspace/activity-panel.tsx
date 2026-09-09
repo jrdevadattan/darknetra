@@ -1,4 +1,5 @@
 "use client";
+import { useLanguage } from "./language";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTheme } from "next-themes";
 import {
@@ -83,6 +84,7 @@ function GraphViewport({ layoutKey }: { layoutKey: string }) {
   return null;
 }
 function Status({ value }: { value: string }) {
+  const { t } = useLanguage();
   return (
     <span className={`agent-status ${value}`}>
       {["running", "in_progress", "pending"].includes(value) ? (
@@ -90,7 +92,7 @@ function Status({ value }: { value: string }) {
       ) : ["done", "completed", "retrieved", "analysed"].includes(value) ? (
         <Check size={12} />
       ) : null}
-      {statusLabel[value] || value}
+      {t(statusLabel[value] || value)}
     </span>
   );
 }
@@ -114,6 +116,7 @@ export function ActivityPanel({
   side?: "left" | "right";
   onResize?: (width: number) => void;
 }) {
+  const { t } = useLanguage();
   const { resolvedTheme } = useTheme();
   const [tab, setTab] = useState("timeline");
   const [expanded, setExpanded] = useState(false);
@@ -275,7 +278,7 @@ export function ActivityPanel({
   return (
     <aside
       className={`activity-panel investigation-panel ${expanded ? "expanded" : ""} ${tab === "graph" ? "graph-active" : ""}`}
-      aria-label="Agent activity"
+      aria-label={t("Agent activity")}
     >
       {onResize && !expanded && (
         <PanelResize
@@ -291,7 +294,7 @@ export function ActivityPanel({
       <header className="investigation-header">
         <strong>
           <GitBranch size={17} />
-          Agent activity
+          {t("Agent activity")}
         </strong>
         <div className="panel-actions">
           <button
@@ -323,9 +326,9 @@ export function ActivityPanel({
         aria-label="Investigation views"
       >
         {[
-          ["timeline", List, "Timeline"],
-          ["graph", GitBranch, "Evidence graph"],
-          ["output", Text, "Output"],
+          ["timeline", List, t("Timeline")],
+          ["graph", GitBranch, t("Evidence graph")],
+          ["output", Text, t("Output")],
         ].map(([id, Icon, label]) => {
           const TabIcon = Icon as typeof List;
           return (
@@ -360,7 +363,7 @@ export function ActivityPanel({
             </span>
             <div>
               <strong>
-                {message.netra ? "Netra Case Lead" : "Lead Investigator"}
+                {message.netra ? "Netra Case Lead" : t("Lead Investigator")}
               </strong>
               <p>
                 {message.status === "running"
@@ -372,7 +375,7 @@ export function ActivityPanel({
                   : message.netra && message.netra.status !== "complete"
                     ? "Review has unresolved work"
                     : message.status === "done"
-                      ? "Review complete"
+                      ? t("Review complete")
                       : "Review ended before completion"}
               </p>
             </div>
@@ -479,7 +482,7 @@ export function ActivityPanel({
                   <Search size={15} />
                   <input
                     aria-label="Search graph"
-                    placeholder="Find a source, investigator or file…"
+                    placeholder={t("Find a source, investigator or file…")}
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
                   />
@@ -786,15 +789,15 @@ export function ActivityPanel({
             )}
             {tab === "output" && (
               <div className="run-output">
-                <h3>Investigator updates</h3>
+                <h3>{t("Investigator updates")}</h3>
                 <ActivitySteps
                   steps={message.activity.filter((s) => s.kind === "update")}
                   {...sourceOptions}
                 />
                 <h3>
                   {message.status === "running"
-                    ? "Response so far"
-                    : "Investigation report"}
+                    ? t("Response so far")
+                    : t("Investigation report")}
                 </h3>
                 <div className="output-report">
                   <CaseMarkdown chatId={chatId} files={files} sources={sources}>
@@ -804,7 +807,7 @@ export function ActivityPanel({
                   {message.text && (
                     <CopyControl
                       value={message.text}
-                      label="Copy investigation report"
+                      label={t("Copy investigation report")}
                     />
                   )}
                 </div>

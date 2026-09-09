@@ -1,4 +1,5 @@
 "use client";
+import { useLanguage } from "./language";
 
 import { useState } from "react";
 import {
@@ -22,6 +23,7 @@ export function ArchivedChats({
   onRestore: (chat: Chat) => Promise<void>;
   onOpen: (chat: Chat) => void;
 }) {
+  const { t } = useLanguage();
   const [query, setQuery] = useState("");
   const [restoring, setRestoring] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -50,7 +52,10 @@ export function ArchivedChats({
   }
 
   return (
-    <section className="archived-chats" aria-label="Archived conversations">
+    <section
+      className="archived-chats"
+      aria-label={t("Archived conversations")}
+    >
       <div className="archive-intro">
         <strong>Out of the sidebar. Still here.</strong>
         <p>
@@ -63,8 +68,8 @@ export function ArchivedChats({
           <Search size={16} aria-hidden="true" />
           <input
             type="search"
-            aria-label="Search archived chats"
-            placeholder="Search chats or cases…"
+            aria-label={t("Search archived chats")}
+            placeholder={t("Search chats or cases…")}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
@@ -113,14 +118,14 @@ export function ArchivedChats({
               ) && (
                 <span className="archive-monitor">
                   <Clock3 size={12} />
-                  Monitoring active
+                  {t("Monitoring active")}
                 </span>
               )}
             </div>
             <div className="archive-card-actions">
               <button
                 className="icon-button"
-                title="Open chat"
+                title={t("Open chat")}
                 aria-label={`Open ${chat.title}`}
                 onClick={() => onOpen(chat)}
               >
@@ -136,7 +141,7 @@ export function ArchivedChats({
                 ) : (
                   <ArchiveRestore size={15} />
                 )}
-                {restoring === chat.id ? "Restoring…" : "Restore"}
+                {restoring === chat.id ? t("Restoring…") : t("Restore")}
               </button>
             </div>
           </article>

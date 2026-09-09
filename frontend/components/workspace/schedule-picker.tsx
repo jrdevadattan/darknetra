@@ -1,4 +1,5 @@
 "use client";
+import { useLanguage } from "./language";
 import { useRef } from "react";
 import { Clock3, Repeat2, Globe2 } from "lucide-react";
 
@@ -92,6 +93,12 @@ export function SchedulePicker({
   timezone: string;
   onTimezoneChange: (value: string) => void;
 }) {
+  const { t, language } = useLanguage();
+  const dayLabel = (day: number, width: "long" | "short" = "long") =>
+    new Intl.DateTimeFormat(language, {
+      weekday: width,
+      timeZone: "UTC",
+    }).format(new Date(Date.UTC(2026, 0, 4 + day)));
   const timeInput = useRef<HTMLInputElement>(null);
   const timed = value.repeat !== "interval";
   const unit = value.intervalUnit || "minutes";
@@ -101,10 +108,11 @@ export function SchedulePicker({
       <div className="schedule-frequency">
         <label className="schedule-frequency-row">
           <span>
-            <Repeat2 size={15} /> Repeat
+            <Repeat2 size={15} />
+            {t("Repeat")}
           </span>
           <select
-            aria-label="Repeat"
+            aria-label={t("Repeat")}
             value={value.repeat}
             onChange={(e) =>
               onChange({
@@ -113,19 +121,20 @@ export function SchedulePicker({
               })
             }
           >
-            <option value="interval">Interval</option>
-            <option value="daily">Daily</option>
-            <option value="weekdays">Weekdays</option>
-            <option value="weekly">Weekly</option>
-            <option value="custom">Custom</option>
+            <option value="interval">{t("Interval")}</option>
+            <option value="daily">{t("Daily")}</option>
+            <option value="weekdays">{t("Weekdays")}</option>
+            <option value="weekly">{t("Weekly")}</option>
+            <option value="custom">{t("Custom")}</option>
           </select>
         </label>
         <label className="schedule-frequency-row">
           <span>
-            <Globe2 size={15} /> Timezone
+            <Globe2 size={15} />
+            {t("Timezone")}
           </span>
           <select
-            aria-label="Timezone"
+            aria-label={t("Timezone")}
             value={timezone}
             onChange={(e) => onTimezoneChange(e.target.value)}
           >
@@ -177,9 +186,9 @@ export function SchedulePicker({
       )}
       {value.repeat === "weekly" && (
         <label>
-          Day of the week
+          {t("Day of the week")}
           <select
-            aria-label="Day of the week"
+            aria-label={t("Day of the week")}
             value={value.weeklyDay ?? 1}
             onChange={(event) =>
               onChange({ ...value, weeklyDay: Number(event.target.value) })
@@ -187,7 +196,7 @@ export function SchedulePicker({
           >
             {[1, 2, 3, 4, 5, 6, 0].map((day) => (
               <option key={day} value={day}>
-                {weekDays[day]}
+                {dayLabel(day)}
               </option>
             ))}
           </select>
@@ -199,11 +208,11 @@ export function SchedulePicker({
         >
           {value.repeat === "custom" && (
             <p className="custom-clock-heading">
-              Custom schedule{" "}
+              {t("Custom schedule")}{" "}
               <span>Choose the time of day and when to repeat.</span>
             </p>
           )}
-          <label htmlFor="monitor-time">Time of day</label>
+          <label htmlFor="monitor-time">{t("Time of day")}</label>
           <div className="schedule-clock-input">
             <input
               ref={timeInput}
@@ -216,8 +225,8 @@ export function SchedulePicker({
             />
             <button
               type="button"
-              aria-label="Choose time"
-              title="Choose time"
+              aria-label={t("Choose time")}
+              title={t("Choose time")}
               onClick={() => {
                 try {
                   timeInput.current?.showPicker();
@@ -234,13 +243,13 @@ export function SchedulePicker({
       )}
       {value.repeat === "custom" && (
         <fieldset className="schedule-days">
-          <legend>Repeat on</legend>
+          <legend>{t("Repeat on")}</legend>
           <div>
             {[1, 2, 3, 4, 5, 6, 0].map((day) => (
               <button
                 type="button"
                 key={day}
-                aria-label={weekDays[day]}
+                aria-label={dayLabel(day)}
                 aria-pressed={value.days.includes(day)}
                 onClick={() =>
                   onChange({
@@ -251,7 +260,7 @@ export function SchedulePicker({
                   })
                 }
               >
-                {weekDays[day].slice(0, 3)}
+                {dayLabel(day, "short")}
               </button>
             ))}
           </div>

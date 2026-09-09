@@ -1,4 +1,5 @@
 "use client";
+import { useLanguage } from "./language";
 import { useMemo, useState } from "react";
 import {
   CircleAlert,
@@ -20,6 +21,7 @@ export function InvestigationTimeline({
   message,
   ...options
 }: { message: ChatMessage } & SourceOptions) {
+  const { t } = useLanguage();
   const [filter, setFilter] = useState<ActivityFilter>("all");
   const [query, setQuery] = useState("");
   const allSteps = useMemo(
@@ -68,8 +70,8 @@ export function InvestigationTimeline({
           {(
             [
               ["all", "All activity", List],
-              ["working", "Working", LoaderCircle],
-              ["attention", "Needs attention", CircleAlert],
+              ["working", t("Working"), LoaderCircle],
+              ["attention", t("Needs attention"), CircleAlert],
             ] as const
           ).map(([id, label, Icon]) => (
             <button
@@ -88,7 +90,7 @@ export function InvestigationTimeline({
           <Search size={15} />
           <input
             aria-label="Search activity"
-            placeholder="Search steps, websites or investigators…"
+            placeholder={t("Search steps, websites or investigators…")}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />

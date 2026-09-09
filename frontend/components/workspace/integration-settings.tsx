@@ -1,4 +1,5 @@
 "use client";
+import { useLanguage } from "./language";
 import { useEffect, useState } from "react";
 import {
   ArrowUpRight,
@@ -14,6 +15,7 @@ import {
 import type { ProviderIntegration } from "@/lib/provider-integrations";
 
 export function IntegrationSettings() {
+  const { t } = useLanguage();
   const [providers, setProviders] = useState<ProviderIntegration[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -43,7 +45,7 @@ export function IntegrationSettings() {
       aria-label="Intelligence integrations"
     >
       <div className="integration-heading">
-        <h3>Intelligence tools</h3>
+        <h3>{t("Intelligence tools")}</h3>
         <button
           type="button"
           className="icon-button"

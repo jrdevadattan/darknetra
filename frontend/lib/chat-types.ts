@@ -73,6 +73,7 @@ export type NetraGoal = {
   turns: number;
 };
 export type ChatMessage = {
+  language?: import("./languages").LanguageCode;
   id: string;
   role: "user" | "assistant";
   text: string;
@@ -151,6 +152,7 @@ export type WorkspaceNotification = {
   read?: boolean;
 };
 export type WorkspaceData = {
+  preferences?: { language?: import("./languages").LanguageCode };
   version: 1;
   cases: Case[];
   chats: Chat[];

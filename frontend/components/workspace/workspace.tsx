@@ -1,4 +1,5 @@
 "use client";
+import { useLanguage } from "./language";
 import {
   useCallback,
   useEffect,
@@ -68,6 +69,7 @@ async function request<T>(url: string, body?: unknown): Promise<T> {
 }
 
 export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
+  const { t, language, saving: languageSaving } = useLanguage();
   const [navigationWidth, resizeNavigation] = usePanelWidth(
     "darknetra-navigation-width",
     250,
@@ -283,6 +285,7 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
   async function send() {
     if (
       (!text.trim() && !attachments.length) ||
+      languageSaving ||
       busy ||
       uploading ||
       chat?.archivedAt ||
@@ -425,7 +428,7 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
           <button
             className="chat-options icon-button"
             aria-label={`Options for ${item.title}`}
-            title="Chat options"
+            title={t("Chat options")}
             disabled={archiving !== null}
           >
             {archiving === item.id ? (
@@ -438,7 +441,7 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
         <DropdownMenuContent align="start">
           <DropdownMenuItem onSelect={() => void archiveFromChat(item, true)}>
             <Archive size={16} />
-            Archive chat
+            {t("Archive chat")}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -457,13 +460,13 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
       {mobile && (
         <button
           className="nav-overlay"
-          aria-label="Close navigation"
+          aria-label={t("Close navigation")}
           onClick={() => setMobile(false)}
         />
       )}
       <aside
         className={`sidebar ${mobile ? "open" : ""}`}
-        aria-label="Workspace navigation"
+        aria-label={t("Workspace navigation")}
         id="workspace-navigation"
       >
         <PanelResize
@@ -477,7 +480,7 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
         <button
           className="brand"
           type="button"
-          aria-label="Open workspace home"
+          aria-label={t("Open workspace home")}
           onClick={() => navigate(null)}
         >
           <span className="brand-mark">
@@ -488,12 +491,12 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
         <div className="sidebar-actions">
           <button className="primary-button" onClick={() => navigate(null)}>
             <Plus size={16} />
-            New chat
+            {t("New chat")}
           </button>
           <button
             className="icon-button"
-            aria-label="Create case"
-            title="Create case"
+            aria-label={t("Create case")}
+            title={t("Create case")}
             onClick={() => setNewCase(true)}
           >
             <FolderOpen size={18} />
@@ -501,8 +504,8 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
         </div>
         <nav className="sidebar-nav">
           <div className="nav-section-title">
-            Cases
-            <button aria-label="New case" onClick={() => setNewCase(true)}>
+            {t("Cases")}
+            <button aria-label={t("New case")} onClick={() => setNewCase(true)}>
               <Plus size={14} />
             </button>
           </div>
@@ -536,7 +539,7 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
                     <button
                       className="case-folder-menu icon-button"
                       aria-label={`Case options: ${item.title}`}
-                      title="Case options"
+                      title={t("Case options")}
                     >
                       <MoreHorizontal size={16} />
                     </button>
@@ -544,7 +547,7 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
                   <DropdownMenuContent align="start">
                     <DropdownMenuItem onSelect={() => setBoardCase(item.id)}>
                       <Network size={15} />
-                      Create knowledge graph
+                      {t("Create knowledge graph")}
                     </DropdownMenuItem>
                     <DropdownMenuItem
                       onSelect={() =>
@@ -553,8 +556,8 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
                     >
                       <FolderOpen size={15} />
                       {folderExpanded(item.id)
-                        ? "Collapse folder"
-                        : "Expand folder"}
+                        ? t("Collapse folder")
+                        : t("Expand folder")}
                     </DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
@@ -566,7 +569,7 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
               >
                 <button className="nav-item" onClick={() => navigate(item.id)}>
                   <Plus size={14} />
-                  <span>New case chat</span>
+                  <span>{t("New case chat")}</span>
                 </button>
                 {data.chats.some(
                   (entry) => entry.caseId === item.id && entry.board,
@@ -576,7 +579,7 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
                     onClick={() => setBoardCase(item.id)}
                   >
                     <Network size={14} />
-                    <span>Knowledge graph</span>
+                    <span>{t("Knowledge graph")}</span>
                   </button>
                 )}
                 {data.chats
@@ -593,7 +596,7 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
           {!data.cases.length && (
             <p className="nav-empty">Create a case to organise your work.</p>
           )}
-          <div className="nav-section-title">Chats</div>
+          <div className="nav-section-title">{t("Chats")}</div>
           {data.chats
             .filter((item) => !item.caseId && !item.archivedAt)
             .map(chatLink)}
@@ -601,7 +604,7 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
         <footer className="sidebar-footer">
           <Bot size={17} />
           <div>
-            Ollama<small>Local workspace</small>
+            Ollama<small>{t("Local workspace")}</small>
           </div>
         </footer>
       </aside>
@@ -610,12 +613,12 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
           <div className="breadcrumb">
             <button
               className="icon-button mobile-menu"
-              aria-label="Open navigation"
+              aria-label={t("Open navigation")}
               onClick={() => setMobile(true)}
             >
               <Menu size={19} />
             </button>
-            <span>{caseId ? "Cases" : "Chat"}</span>
+            <span>{caseId ? t("Cases") : t("Chat")}</span>
             <ChevronRight size={14} />
             <strong>{caseData?.title || "Ollama"}</strong>
           </div>
@@ -636,7 +639,7 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
             />
             <button
               className={`icon-button ${activity ? "selected" : ""}`}
-              aria-label="Toggle agent activity"
+              aria-label={t("Toggle agent activity")}
               onClick={() => setActivity(!activity)}
             >
               <PanelRight size={18} />
@@ -646,7 +649,7 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
         <div
           className={`chat-body ${activityLeft ? "activity-on-left" : "activity-on-right"}`}
         >
-          <section className="chat-column" aria-label="Conversation">
+          <section className="chat-column" aria-label={t("Conversation")}>
             {chat && (
               <div className="chat-heading">
                 <h1>{chat.title}</h1>
@@ -656,12 +659,14 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
             {loading ? (
               <div className="welcome">
                 <LoaderCircle className="spin" />
-                <p>Opening workspace…</p>
+                <p>{t("Opening workspace…")}</p>
               </div>
             ) : (caseId && !caseData) || (chatId && !chat) ? (
               <div className="welcome">
                 <p>This case or chat could not be found.</p>
-                <button onClick={() => navigate(null)}>Open workspace</button>
+                <button onClick={() => navigate(null)}>
+                  {t("Open workspace")}
+                </button>
               </div>
             ) : !chat?.messages.length ? (
               <div className="welcome">
@@ -669,13 +674,9 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
                   <Bot size={32} strokeWidth={1.4} />
                 </div>
                 <span className="eyebrow">
-                  {caseData ? "CASE CHAT" : "OLLAMA"}
+                  {caseData ? t("CASE CHAT") : "OLLAMA"}
                 </span>
-                <h1>
-                  What are we
-                  <br />
-                  <span>working on today?</span>
-                </h1>
+                <h1>{t("What are we working on today?")}</h1>
                 <p>
                   {caseData?.notes ||
                     "Ask a question, research a topic, or work through an idea. Ollama takes it from here."}
@@ -692,7 +693,9 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
                   >
                     <MessageSquare size={19} />
                     <strong>
-                      {caseData ? "Start with this case" : "Think it through"}
+                      {caseData
+                        ? t("Start with this case")
+                        : t("Think it through")}
                     </strong>
                     <span>Turn a question into a conversation</span>
                   </button>
@@ -700,7 +703,7 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
                     onClick={() => setText("Help me plan the next steps.")}
                   >
                     <Layers3 size={19} />
-                    <strong>Plan the next steps</strong>
+                    <strong>{t("Plan the next steps")}</strong>
                     <span>Work out what to do next</span>
                   </button>
                 </div>
@@ -728,11 +731,11 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
                       </span>
                       <strong>
                         {message.role === "assistant"
-                          ? "Lead Investigator"
-                          : "You"}
+                          ? t("Lead Investigator")
+                          : t("You")}
                       </strong>
                       <time>
-                        {new Date(message.at).toLocaleTimeString([], {
+                        {new Date(message.at).toLocaleTimeString(language, {
                           hour: "2-digit",
                           minute: "2-digit",
                         })}
@@ -757,7 +760,15 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
                       </div>
                     )}
                     {message.netra && <NetraStatus goal={message.netra} />}
-                    <div className="message-text">
+                    <div
+                      className="message-text"
+                      dir="auto"
+                      lang={
+                        message.role === "assistant"
+                          ? message.language
+                          : undefined
+                      }
+                    >
                       {message.role === "assistant" ? (
                         <CaseMarkdown
                           chatId={chat.id}
@@ -804,7 +815,7 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
                               )
                             }
                           >
-                            Manage monitoring
+                            {t("Manage monitoring")}
                           </button>
                         )}
                       </aside>
@@ -819,7 +830,7 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
                       >
                         <LoaderCircle className="spin" size={14} />
                         {message.activity.at(-1)?.label ||
-                          "Reviewing the case…"}
+                          t("Reviewing the case…")}
                       </button>
                     )}
                     {message.error && (
@@ -828,7 +839,7 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
                       </p>
                     )}
                     {message.status === "stopped" && (
-                      <p className="muted">Stopped</p>
+                      <p className="muted">{t("Stopped")}</p>
                     )}
                     {message.role === "assistant" && message.text && (
                       <div className="message-actions">
@@ -840,14 +851,14 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
                           }}
                         >
                           <PanelRight size={13} />
-                          View run
+                          {t("View run")}
                           {message.agents?.length
                             ? ` · ${message.agents.length} specialists`
                             : ""}
                         </button>
                         <button
                           className="copy-button"
-                          aria-label="Copy message"
+                          aria-label={t("Copy message")}
                           onClick={async () => {
                             try {
                               await navigator.clipboard.writeText(message.text);
@@ -895,7 +906,7 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
                   {busy && (
                     <button
                       className="icon-button"
-                      aria-label="Stop reply"
+                      aria-label={t("Stop reply")}
                       onClick={() => void stop()}
                     >
                       <Square size={15} />
@@ -911,7 +922,7 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
                     ) : (
                       <ArchiveRestore size={16} />
                     )}
-                    Restore chat
+                    {t("Restore chat")}
                   </button>
                 </div>
               ) : (
@@ -951,15 +962,18 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
                       </div>
                     )}
                     <textarea
-                      aria-label="Message"
+                      dir="auto"
+                      aria-label={t("Message")}
                       placeholder={
                         caseData
                           ? netra
-                            ? "Describe the category, region or references for Netra to investigate…"
-                            : "Message Ollama about this case…"
+                            ? t(
+                                "Describe the category, region or references for Netra to investigate…",
+                              )
+                            : t("Message Ollama about this case…")
                           : netra
-                            ? "Give Netra a focused investigation objective…"
-                            : "Message Ollama…"
+                            ? t("Give Netra a focused investigation objective…")
+                            : t("Message Ollama…")
                       }
                       value={text}
                       maxLength={32000}
@@ -1011,7 +1025,7 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
                         onClick={() => setThinking(!thinking)}
                       >
                         <Brain size={14} />
-                        {thinking ? "Thinking" : "Normal"}
+                        {thinking ? t("Thinking") : t("Normal")}
                       </button>
                       <button
                         className={`mode-button netra-toggle ${netra ? "selected" : ""}`}
@@ -1029,7 +1043,7 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
                         <button
                           className="send-button"
                           type="button"
-                          aria-label="Stop reply"
+                          aria-label={t("Stop reply")}
                           onClick={() => void stop()}
                         >
                           <Square size={14} />
@@ -1037,9 +1051,10 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
                       ) : (
                         <button
                           className="send-button"
-                          aria-label="Send message"
+                          aria-label={t("Send message")}
                           disabled={
                             (!text.trim() && !attachments.length) ||
+                            languageSaving ||
                             uploading ||
                             loading ||
                             Boolean(sending) ||
@@ -1112,12 +1127,12 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
           >
             <header>
               <div>
-                <h2 id="case-dialog-title">Create a case</h2>
+                <h2 id="case-dialog-title">{t("Create a case")}</h2>
                 <p>Give your conversations a shared context.</p>
               </div>
               <button
                 className="icon-button"
-                aria-label="Close case dialog"
+                aria-label={t("Close case dialog")}
                 disabled={savingCase}
                 onClick={() => setNewCase(false)}
               >
@@ -1126,24 +1141,25 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
             </header>
             <form onSubmit={(event) => void create(event)}>
               <label>
-                Case title
+                {t("Case title")}
                 <input
-                  aria-label="Case title"
+                  aria-label={t("Case title")}
                   autoFocus
                   required
                   maxLength={300}
-                  placeholder="Name this case"
+                  placeholder={t("Name this case")}
                   value={caseTitle}
                   onChange={(event) => setCaseTitle(event.target.value)}
                 />
               </label>
               <label>
-                Notes <span>(optional)</span>
+                {t("Notes")}
+                <span>{t("(optional)")}</span>
                 <textarea
-                  aria-label="Case notes"
+                  aria-label={t("Case notes")}
                   maxLength={8000}
                   rows={4}
-                  placeholder="What should Ollama know?"
+                  placeholder={t("What should Ollama know?")}
                   value={caseNotes}
                   onChange={(event) => setCaseNotes(event.target.value)}
                 />
@@ -1157,7 +1173,7 @@ export function Workspace({ initialCaseId }: { initialCaseId?: string }) {
                 className="primary-button"
                 disabled={savingCase || !caseTitle.trim()}
               >
-                {savingCase ? "Creating…" : "Create case"}
+                {savingCase ? t("Creating…") : t("Create case")}
               </button>
             </form>
           </section>

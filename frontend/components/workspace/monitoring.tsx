@@ -1,4 +1,5 @@
 "use client";
+import { useLanguage } from "./language";
 import { useCallback, useEffect, useState } from "react";
 import { Clock3, LoaderCircle, Pause, Play, Plus } from "lucide-react";
 import {
@@ -37,6 +38,7 @@ export function CaseMonitoring({
   onOpenChat: (chatId: string) => void;
   onChange: () => Promise<void>;
 }) {
+  const { t } = useLanguage();
   const [open, setOpen] = useState(false);
   const [data, setData] = useState<State>();
   const [error, setError] = useState("");
@@ -112,15 +114,15 @@ export function CaseMonitoring({
       <DialogTrigger asChild>
         <button
           className="icon-button"
-          aria-label="Case monitoring"
-          title="Case monitoring"
+          aria-label={t("Case monitoring")}
+          title={t("Case monitoring")}
         >
           <Clock3 size={18} />
         </button>
       </DialogTrigger>
       <DialogContent className="monitor-dialog">
         <DialogHeader>
-          <DialogTitle>Case monitoring</DialogTitle>
+          <DialogTitle>{t("Case monitoring")}</DialogTitle>
           <DialogDescription>
             Schedule repeat checks and review their results here.
           </DialogDescription>
@@ -153,7 +155,7 @@ export function CaseMonitoring({
               <article className="monitor-card" key={monitor.id}>
                 <header>
                   <strong>{monitor.title}</strong>
-                  <span>{monitor.enabled ? "Scheduled" : "Paused"}</span>
+                  <span>{monitor.enabled ? "Scheduled" : t("Paused")}</span>
                 </header>
                 <p className="monitor-prompt">{monitor.prompt}</p>
                 <p>
@@ -176,7 +178,7 @@ export function CaseMonitoring({
                     }
                   >
                     {monitor.enabled ? <Pause size={13} /> : <Play size={13} />}
-                    {monitor.enabled ? "Pause" : "Resume"}
+                    {monitor.enabled ? t("Pause") : t("Resume")}
                   </button>
                   <button
                     disabled={
@@ -188,7 +190,7 @@ export function CaseMonitoring({
                     }
                   >
                     <Play size={13} />
-                    Run now
+                    {t("Run now")}
                   </button>
                   <button
                     onClick={() => {
@@ -213,7 +215,7 @@ export function CaseMonitoring({
                             <LoaderCircle size={12} className="spin" />
                           )}
                           {run.status === "done"
-                            ? "Completed"
+                            ? t("Completed")
                             : run.status.charAt(0).toUpperCase() +
                               run.status.slice(1)}
                         </span>
@@ -253,7 +255,7 @@ export function CaseMonitoring({
                 }}
               >
                 <label>
-                  Schedule name
+                  {t("Schedule name")}
                   <input
                     value={title}
                     onChange={(e) => setTitle(e.target.value)}
@@ -289,11 +291,11 @@ export function CaseMonitoring({
                       !scheduleExpression(schedule)
                     }
                   >
-                    {busy ? "Saving…" : "Save schedule"}
+                    {busy ? t("Saving…") : t("Save schedule")}
                   </button>
                   {adding && (
                     <button type="button" onClick={() => setAdding(false)}>
-                      Cancel
+                      {t("Cancel")}
                     </button>
                   )}
                 </div>
@@ -302,7 +304,7 @@ export function CaseMonitoring({
               data && (
                 <button className="monitor-add" onClick={() => setAdding(true)}>
                   <Plus size={15} />
-                  Add schedule
+                  {t("Add schedule")}
                 </button>
               )
             )}

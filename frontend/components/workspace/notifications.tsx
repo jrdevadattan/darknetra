@@ -1,4 +1,5 @@
 "use client";
+import { useLanguage } from "./language";
 import { useEffect, useState } from "react";
 import { Bell, BellRing, LoaderCircle } from "lucide-react";
 import {
@@ -24,6 +25,7 @@ async function api(body?: unknown) {
   return data;
 }
 export function NotificationSettings() {
+  const { t } = useLanguage();
   const [supported, setSupported] = useState(false);
   const [enabled, setEnabled] = useState(false);
   const [failuresOnly, setFailuresOnly] = useState(false);
@@ -141,7 +143,8 @@ export function NotificationSettings() {
   return (
     <fieldset className="notification-settings">
       <legend>
-        <BellRing size={17} /> Push notifications
+        <BellRing size={17} />
+        {t("Push notifications")}
       </legend>
       <p>
         Get an alert when a monitoring check finishes or needs attention, even
@@ -155,7 +158,7 @@ export function NotificationSettings() {
           onClick={() => void act(enabled ? "disable" : "enable")}
         >
           {busy && <LoaderCircle size={14} className="spin" />}
-          {enabled ? "Disable notifications" : "Enable notifications"}
+          {enabled ? t("Disable notifications") : t("Enable notifications")}
         </button>
         {enabled && (
           <button
@@ -193,6 +196,7 @@ export function NotificationInbox({
 }: {
   onOpen: (caseId: string, chatId: string) => void;
 }) {
+  const { t } = useLanguage();
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<WorkspaceNotification[]>([]);
   const [error, setError] = useState("");
@@ -233,7 +237,7 @@ export function NotificationInbox({
         <button
           className="icon-button notification-bell"
           aria-label={`Notifications${unread ? `, ${unread} unread` : ""}`}
-          title="Notifications"
+          title={t("Notifications")}
         >
           <Bell size={18} />
           {unread > 0 && (
@@ -245,14 +249,14 @@ export function NotificationInbox({
       </DialogTrigger>
       <DialogContent className="notifications-dialog">
         <DialogHeader>
-          <DialogTitle>Notifications</DialogTitle>
+          <DialogTitle>{t("Notifications")}</DialogTitle>
           <DialogDescription>
             Recent monitoring results from this workspace.
           </DialogDescription>
         </DialogHeader>
         {!!unread && (
           <button className="secondary-button" onClick={() => void read()}>
-            Mark all read
+            {t("Mark all read")}
           </button>
         )}
         {error && <p role="alert">{error}</p>}

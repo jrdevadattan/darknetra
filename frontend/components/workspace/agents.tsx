@@ -1,4 +1,5 @@
 "use client";
+import { useLanguage } from "./language";
 import { useState } from "react";
 import {
   Check,
@@ -65,6 +66,7 @@ function TimelineStep({
   step,
   ...options
 }: { step: Activity } & SourceOptions) {
+  const { t } = useLanguage();
   const view = activityPresentation(step);
   const [open, setOpen] = useState(
     step.kind === "update" || view.state === "working",
@@ -125,7 +127,7 @@ function TimelineStep({
               ) : (
                 <Clock3 size={12} />
               )}
-              {view.status}
+              {t(view.status)}
             </span>
             <ChevronDown size={14} />
           </span>
@@ -198,6 +200,7 @@ function SpecialistCard({
   timeline,
   ...options
 }: { agent: SpecialistAgent; timeline: boolean } & SourceOptions) {
+  const { t } = useLanguage();
   const [open, setOpen] = useState(true);
   return (
     <article className="specialist-card" data-agent-id={agent.id}>
@@ -225,7 +228,7 @@ function SpecialistCard({
             ) : (
               <CircleAlert size={12} />
             )}{" "}
-            {labels[agent.status]}
+            {t(labels[agent.status])}
           </span>
           <ChevronDown size={14} className={open ? "" : "collapsed"} />
         </button>

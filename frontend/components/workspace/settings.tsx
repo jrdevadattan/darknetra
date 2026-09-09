@@ -1,4 +1,5 @@
 "use client";
+import { useLanguage } from "./language";
 import { useState } from "react";
 import { useTheme } from "next-themes";
 import {
@@ -14,6 +15,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ArchivedChats } from "./archived-chats";
 import { NotificationSettings } from "./notifications";
 import { IntegrationSettings } from "./integration-settings";
+import { LanguageSettings } from "./language";
 import {
   Dialog,
   DialogContent,
@@ -32,43 +34,49 @@ export function WorkspaceSettings({
   onRestore: (chat: Chat) => Promise<void>;
   onOpen: (chat: Chat) => void;
 }) {
+  const { t } = useLanguage();
   const { theme, setTheme } = useTheme();
   const [open, setOpen] = useState(false);
   const archiveCount = data.chats.filter((chat) => chat.archivedAt).length;
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <button className="icon-button" aria-label="Settings" title="Settings">
+        <button
+          className="icon-button"
+          aria-label={t("Settings")}
+          title={t("Settings")}
+        >
           <Settings size={18} />
         </button>
       </DialogTrigger>
       <DialogContent className="settings-dialog">
         <DialogHeader>
-          <DialogTitle>Settings</DialogTitle>
+          <DialogTitle>{t("Settings")}</DialogTitle>
           <DialogDescription>
             Make this workspace feel like yours.
           </DialogDescription>
         </DialogHeader>
         <Tabs defaultValue="general" className="settings-tabs">
-          <TabsList aria-label="Settings sections">
+          <TabsList aria-label={t("Settings sections")}>
             <TabsTrigger value="general">
               <SlidersHorizontal size={15} />
-              General
+              {t("General")}
             </TabsTrigger>
             <TabsTrigger value="archived">
               <Archive size={15} />
-              Archived chats
+              {t("Archived chats")}
               <span className="archive-count">{archiveCount}</span>
             </TabsTrigger>
           </TabsList>
           <TabsContent value="general" className="settings-general">
+            <LanguageSettings />
             <fieldset className="theme-settings">
-              <legend>Appearance</legend>
+              <legend>{t("Appearance")}</legend>
               <div className="theme-options">
                 {[
-                  { value: "light", label: "Light", Icon: Sun },
-                  { value: "dark", label: "Dark", Icon: Moon },
-                  { value: "system", label: "System", Icon: Monitor },
+                  { value: "light", label: t("Light"), Icon: Sun },
+                  { value: "dark", label: t("Dark"), Icon: Moon },
+                  { value: "system", label: t("System"), Icon: Monitor },
                 ].map(({ value, label, Icon }) => (
                   <label
                     key={value}

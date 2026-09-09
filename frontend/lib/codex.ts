@@ -26,6 +26,7 @@ import { updateAgents, enrichAgentNames, settleAgents } from "./agents";
 import investigators from "../skills/darknetra-osint/references/investigators.json";
 import { registerChatMonitor } from "./monitor-intent";
 import { finishMonitor } from "./monitors";
+import { languageInfo, languageInstructions } from "./languages";
 import {
   commandLabel,
   commandTarget,
@@ -334,6 +335,7 @@ export async function startRun(
     saved = await mutateWorkspace((data) => {
       const chat = data.chats.find((item) => item.id === chatId);
       if (!chat) throw new Error("Chat not found");
+      message.language = languageInfo(data.preferences?.language).code;
       if (chat.archivedAt && options?.monitorFromChat)
         throw new Error("Restore this archived chat before sending a message.");
       if (
@@ -348,6 +350,7 @@ export async function startRun(
         {
           id: randomUUID(),
           role: "user",
+          language: message.language,
           text: text.trim(),
           at: new Date().toISOString(),
           status: "done",
@@ -523,7 +526,7 @@ export async function startRun(
         1,
         0,
         "-c",
-        `developer_instructions=${JSON.stringify(instructions + (saved.board ? "\n\nThis turn is a case-board illustration request, not new research. Use the built-in image_gen tool (and its imagegen skill) to create the requested raster image. Do not substitute SVG, HTML, Python or a text-only plan. Use only the supplied case snapshot and attached case image references. Do not fetch other sources or run investigative checks, metadata checks, monitoring or subagents during this illustration turn. Generated content is a visual draft, never evidence. If ImageGen fails or is unavailable, state that accurately; do not claim an image exists." : "") + (mode === "netra" ? NETRA_INSTRUCTIONS : "") + (message.monitoring ? `\n\nVerified scheduling result for this user message: ${JSON.stringify(message.monitoring)}. Acknowledge this actual result briefly. If monitoring started, perform the initial check now; later checks are handled by the saved schedule. If it was not started, explain the missing detail without claiming ongoing work.` : ""))}`,
+        `developer_instructions=${JSON.stringify(instructions + languageInstructions(message.language) + (saved.board ? "\n\nThis turn is a case-board illustration request, not new research. Use the built-in image_gen tool (and its imagegen skill) to create the requested raster image. Do not substitute SVG, HTML, Python or a text-only plan. Use only the supplied case snapshot and attached case image references. Do not fetch other sources or run investigative checks, metadata checks, monitoring or subagents during this illustration turn. Generated content is a visual draft, never evidence. If ImageGen fails or is unavailable, state that accurately; do not claim an image exists." : "") + (mode === "netra" ? NETRA_INSTRUCTIONS : "") + (message.monitoring ? `\n\nVerified scheduling result for this user message: ${JSON.stringify(message.monitoring)}. Acknowledge this actual result briefly. If monitoring started, perform the initial check now; later checks are handled by the saved schedule. If it was not started, explain the missing detail without claiming ongoing work.` : ""))}`,
       );
       const child = spawn(process.env.CODEX_BIN || "codex", args, {
         cwd: directory,
