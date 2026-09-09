@@ -233,6 +233,7 @@ export function SourceCard({
           <small>
             {url ? siteName(url) : "Case file"} ·{" "}
             {sourceStates[source.status] || source.status}
+            {source.reviewNeeded ? " · Needs review" : ""}
           </small>
         </span>
       </button>

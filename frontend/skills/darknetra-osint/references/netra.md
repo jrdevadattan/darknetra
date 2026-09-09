@@ -12,7 +12,7 @@ Use actual native subagents, at most two concurrently. Each assignment includes 
 
 ## Source discipline
 
-Run `status` before external research. Use native web discovery, Robin, page/feed readers and archives first. Preserve each helper's separate JSON output so the UI can record URLs, retrieval times, excerpts and hashes when supplied. Do not invent missing timestamps or hashes. Review no more than 20 relevant pages across all specialists per request, with no more than two attempts per source unless its condition changes. Stop earlier when the scope is answered or sources are unavailable. Apify remains the existing bounded backup for an actually failed/incomplete clearnet read.
+Run `status` before external research. Use native web discovery, Robin, page/feed readers and archives first. Preserve each helper's separate JSON output so the UI can record URLs, retrieval times, excerpts and hashes when supplied. Do not invent missing timestamps or hashes. Review no more than 60 relevant pages across all specialists per user turn, including all site-review batches and direct page reads, with no more than two attempts per source unless its condition changes. Stop earlier when the scope is answered or sources are unavailable. Apify remains the existing bounded backup for an actually failed/incomplete clearnet read.
 
 Use only public-source reads and supplied files. No logins, account creation, messages, purchases, bidding, CAPTCHA solving, access bypasses, scanning, exploitation, infiltration or deanonymization. Do not provide purchasing paths, vendor ratings or transaction instructions. If a page may contain child sexual abuse material, do not retrieve or reproduce it; use an existing official report/reference for human review instead.
 

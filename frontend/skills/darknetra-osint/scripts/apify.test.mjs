@@ -1,5 +1,6 @@
 import { test, expect, vi } from "vitest";
 import { EventEmitter } from "node:events";
+import { createHash } from "node:crypto";
 import {
   apifyPage,
   apifyStatus,
@@ -83,6 +84,8 @@ test("one fixed bounded Actor launch yields a timestamped attributed source with
     maxRequestRetries: 0,
     maxSessionRotations: 0,
     proxyConfiguration: { useApifyProxy: true },
+    htmlTransformer: "none",
+    removeElementsCssSelector: "script, style, noscript, template, svg",
     summarize: false,
   });
   expect(result).toMatchObject({
@@ -91,12 +94,88 @@ test("one fixed bounded Actor launch yields a timestamped attributed source with
     url: page.url,
     runId: run.id,
     fetchedAt: page.crawl.loadedTime,
+    truncated: false,
+    extraction: {
+      engine: "cheerio",
+      htmlTransformer: "none",
+      javascriptRendered: false,
+      contentCharacters: page.text.length,
+      returnedCharacters: page.text.length,
+    },
   });
   expect(result.contentSha256).toMatch(/^[a-f0-9]{64}$/);
   expect(JSON.stringify(result)).not.toContain(key);
   expect(calls.every((c) => c.token === key && !c.path.includes(key))).toBe(
     true,
   );
+});
+
+test("broader HTML extraction preserves the bounded read-only backup payload", () => {
+  expect(apifyInput(page.url)).toEqual({
+    startUrls: [{ url: page.url }],
+    crawlerType: "cheerio",
+    maxCrawlDepth: 0,
+    maxCrawlPages: 1,
+    maxResults: 1,
+    initialConcurrency: 1,
+    maxConcurrency: 1,
+    maxRequestRetries: 0,
+    maxSessionRotations: 0,
+    requestTimeoutSecs: 30,
+    proxyConfiguration: { useApifyProxy: true },
+    respectRobotsTxtFile: true,
+    useSitemaps: false,
+    useLlmsTxt: false,
+    keepUrlFragments: false,
+    initialCookies: [],
+    customHttpHeaders: {},
+    signHttpRequests: false,
+    ignoreHttpsErrors: false,
+    removeCookieWarnings: false,
+    clickElementsCssSelector: "",
+    maxScrollHeightPixels: 0,
+    saveFiles: false,
+    saveContentTypes: "",
+    saveScreenshots: false,
+    saveHtml: false,
+    saveHtmlAsFile: false,
+    saveMarkdown: true,
+    htmlTransformer: "none",
+    removeElementsCssSelector: "script, style, noscript, template, svg",
+    summarize: false,
+    debugMode: false,
+    debugLog: false,
+    storeSkippedUrls: false,
+  });
+});
+
+test("text bounds and hashes describe the selected text or Markdown, with JavaScript gaps explicit", async () => {
+  const long =
+    `SYNTHETIC source section\n${"SYNTHETIC content. ".repeat(1000)}`.trim();
+  for (const fields of [
+    { text: `  ${long}  `, markdown: "SYNTHETIC unused Markdown" },
+    { text: " \n ", markdown: `  ${long}  ` },
+    { text: 42, markdown: `  ${long}  ` },
+  ]) {
+    const result = await apifyPage(page.url, "incomplete-page", {
+      env,
+      lookup,
+      request: async (_path, _token, input) =>
+        input ? { data: run } : [{ ...page, ...fields }],
+    });
+    expect(result.truncated).toBe(true);
+    expect(result.extraction).toMatchObject({
+      contentCharacters: long.length,
+      returnedCharacters: 16000,
+      javascriptRendered: false,
+    });
+    expect(result.text).toBe(`${result.scope}\n\n${long.slice(0, 16000)}`);
+    expect(result.contentSha256).toBe(
+      createHash("sha256").update(long.slice(0, 16000)).digest("hex"),
+    );
+    expect(result.scope).toContain("JavaScript was not rendered");
+    expect(result.scope).toContain("user-supplied rendered page export");
+  }
 });
 
 test("failed, empty, cross-origin and malformed responses never become successful reads or new launches", async () => {

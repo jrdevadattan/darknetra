@@ -21,7 +21,19 @@ export function activityPresentation(step: Activity) {
     ? "working"
     : ["failed", "error", "unverified", "stopped"].includes(step.status) ||
         /^This check could not be completed/.test(step.result || "") ||
-        step.sources?.some((source) => source.status === "unavailable")
+        step.sources?.some(
+          (source) => source.status === "unavailable" || source.reviewNeeded,
+        ) ||
+        !!(
+          step.coverage &&
+          (step.coverage.failed ||
+            step.coverage.skipped ||
+            step.coverage.pending ||
+            step.coverage.inventoriesTruncated ||
+            step.coverage.frontierTruncated ||
+            step.coverage.outputTruncated ||
+            step.coverage.omittedRecords)
+        )
       ? "attention"
       : ["completed", "done"].includes(step.status)
         ? "complete"

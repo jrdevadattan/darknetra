@@ -9,6 +9,19 @@ export type Activity = {
   result?: string;
   sources?: RunSource[];
   targetUrl?: string;
+  coverage?: {
+    attempted: number;
+    retrieved: number;
+    failed: number;
+    skipped: number;
+    pending: number;
+    complete: false;
+    stopReason?: string;
+    inventoriesTruncated?: number;
+    frontierTruncated?: boolean;
+    outputTruncated?: boolean;
+    omittedRecords?: number;
+  };
 };
 export type RunSource = {
   id: string;
@@ -27,7 +40,9 @@ export type RunSource = {
   at?: string;
   excerpt?: string;
   parentId?: string;
+  parentRelation?: "lists" | "links to" | "has text section";
   favicon?: string;
+  reviewNeeded?: boolean;
 };
 export type ChatAttachment = { name: string; label: string; size: number };
 export type SpecialistAgent = {

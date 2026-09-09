@@ -1,0 +1,11 @@
+# Public Bitcoin transaction review
+
+Run `wallet-review bitcoin <mainnet-address> [1–25]` only for a supplied or explicitly case-relevant address whose network is known. Other networks are unsupported; do not silently treat them as Bitcoin. Address checksums are validated before network requests.
+
+The helper makes four public Blockstream Esplora reads: address statistics, the first confirmed transaction page, bounded unconfirmed transactions, and the current chain tip. Confirmed pages contain up to 25 records; the unconfirmed endpoint returns up to 50. The result retains at most the selected transaction limit, with omitted-record counts and coverage gaps. It never claims an entire history. [Official Esplora API documentation](https://github.com/Blockstream/esplora/blob/master/API.md).
+
+Amounts retain integer satoshis and exact BTC decimal strings. Each transaction cites its actual API source, transaction ID, input references, outputs, confirmation status and block time. Explorer links are references; those pages were not fetched. An address's input value, output value and balance change are distinct. Do not describe transaction-wide fees as the address's fee or allocate mixed inputs to specific outputs. On-chain co-occurrence does not establish common ownership or personal identity.
+
+The API provides no exchange attribution or KYC. Preserve any independently supplied attribution claim with its provider and source. A possible exchange lead can suggest an authorized human records or preservation inquiry to the exchange's official legal/compliance channel, retaining network, transaction ID, output index, address, amount and UTC time. Connecting a wallet cannot reveal KYC. No records request is sent automatically.
+
+The ML status is explicitly `not_ready`: this app has no validated extractor for the model's 102 Elliptic-compatible transaction features and directed graph context. Ask the model/data team for an appropriate input file; then use `ml-schema` and `ml-predict`. Never invent feature values, pad them with zeros, or substitute raw amounts for opaque training features. Independently analyze the cited records and acknowledge the model's limits even when a compatible file is available.

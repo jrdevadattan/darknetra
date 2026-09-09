@@ -202,6 +202,10 @@ export function apifyInput(url) {
     saveHtml: false,
     saveHtmlAsFile: false,
     saveMarkdown: true,
+    // Keep source sections such as navigation, contact details and notices.
+    // The default article transformer can discard them on non-article pages.
+    htmlTransformer: "none",
+    removeElementsCssSelector: "script, style, noscript, template, svg",
     summarize: false,
     debugMode: false,
     debugLog: false,
@@ -318,7 +322,10 @@ export async function apifyPage(value, reason, options = {}) {
       "POLICY_DENIED",
       "The backup page changed origin or was not publicly readable. No source has been accepted.",
     );
-  const content = clean(item.text, 16000) || clean(item.markdown, 16000);
+  const fullContent =
+    clean(item.text, Number.MAX_SAFE_INTEGER) ||
+    clean(item.markdown, Number.MAX_SAFE_INTEGER);
+  const content = fullContent.slice(0, 16000);
   if (content.length < 30)
     throw fail(
       "UPSTREAM_UNAVAILABLE",
@@ -331,7 +338,7 @@ export async function apifyPage(value, reason, options = {}) {
       "Apify did not provide a valid retrieval time.",
     );
   const scope =
-    "Public-page content retrieved by the Apify backup reader. Source statements remain unverified; compare with independent records.";
+    "Public-page HTML content retrieved by the Apify backup reader. JavaScript was not rendered; dynamically loaded content may be absent. A user-supplied rendered page export can be reviewed to address that gap. Source statements remain unverified; compare with independent records.";
   return redact(
     {
       provider: "apify",
@@ -351,7 +358,14 @@ export async function apifyPage(value, reason, options = {}) {
           ? run.usageTotalUsd
           : null,
       contentSha256: createHash("sha256").update(content).digest("hex"),
-      truncated: (item.text || item.markdown || "").trim().length > 16000,
+      truncated: fullContent.length > content.length,
+      extraction: {
+        engine: "cheerio",
+        htmlTransformer: "none",
+        javascriptRendered: false,
+        contentCharacters: fullContent.length,
+        returnedCharacters: content.length,
+      },
       scope,
       text: `${scope}\n\n${content}`,
     },

@@ -63,6 +63,72 @@ test("unsuccessful results stay visible as attention even when their command com
   ).toBe("Completed");
 });
 
+test("partial site coverage and recorded review flags remain visible after a completed command", () => {
+  const step: Activity = {
+    id: "SYNTHETIC-bounded-review",
+    label: "Reviewing linked pages",
+    status: "completed",
+    coverage: {
+      attempted: 2,
+      retrieved: 2,
+      failed: 0,
+      skipped: 0,
+      pending: 3,
+      complete: false,
+    },
+  };
+  expect(activityPresentation(step).status).toBe("Needs attention");
+  expect(
+    activityPresentation({
+      ...step,
+      coverage: { ...step.coverage!, pending: 0 },
+    }).status,
+  ).toBe("Completed");
+  expect(
+    activityPresentation({
+      ...step,
+      coverage: undefined,
+      sources: [
+        {
+          id: "SYNTHETIC-flag",
+          title: "SYNTHETIC reference",
+          kind: "page",
+          status: "retrieved",
+          reviewNeeded: true,
+        },
+      ],
+    }).status,
+  ).toBe("Needs attention");
+});
+
+test("omitted output and discovery caps need attention even without failed or pending reads", () => {
+  const step: Activity = {
+    id: "SYNTHETIC-capped-review",
+    label: "Reviewing linked pages",
+    status: "completed",
+    coverage: {
+      attempted: 1,
+      retrieved: 1,
+      failed: 0,
+      skipped: 0,
+      pending: 0,
+      complete: false,
+    },
+  };
+  for (const limit of [
+    { inventoriesTruncated: 1 },
+    { frontierTruncated: true },
+    { outputTruncated: true },
+    { omittedRecords: 1 },
+  ])
+    expect(
+      activityPresentation({
+        ...step,
+        coverage: { ...step.coverage!, ...limit },
+      }).status,
+    ).toBe("Needs attention");
+});
+
 test("filters find sources and investigators and missing or invalid times produce no invented duration", () => {
   const step: Activity = {
     id: "SYNTHETIC-read",

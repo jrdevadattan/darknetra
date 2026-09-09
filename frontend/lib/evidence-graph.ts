@@ -82,9 +82,14 @@ export function buildEvidenceGraph(
             ? "returned reference"
             : source.status === "analysed"
               ? "examined"
-              : "retrieved",
+              : source.status === "retrieved"
+                ? "retrieved"
+                : source.status === "unavailable"
+                  ? "retrieval failed"
+                  : "not retrieved",
         );
-        if (source.parentId) addEdge(source.parentId, source.id, "lists");
+        if (source.parentId)
+          addEdge(source.parentId, source.id, source.parentRelation || "lists");
       }
     }
   }

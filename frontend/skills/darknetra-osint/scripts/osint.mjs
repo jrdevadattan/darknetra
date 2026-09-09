@@ -20,6 +20,11 @@ import {
   providerLookup,
 } from "./providers.mjs";
 import { load } from "cheerio";
+import { parsePage } from "./page.mjs";
+export { parsePage } from "./page.mjs";
+import { siteReview } from "./site-review.mjs";
+import { walletReview } from "./wallet.mjs";
+import { responseBody } from "./response-body.mjs";
 import { SocksProxyAgent } from "socks-proxy-agent";
 
 const MAX_BYTES = 1_000_000;
@@ -51,8 +56,20 @@ export async function fetchSource(
   viaTor = false,
   iconOrigin,
   image = false,
+  constraints = {},
 ) {
   const url = publicUrl(value);
+  if (
+    (constraints.allowedOrigin && url.origin !== constraints.allowedOrigin) ||
+    (constraints.allowedHostname &&
+      url.hostname !== constraints.allowedHostname) ||
+    (constraints.requireHttps && url.protocol !== "https:")
+  )
+    throw fail(
+      "POLICY_DENIED",
+      "The page redirects outside this public-site review.",
+    );
+  constraints.signal?.throwIfAborted();
   if (iconOrigin && url.origin !== iconOrigin)
     throw fail("POLICY_DENIED", "Site icons must remain on the source origin.");
   const onion = url.hostname.endsWith(".onion");
@@ -88,15 +105,19 @@ export async function fetchSource(
           : {}),
         headers: {
           "User-Agent": "DARKNETRA-Public-Research/1.0",
+          "Accept-Encoding": "identity",
           Accept: image
             ? "image/*,application/octet-stream"
             : iconOrigin
               ? "image/png,image/x-icon,image/webp,image/jpeg,image/gif"
               : "text/html,application/json,application/rss+xml,application/atom+xml,text/plain,application/xml",
         },
-        signal: AbortSignal.timeout(
-          iconOrigin ? (onion ? 6000 : 4000) : onion ? 40000 : 20000,
-        ),
+        signal: AbortSignal.any([
+          AbortSignal.timeout(
+            iconOrigin ? (onion ? 6000 : 4000) : onion ? 40000 : 20000,
+          ),
+          ...(constraints.signal ? [constraints.signal] : []),
+        ]),
       },
       (res) => {
         const chunks = [];
@@ -115,16 +136,22 @@ export async function fetchSource(
           else chunks.push(chunk);
         });
         res.on("error", reject);
-        res.on("end", () =>
-          resolve({
-            status: res.statusCode,
-            headers: res.headers,
-            body:
-              iconOrigin || image
-                ? Buffer.concat(chunks)
-                : Buffer.concat(chunks).toString("utf8"),
-          }),
-        );
+        res.on("end", () => {
+          try {
+            resolve({
+              status: res.statusCode,
+              headers: res.headers,
+              body: responseBody(
+                Buffer.concat(chunks),
+                res.headers,
+                iconOrigin ? 32768 : image ? 8 * 1024 * 1024 : MAX_BYTES,
+                Boolean(iconOrigin || image),
+              ),
+            });
+          } catch (error) {
+            reject(error);
+          }
+        });
       },
     );
     request.on("error", reject);
@@ -138,11 +165,18 @@ export async function fetchSource(
       viaTor || onion,
       iconOrigin,
       image,
+      constraints,
     );
   }
   if (response.status !== 200)
     throw fail(
-      "UPSTREAM_UNAVAILABLE",
+      response.status === 429
+        ? "RATE_LIMITED"
+        : [401, 403].includes(response.status)
+          ? "ACCESS_DENIED"
+          : response.status === 404
+            ? "NOT_FOUND"
+            : "UPSTREAM_UNAVAILABLE",
       `Source returned HTTP ${response.status}.`,
     );
   const mime = response.headers["content-type"] || "";
@@ -270,103 +304,6 @@ export async function robin(query, limit) {
     ),
     { attempts: warnings },
   );
-}
-
-export function parsePage(source) {
-  const $ = load(source.body);
-  $("script,style,noscript,template,svg,form").remove();
-  const title = clean($("title").text(), 300);
-  const main = $("main,article").first();
-  const text = clean(
-    source.mime.includes("html")
-      ? main.length
-        ? main.text()
-        : $.root().text()
-      : source.body,
-    Number.MAX_SAFE_INTEGER,
-  );
-  const base = publicUrl(source.url);
-  const found = new Map();
-  if (source.mime.includes("html")) {
-    // Only explicit anchors from this response; never invent or fetch destinations.
-    // Resolve against the retrieved URL, not an untrusted cross-origin <base> tag.
-    for (const element of $("a[href]").toArray()) {
-      const href = ($(element).attr("href") || "").trim();
-      if (!href || href.startsWith("#")) continue;
-      try {
-        const url = publicUrl(new URL(href, base).href);
-        if (url.href === base.href || found.has(url.href)) continue;
-        found.set(url.href, {
-          url: url.href,
-          title: clean($(element).text(), 180) || url.hostname,
-          sameSite: url.hostname === base.hostname,
-          targetFetched: false,
-        });
-      } catch {
-        // Non-web, malformed and non-public locators are not actionable links.
-      }
-    }
-  }
-  const allLinks = [...found.values()];
-  const sameSite = allLinks.filter((link) => link.sameSite);
-  const external = allLinks.filter((link) => !link.sameSite);
-  const links = [...sameSite, ...external].slice(0, 100);
-  const foundImages = new Map();
-  if (source.mime.includes("html")) {
-    const addImage = (href, title) => {
-      if (!href || /^(?:data:|blob:)/i.test(href)) return;
-      try {
-        const url = publicUrl(new URL(href, base).href);
-        if (!foundImages.has(url.href))
-          foundImages.set(url.href, {
-            url: url.href,
-            title: clean(title || "Referenced image", 180),
-            sameSite: url.hostname === base.hostname,
-            targetFetched: false,
-          });
-      } catch {
-        /* Only usable explicit public image references. */
-      }
-    };
-    for (const element of $(
-      "img, picture source, meta[property='og:image'], meta[name='twitter:image']",
-    ).toArray()) {
-      const el = $(element);
-      const title = el.attr("alt") || el.attr("title");
-      for (const attr of ["src", "data-src", "content"])
-        addImage(el.attr(attr), title);
-      const srcset = el.attr("srcset") || "";
-      if (!/data:/i.test(srcset))
-        for (const candidate of srcset.split(","))
-          addImage(candidate.trim().split(/\s+/)[0], title);
-    }
-  }
-  const images = [...foundImages.values()].slice(0, 40);
-  return {
-    url: source.url,
-    fetchedAt: source.fetchedAt,
-    title,
-    text: text.slice(0, 16000),
-    textTruncated: text.length > 16000,
-    links,
-    images,
-    imageSummary: {
-      unique: foundImages.size,
-      returned: images.length,
-      truncated: foundImages.size > images.length,
-      scope:
-        "Explicit image references in this response only. Image bytes and metadata have not been read; dynamic images may be absent.",
-    },
-    linkSummary: {
-      unique: allLinks.length,
-      sameSite: sameSite.length,
-      external: external.length,
-      returned: links.length,
-      truncated: allLinks.length > links.length,
-      scope:
-        "Links in this retrieved response only. Listed destinations have not been read; this is not a whole-site inventory.",
-    },
-  };
 }
 
 export async function imageMetadata(
@@ -549,6 +486,10 @@ async function status() {
       ...providerCommands,
       "robin",
       "page",
+      "page-section",
+      "page-links",
+      "site-review",
+      "wallet-review",
       "feed",
       "wayback",
       "tor-check",
@@ -596,7 +537,39 @@ function safeError(error) {
     : "Source connection failed or timed out.";
 }
 
-export async function main([command, value, count]) {
+export async function main([command, value, count, extra]) {
+  if (command === "site-review")
+    return siteReview(value, count, { reader: fetchSource });
+  if (command === "wallet-review")
+    return walletReview(value, count, {
+      fetchSource,
+      limit: extra === undefined ? 25 : Number(extra),
+    });
+  if (["page", "page-section", "page-links"].includes(command)) {
+    if (
+      command !== "page" &&
+      (!Number.isInteger(Number(count)) ||
+        Number(count) < 0 ||
+        Number(count) > (command === "page-section" ? 1000000 : 10000))
+    )
+      throw fail(
+        "VALIDATION",
+        "Provide a valid nonnegative section or link offset.",
+      );
+    const source = await fetchSource(value);
+    const parsed = parsePage(
+      source,
+      command === "page-section"
+        ? { offset: Number(count) }
+        : command === "page-links"
+          ? { linkOffset: Number(count) }
+          : {},
+    );
+    return {
+      ...parsed,
+      favicon: command === "page" ? await faviconFor(source) : undefined,
+    };
+  }
   if (command === "image-metadata") return imageMetadata(value);
   if (command === "telegram-status") return telegramStatus();
   if (command === "telegram-read") return telegramRead(value);
@@ -665,10 +638,6 @@ export async function main([command, value, count]) {
     throw fail("VALIDATION", "Result limit must be 1–10.");
   if (command === "status") return status();
   if (command === "robin") return robin(value, limit);
-  if (command === "page") {
-    const source = await fetchSource(value);
-    return { ...parsePage(source), favicon: await faviconFor(source) };
-  }
   if (command === "feed") return parseFeed(await fetchSource(value), limit);
   if (command === "wayback") {
     const url = publicUrl(value);
@@ -685,7 +654,7 @@ export async function main([command, value, count]) {
   }
   throw fail(
     "VALIDATION",
-    "Use status, apify-search <generic-query> [1–10], apify-actor <owner/name>, apify-status, apify-page <public-url> <backup-reason>, ml-status, ml-schema, ml-predict <uploaded-json-file>, integrations, catalog [name], flashpoint <indicator> [1–10], recorded-future <domain-or-public-ip>, chainalysis <wallet-address>, tor-check, robin <query> [1–10], page <url>, image-metadata <image-url>, feed <url> [1–10], wayback <url>, file-info <file>, file-text <file>, metadata <file>, pcap-summary <file>, or yara <file> <rules>.",
+    "Use status, site-review <url> [1–60], page <url>, page-section <url> <text-offset>, page-links <url> <link-offset>, wallet-review bitcoin <address> [1–25], apify-search <generic-query> [1–10], apify-actor <owner/name>, apify-status, apify-page <public-url> <backup-reason>, ml-status, ml-schema, ml-predict <uploaded-json-file>, integrations, catalog [name], flashpoint <indicator> [1–10], recorded-future <domain-or-public-ip>, chainalysis <wallet-address>, tor-check, robin <query> [1–10], image-metadata <image-url>, feed <url> [1–10], wayback <url>, file-info <file>, file-text <file>, metadata <file>, pcap-summary <file>, or yara <file> <rules>.",
   );
 }
 

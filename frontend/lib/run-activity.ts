@@ -31,7 +31,7 @@ export function faviconData(value: unknown) {
 export function commandTarget(command = "") {
   return sourceUrl(
     command.match(
-      /osint\.mjs["']?\s+(?:page|feed|wayback|apify-page|image-metadata)\s+["']?(https?:\/\/[^\s"'<>]+)/,
+      /osint\.mjs["']?\s+(?:page|page-section|site-review|feed|wayback|apify-page|image-metadata)\s+["']?(https?:\/\/[^\s"'<>]+)/,
     )?.[1],
   );
 }
@@ -40,6 +40,9 @@ export function commandLabel(command = "") {
   const helper = command.match(/osint\.mjs["']?\s+([\w-]+)/)?.[1];
   const labels: Record<string, string> = {
     page: "Reading a source",
+    "page-section": "Reading a source section",
+    "site-review": "Reviewing linked pages",
+    "wallet-review": "Reviewing public transactions",
     robin: "Checking public indexes",
     wayback: "Checking archive history",
     feed: "Reading published updates",
@@ -79,7 +82,7 @@ export function commandLabel(command = "") {
 export function helperResult(
   command: string,
   output?: string,
-): Pick<Activity, "result" | "sources"> {
+): Pick<Activity, "result" | "sources" | "coverage"> {
   if (!command.includes("osint.mjs") || !output || output.length > 1024 * 1024)
     return {};
   let parsed;
@@ -102,6 +105,8 @@ export function helperResult(
     };
   const d = parsed.data;
   if (parsed.ok !== true || !d || typeof d !== "object") return {};
+  if (d.analysis === "site-review") return siteReviewResult(d);
+  if (d.analysis === "wallet_review") return walletReviewResult(d);
   if (d.catalog === true && d.provider === "apify")
     return { result: short(d.text, 1500), sources: [] };
   const sources: RunSource[] = [];
@@ -140,9 +145,17 @@ export function helperResult(
       d.analysis === "metadata" ? "analysed" : "retrieved",
       d.text,
     );
-    if (d.analysis === "metadata" && /^[a-f\d]{64}$/i.test(d.sha256 || "")) {
-      sources[0].sha256 = d.sha256;
+    if (/^[a-f\d]{64}$/i.test(d.sha256 || "")) sources[0].sha256 = d.sha256;
+    if (d.analysis === "metadata") {
       sources[0].excerpt = short(d.text, 16000);
+    } else {
+      Object.assign(sources[0], pageDetails(d, sourceUrl(d.url)!));
+      if (Number.isSafeInteger(d.textOffset) && d.textOffset > 0) {
+        sources[0].parentId = sources[0].id;
+        sources[0].parentRelation = "has text section";
+        sources[0].id = `${sources[0].id}:text-offset:${d.textOffset}`;
+        sources[0].title = `${sources[0].title} · text offset ${d.textOffset}`;
+      }
     }
     sources[0].favicon = faviconData(d.favicon);
   } else if (Array.isArray(d.hits) && sourceUrl(d.source)) {
@@ -207,6 +220,348 @@ export function helperResult(
         : sources.length
           ? `${sources.filter((s) => s.status !== "listed").length} source record(s) read${sources.some((s) => s.status === "listed") ? `; ${sources.filter((s) => s.status === "listed").length} unverified reference(s) listed` : ""}.`
           : "Check completed. No source records were returned.",
+  };
+}
+
+function pageDetails(
+  page: Record<string, unknown>,
+  url: string,
+): Pick<RunSource, "excerpt" | "reviewNeeded"> {
+  const labels: Record<string, string> = {
+    wallet: "Wallet address",
+    "access-required": "Access required",
+    "payment-reference": "Payment reference",
+  };
+  const findings = Array.isArray(page.findings)
+    ? page.findings.slice(0, 40).flatMap((finding: Record<string, unknown>) => {
+        if (!finding || typeof finding !== "object") return [];
+        const label = labels[String(finding.kind)];
+        const findingUrl = sourceUrl(finding.sourceUrl);
+        const location = finding.location as
+          { line?: unknown; basis?: unknown } | undefined;
+        const line = location?.line;
+        if (
+          !label ||
+          finding.reviewStatus !== "needs_review" ||
+          !findingUrl ||
+          ![url, sourceUrl(page.requestedUrl)].includes(findingUrl) ||
+          !Number.isSafeInteger(line) ||
+          Number(line) < 1 ||
+          (location?.basis !== undefined &&
+            location.basis !== "extracted text") ||
+          typeof finding.excerpt !== "string"
+        )
+          return [];
+        return [
+          `${label} · Needs review\nSource: ${findingUrl}\nExtracted-text line ${line}: ${short(finding.excerpt, 700)}`,
+        ];
+      })
+    : [];
+  const extraction =
+    page.extraction && typeof page.extraction === "object"
+      ? (page.extraction as Record<string, unknown>)
+      : {};
+  const warnings = Array.isArray(extraction.warnings)
+    ? extraction.warnings
+        .filter((warning) => typeof warning === "string")
+        .slice(0, 8)
+        .map((warning) => short(warning, 350))
+    : [];
+  const nonnegative = (value: unknown) =>
+    Number.isSafeInteger(value) && Number(value) >= 0;
+  const next = nonnegative(page.nextOffset) ? page.nextOffset : undefined;
+  const text = short(page.text, 9000);
+  const section =
+    nonnegative(page.textOffset) && nonnegative(page.textLength)
+      ? `Recorded text offset: ${page.textOffset} of ${page.textLength} characters.${Number.isSafeInteger(page.startLine) && Number(page.startLine) > 0 ? ` Starts at extracted-text line ${page.startLine}.` : ""}${next !== undefined ? ` More text is available at offset ${next}.` : ""}`
+      : "";
+  const truncated =
+    page.textTruncated === true ||
+    (typeof page.text === "string" && page.text.length > text.length);
+  return {
+    excerpt: short(
+      [
+        findings.length
+          ? `Recorded references for review. Their presence does not establish wrongdoing.\n\n${findings.join("\n\n")}`
+          : "",
+        Array.isArray(page.findings) && page.findings.length > 40
+          ? "Review-flag display is limited to 40 entries."
+          : "",
+        page.findingsTruncated === true
+          ? "Review flags are truncated; additional references were omitted from this result."
+          : "",
+        section,
+        truncated ? "The recorded page text is truncated." : "",
+        extraction.renderedJavascript === false
+          ? "Client-side JavaScript was not executed; dynamically loaded content may be absent."
+          : "",
+        ...warnings,
+        typeof page.hashScope === "string"
+          ? `SHA-256 scope: ${short(page.hashScope, 300)}.`
+          : "",
+        findings.length ||
+        section ||
+        truncated ||
+        warnings.length ||
+        Object.keys(extraction).length ||
+        page.hashScope
+          ? `Retrieved text:\n${text}`
+          : text,
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+      18000,
+    ),
+    reviewNeeded:
+      findings.length > 0 ||
+      page.findingsTruncated === true ||
+      warnings.length > 0 ||
+      extraction.javascriptLikely === true ||
+      truncated ||
+      next !== undefined,
+  };
+}
+
+function siteReviewResult(
+  d: Record<string, unknown>,
+): Pick<Activity, "result" | "sources" | "coverage"> {
+  const sources: RunSource[] = [];
+  const pages = Array.isArray(d.pages) ? d.pages : [];
+  for (const page of pages.slice(0, 250)) {
+    if (!page || typeof page !== "object") continue;
+    const url = sourceUrl(page.url);
+    if (
+      !url ||
+      !["retrieved", "failed", "skipped", "pending"].includes(page.status)
+    )
+      continue;
+    const retrieved =
+      page.status === "retrieved" && typeof page.text === "string";
+    const parentUrl = sourceUrl(page.parentUrl);
+    const details = retrieved
+      ? pageDetails(page, url)
+      : {
+          excerpt: `${page.status === "failed" ? "Retrieval failed" : page.status === "skipped" ? "Skipped" : "Pending"}. This page was not retrieved or verified.${typeof page.reason === "string" ? ` ${short(page.reason, 500)}` : ""}`,
+          reviewNeeded: false,
+        };
+    sources.push({
+      id: `url:${url}`,
+      url,
+      title: short(page.title, 200) || new URL(url).hostname,
+      kind: retrieved ? "page" : "lead",
+      status: retrieved
+        ? "retrieved"
+        : page.status === "failed"
+          ? "unavailable"
+          : "referenced",
+      at:
+        retrieved &&
+        typeof page.fetchedAt === "string" &&
+        Number.isFinite(Date.parse(page.fetchedAt))
+          ? page.fetchedAt
+          : undefined,
+      ...details,
+      sha256:
+        retrieved && /^[a-f\d]{64}$/i.test(page.sha256 || "")
+          ? page.sha256
+          : undefined,
+      favicon: retrieved ? faviconData(page.favicon) : undefined,
+      parentId: parentUrl && parentUrl !== url ? `url:${parentUrl}` : undefined,
+      parentRelation: parentUrl && parentUrl !== url ? "links to" : undefined,
+    });
+  }
+  const supplied =
+    d.coverage && typeof d.coverage === "object"
+      ? (d.coverage as Record<string, unknown>)
+      : {};
+  const count = (key: string, fallback: number) =>
+    Number.isSafeInteger(supplied[key]) && Number(supplied[key]) >= 0
+      ? Math.min(Number(supplied[key]), 1000000)
+      : fallback;
+  const retrieved = sources.filter(
+    (source) => source.status === "retrieved",
+  ).length;
+  const failed = sources.filter(
+    (source) => source.status === "unavailable",
+  ).length;
+  const coverage: NonNullable<Activity["coverage"]> = {
+    attempted: count("attempted", retrieved + failed),
+    retrieved: count("retrieved", retrieved),
+    failed: count("failed", failed),
+    skipped: count(
+      "skipped",
+      pages.filter((page) => page?.status === "skipped").length,
+    ),
+    pending: count(
+      "pending",
+      pages.filter((page) => page?.status === "pending").length,
+    ),
+    complete: false,
+    stopReason: short(supplied.stopReason, 250) || undefined,
+    inventoriesTruncated: count("inventoriesTruncated", 0),
+    frontierTruncated: supplied.frontierTruncated === true,
+    outputTruncated: supplied.outputTruncated === true,
+    omittedRecords: count("omittedRecords", 0),
+  };
+  const limitations = [
+    coverage.inventoriesTruncated
+      ? `${coverage.inventoriesTruncated} page link inventories exceeded their limit; additional links were omitted.`
+      : "",
+    coverage.frontierTruncated
+      ? "The discovered-link list reached its limit; additional references were not retained."
+      : "",
+    coverage.outputTruncated || coverage.omittedRecords
+      ? `Output was truncated${coverage.omittedRecords ? `; ${coverage.omittedRecords} page records were omitted` : ""}. Coverage counts include records absent from this display.`
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return {
+    sources,
+    coverage,
+    result: `Public-page review: ${coverage.retrieved} retrieved, ${coverage.failed} failed, ${coverage.skipped} skipped, ${coverage.pending} pending (${coverage.attempted} attempted). This is a bounded review, not proof of complete website coverage.${coverage.stopReason ? ` Stopped: ${coverage.stopReason}.` : ""}${limitations ? ` ${limitations}` : ""}${pages.length > 250 ? " Source display limited to 250 records." : ""}`,
+  };
+}
+
+function walletReviewResult(
+  d: Record<string, unknown>,
+): Pick<Activity, "result" | "sources"> {
+  const sources: RunSource[] = [];
+  const summary = short(d.text, 12000);
+  const references = Array.isArray(d.sources) ? d.sources : [];
+  for (const reference of references.slice(0, 12)) {
+    if (!reference || typeof reference !== "object") continue;
+    const url = sourceUrl(reference.url);
+    if (
+      !url ||
+      typeof reference.fetchedAt !== "string" ||
+      !Number.isFinite(Date.parse(reference.fetchedAt))
+    )
+      continue;
+    sources.push({
+      id: `url:${url}`,
+      url,
+      title: `${short(d.network, 30) || "Public"} transaction data`,
+      kind: "index",
+      status: "retrieved",
+      at: reference.fetchedAt,
+      sha256: /^[a-f\d]{64}$/i.test(reference.contentSha256 || "")
+        ? reference.contentSha256
+        : undefined,
+      excerpt: summary,
+    });
+  }
+  const failures = Array.isArray(d.failures) ? d.failures : [];
+  for (const failure of failures.slice(0, 20)) {
+    if (!failure || typeof failure !== "object") continue;
+    const url = sourceUrl(failure.url);
+    if (!url) continue;
+    const reason = `Transaction data could not be used${typeof failure.code === "string" ? ` (${short(failure.code, 80)})` : ""}. This leaves a gap in the review.`;
+    const existing = sources.find((source) => source.url === url);
+    if (existing) {
+      existing.reviewNeeded = true;
+      existing.excerpt = `${reason}\n\n${existing.excerpt || ""}`;
+    } else {
+      sources.push({
+        id: `url:${url}`,
+        url,
+        title: "Unavailable transaction data",
+        kind: "lead",
+        status: "unavailable",
+        reviewNeeded: true,
+        excerpt: reason,
+      });
+    }
+  }
+  const explorer = sourceUrl(d.explorerUrl);
+  if (
+    explorer &&
+    sources.length &&
+    !sources.some((source) => source.url === explorer)
+  )
+    sources.push({
+      id: `url:${explorer}`,
+      url: explorer,
+      title: `Address explorer · ${short(d.address, 100)}`,
+      kind: "lead",
+      status: "referenced",
+      excerpt:
+        "Explorer reference for this public address. The explorer page was not retrieved; transaction data came from the recorded API sources. Address control and ownership remain unverified.",
+    });
+  const transactions = Array.isArray(d.transactions) ? d.transactions : [];
+  function amount(value: unknown) {
+    if (!value || typeof value !== "object") return "Not available";
+    const a = value as { satoshis?: unknown; btc?: unknown };
+    return typeof a.satoshis === "string" &&
+      /^-?\d{1,32}$/.test(a.satoshis) &&
+      typeof a.btc === "string" &&
+      /^-?\d{1,24}(?:\.\d{1,8})?$/.test(a.btc)
+      ? `${a.btc} BTC (${a.satoshis} satoshis)`
+      : "Not available";
+  }
+  for (const transaction of transactions.slice(0, 50)) {
+    if (
+      !transaction ||
+      typeof transaction !== "object" ||
+      !/^[a-f\d]{64}$/i.test(transaction.txid || "")
+    )
+      continue;
+    const url = sourceUrl(transaction.url);
+    const provenance = sourceUrl(transaction.sourceUrl);
+    const parent = sources.find(
+      (source) => source.status === "retrieved" && source.url === provenance,
+    );
+    if (!url || !parent) continue;
+    const status = transaction.status;
+    const confirmed = status?.confirmed === true;
+    const confirmations =
+      confirmed &&
+      Number.isSafeInteger(status.confirmations) &&
+      status.confirmations >= 0
+        ? ` · ${status.confirmations} confirmations`
+        : "";
+    const inputs = Array.isArray(transaction.inputs) ? transaction.inputs : [];
+    const outputs = Array.isArray(transaction.outputs)
+      ? transaction.outputs
+      : [];
+    const details = (items: Record<string, unknown>[], kind: string) =>
+      items
+        .slice(0, 20)
+        .map(
+          (item, index) =>
+            `${kind} ${index}: ${short(item?.address, 120) || "Address unavailable"} · ${amount(item?.amount)}`,
+        );
+    sources.push({
+      id: `url:${url}`,
+      url,
+      title: `Transaction · ${transaction.txid.slice(0, 12)}…`,
+      kind: "lead",
+      status: "referenced",
+      at: parent.at,
+      parentId: parent.id,
+      parentRelation: "lists",
+      excerpt: [
+        `Transaction record from ${provenance}. The linked explorer page was not retrieved.`,
+        `Transaction ID: ${transaction.txid}`,
+        `Status: ${confirmed ? "Confirmed" : "Unconfirmed"}${confirmations}`,
+        `Address received: ${amount(transaction.addressReceived)}`,
+        `Address spent: ${amount(transaction.addressSpent)}`,
+        `Address net: ${amount(transaction.addressNet)}`,
+        `Transaction fee: ${amount(transaction.fee)}`,
+        ...details(inputs, "Input"),
+        ...details(outputs, "Output"),
+        inputs.length > 20 || outputs.length > 20
+          ? "Input/output display limited to 20 entries each."
+          : "",
+        "Input/output co-occurrence does not establish a sender-to-recipient transfer or common ownership. Exchange attribution requires a cited provider record; KYC information is not public wallet data.",
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+    });
+  }
+  return {
+    sources,
+    result: `${short(d.text, 1300) || "Public transaction review completed."} ${sources.filter((source) => source.status === "retrieved").length} API source(s) retrieved; ${sources.filter((source) => source.parentId).length} transaction reference(s) recorded. Full-history coverage is not established.`,
   };
 }
 
