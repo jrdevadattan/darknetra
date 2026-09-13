@@ -70,6 +70,8 @@ The [tool registry](backend/darknetra/tools/registry.py) defines input and outpu
 | **Wayback Machine** | Look up archive availability for a public URL | Included in `wayback_lookup`; requires network access. |
 | **keys.openpgp.org** | Retrieve public keys by fingerprint | Included in `keyserver_lookup`; subject to case policy. |
 | **mempool.space** | Capture public Bitcoin address summaries | Included in `chain_lookup`; other chains need additional adapters. |
+| **OnionScan** | Fingerprint onion services: TLS cert attributes, headers, exposed paths, status pages | `onion_fingerprint` in the dark lane; requires the OnionScan binary (not bundled by default — see Known limitations). Captured through the OSINT_DARK gate with `tor_enabled` case policy. |
+| **crt.sh (certificate transparency)** | Match a TLS serial or SAN against clearnet domains in public CT logs | `clearnet_cert_match` in the surface lane; no API key required. Returns confidence labels: serial match = high, SAN overlap = medium. Subject to crt.sh rate limits. |
 | **MCP Python SDK** | Expose registered tools to compatible clients over stdio | Requires an existing case and a scoped, revocable service token. |
 
 For dependency pins and upstream licences, see [third_party/README.md](third_party/README.md).
@@ -79,6 +81,9 @@ For dependency pins and upstream licences, see [third_party/README.md](third_par
 - **Local embeddings:** install the `embed` extra and provision a compatible 1,024-dimensional model directory. Lexical search remains available without it.
 - **GNN research:** `classic_ml/` contains notebooks, predictors, and model artifacts. The backend adapter requires compatible assets in its expected runtime location and case ledger data; research files alone do not enable live assessments.
 - **Additional readers:** live Tor collection, Telegram collection, person lookup, and sanctions screening remain unavailable in this branch's backend. Imported chat exports can still serve as evidence.
+- **OnionScan binary:** `onion_fingerprint` is registered but returns `UNAVAILABLE` unless the `onionscan` binary is on the API container's PATH. To enable it, add an `onionscan` Docker Compose profile that installs the pinned Go binary from the [OnionScan releases](https://github.com/s-rah/onionscan), or `COPY` it into the API image.
+- **crt.sh rate limits:** `clearnet_cert_match` uses the public crt.sh API; high-volume case activity may encounter 429 responses, which the capture gate surfaces as `RATE_LIMITED`.
+- **Entity type schema:** Fingerprint and CT-match observations feed `extract_indicators` via the standard pipeline, so `ONION_LOCATOR` and `URL` entities are correlated automatically. Promoting these to first-class `INFRASTRUCTURE_FINGERPRINT` and `CLEARNET_MATCH` entity types requires a CHECK-constraint migration; raise in a PR when needed.
 - **Extraction models:** OCR, transcription, and trained NER require additional assets and integration. An unavailable check remains unknown in the output.
 
 ## Quick start

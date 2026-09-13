@@ -22,6 +22,8 @@ _INTEGRATIONS = {
     "keyserver_lookup": ("Public key lookup", "keyserver", "http_api"),
     "chain_lookup": ("Chain lookup", "chain", "http_api"),
     "delegate_task": ("Delegate to specialist", "darknetra", "internal"),
+    "onion_fingerprint": ("Onion infrastructure fingerprint", "onionscan", "subprocess"),
+    "clearnet_cert_match": ("Certificate transparency match", "crt_sh", "http_api"),
 }
 
 _SUMMARIES = {

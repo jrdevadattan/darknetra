@@ -16,6 +16,7 @@ from darknetra.tools.impl import delegation as delegation
 from darknetra.tools.impl import evidence as e
 from darknetra.tools.impl import research as research
 from darknetra.tools.impl import robin as robin
+from darknetra.tools.impl import infra as infra
 from darknetra.tools.impl import surface as s
 
 REGISTRY: dict[str, ToolSpec] = {}
@@ -314,6 +315,55 @@ for name, inp, impl, lane, source, role, tags, reason in [
             unavailable_reason=reason,
         )
     )
+
+register(
+    ToolSpec(
+        name="onion_fingerprint",
+        description=(
+            "Run OnionScan against an onion URL through the capture gate. "
+            "Returns TLS certificate attributes (CN, SAN, serial, issuer), "
+            "response headers, exposed paths, and status-page detection. "
+            "Requires the OnionScan binary; unavailable without it. "
+            "Failure is explicit; absence is not a clean result."
+        ),
+        input_model=infra.OnionfingerprintInput,
+        output_model=infra.OnionFingerprintOutput,
+        impl=infra.onion_fingerprint,
+        lane=Lane.DARK,
+        allowed_for=frozenset({R.CASE_LEAD, R.DARK_SCOUT}),
+        requires_network=True,
+        source_class="OSINT_DARK",
+        policy_tags=frozenset({"tor"}),
+        rate_key=Lane.DARK.value.lower(),
+        capture=True,
+        timeout_s=150,
+        unavailable_reason="OnionScan binary is not installed; add the onionscan Compose profile",
+    )
+)
+
+register(
+    ToolSpec(
+        name="clearnet_cert_match",
+        description=(
+            "Query crt.sh certificate transparency logs for clearnet domains "
+            "sharing a TLS serial number or SAN with an onion service. "
+            "Returns domain names with confidence labels: serial match = high, "
+            "SAN overlap = medium. Captured as immutable evidence before parsing. "
+            "Failure is explicit; absence is not a clean result."
+        ),
+        input_model=infra.ClearnetCertInput,
+        output_model=infra.ClearnetCertOutput,
+        impl=infra.clearnet_cert_match,
+        lane=Lane.SURFACE,
+        allowed_for=frozenset({R.CASE_LEAD, R.DARK_SCOUT}),
+        requires_network=True,
+        source_class="OSINT_SURFACE",
+        policy_tags=frozenset(),
+        rate_key=Lane.SURFACE.value.lower(),
+        capture=True,
+        timeout_s=60,
+    )
+)
 
 for name, inp, out, impl, lane, source, role, description in [
     (

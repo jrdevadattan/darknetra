@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import ast; ast.parse\\(open\\('backend/darknetra/tools/impl/infra.py'\\).read\\(\\)\\); print\\('infra.py OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('backend/darknetra/tools/registry.py'\\).read\\(\\)\\); print\\('registry.py OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('backend/tests/unit/test_infra_tools.py'\\).read\\(\\)\\); print\\('test_infra_tools.py OK'\\)\")",
+      "Bash(uv run *)",
+      "Bash(where uv *)",
+      "PowerShell(Get-Command *)",
+      "PowerShell(Test-Path *)"
+    ]
+  }
+}
